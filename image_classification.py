@@ -9,7 +9,7 @@ import json
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input
 import numpy as np
 
-image_dir = '/Users/jianzhangli/src/MobileNetV3/classBitmap_data'
+image_dir = '/Users/jianzhangli/src/BrickGame/classBitmap_data'
 classed_list = [ "beijing", "baicai", "baiping", "baiqiu", "baocai", "cao", "caoche", "chazi", "daocha", "fangzi", "futou", "hualan", "huapen", "huaping", "huluobo", "huotui", "huoyan", "jiandao", "jitui", "jiucai", "jiutong", "lajiao", "lingdang", "manjing", "maozi", "mianfen", "niupai", "qiezi", "qingjiao", "shoutao", "shuazi", "shuiguan", "shuihu", "shuipen", "shuzhuang", "tieqiao", "wandou", "xiantuan", "xihongshi", "xilanhua", "xinfeng", "xuezi", "yumi", "zhalan"]
 
 
