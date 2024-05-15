@@ -29,8 +29,8 @@ def copy_file(src, dst):
 
 
 if __name__ == '__main__':
-    src_image_dir = '/Users/jianzhangli/debug/classBitmap_data_origin'
-    dest_image_dir = '/Users/jianzhangli/debug/classBitmap_data'
+    src_image_dir = '/Users/jianzhangli/src/MobileNetV3/classBitmap_data_origin'
+    dest_image_dir = '/Users/jianzhangli/src/MobileNetV3/classBitmap_data'
     file_names = os.listdir(src_image_dir)
     for file_name in file_names:
         if not file_name.endswith('.png'):

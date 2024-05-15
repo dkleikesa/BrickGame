@@ -1,6 +1,5 @@
 import tensorflow as tf
 import os
-import pandas as pd
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import MobileNetV3Large
 from tensorflow.keras.models import Sequential
@@ -10,51 +9,23 @@ import json
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input
 import numpy as np
 
+image_dir = '/Users/jianzhangli/src/MobileNetV3/classBitmap_data'
+classed_list = [ "beijing", "baicai", "baiping", "baiqiu", "baocai", "cao", "caoche", "chazi", "daocha", "fangzi", "futou", "hualan", "huapen", "huaping", "huluobo", "huotui", "huoyan", "jiandao", "jitui", "jiucai", "jiutong", "lajiao", "lingdang", "manjing", "maozi", "mianfen", "niupai", "qiezi", "qingjiao", "shoutao", "shuazi", "shuiguan", "shuihu", "shuipen", "shuzhuang", "tieqiao", "wandou", "xiantuan", "xihongshi", "xilanhua", "xinfeng", "xuezi", "yumi", "zhalan"]
+
+
 def preprocess_images(img_height=224, img_width=224, batch_size=32):
     datagen = ImageDataGenerator(
         validation_split=0.2,  # 使用20%的数据作为验证集
         preprocessing_function = lambda x: tf.image.resize(x, [img_height, img_width])
     )
 
-    image_dir = '/Users/jianzhangli/debug/classBitmap_data'  # 图片所在的文件夹
-    # file_names = os.listdir(image_dir)
-    # data = {'filename': [], 'label': []}
-    # for file_name in file_names:
-    #     if not file_name.endswith('.png'):
-    #         continue
-    #     data['filename'].append(os.path.join(image_dir, file_name))
-    #     class_name = file_name.split('_')[0]  # 解析出类别标签
-    #     data['label'].append(class_name)
-    # df = pd.DataFrame(data)
-
-    # train_generator = datagen.flow_from_dataframe(
-    #     dataframe=df,
-    #     directory=image_dir,
-    #     x_col='filename',
-    #     y_col='label',
-    #     target_size=(img_height, img_width),
-    #     batch_size=batch_size,
-    #     class_mode='categorical',
-    #     subset='training'
-    # )
-    #
-    # validation_generator = datagen.flow_from_dataframe(
-    #     dataframe=df,
-    #     directory=image_dir,
-    #     x_col='filename',
-    #     y_col='label',
-    #     target_size=(img_height, img_width),
-    #     batch_size=batch_size,
-    #     class_mode='categorical',
-    #     subset='validation'
-    # )
-
     train_generator = datagen.flow_from_directory(
         directory=image_dir,
         target_size=(img_height, img_width),
         batch_size=batch_size,
         class_mode='categorical',
-        subset='training'
+        subset='training',
+        classes = classed_list
     )
 
     validation_generator = datagen.flow_from_directory(
@@ -62,14 +33,15 @@ def preprocess_images(img_height=224, img_width=224, batch_size=32):
         target_size=(img_height, img_width),
         batch_size=batch_size,
         class_mode='categorical',
-        subset='validation'
+        subset='validation',
+        classes = classed_list
     )
-
     sorted_labels = list(train_generator.class_indices.keys())
     with open('class_labels.json', 'w') as json_file:
         json.dump(sorted_labels, json_file)
     print(sorted_labels)
     return train_generator, validation_generator
+
 
 def build_model_v1(num_classes):
     base_model = MobileNet(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
@@ -110,7 +82,7 @@ def train_model():
     history = model.fit(
         train_data,
         validation_data=val_data,
-        epochs=20
+        epochs=15
     )
     loss, accuracy = model.evaluate(val_data)
     print(f"Validation accuracy: {accuracy*100:.2f}%")
@@ -178,8 +150,8 @@ def predict_image(image_dir):
 
 
 if __name__ == '__main__':
-    #train_model()
-    #convert_model_to_mobile()
-    predict_image('/Users/jianzhangli/debug/classBitmap_data')
+    train_model()
+    convert_model_to_mobile()
+    predict_image(image_dir)
     print('main')
 
