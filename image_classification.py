@@ -37,7 +37,7 @@ def preprocess_images(img_height=224, img_width=224, batch_size=32):
         classes = classed_list
     )
     sorted_labels = list(train_generator.class_indices.keys())
-    with open('class_labels.json', 'w') as json_file:
+    with open('classBitmapModel/class_labels.json', 'w') as json_file:
         json.dump(sorted_labels, json_file)
     print(sorted_labels)
     return train_generator, validation_generator
@@ -87,14 +87,14 @@ def train_model():
     loss, accuracy = model.evaluate(val_data)
     print(f"Validation accuracy: {accuracy*100:.2f}%")
     if use_v3:
-        model.save('banzhuan_mobilenetv3_model.h5')
+        model.save('classBitmapModel/banzhuan_mobilenetv3_model.h5')
     else:
-        model.save('banzhuan_mobilenetv1_model.h5')
+        model.save('classBitmapModel/banzhuan_mobilenetv1_model.h5')
 
 
 def convert_model_to_mobile():
     # 加载Keras模型
-    model = tf.keras.models.load_model('banzhuan_mobilenetv3_model.h5')
+    model = tf.keras.models.load_model('classBitmapModel/banzhuan_mobilenetv3_model.h5')
     # 设置转换器
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     # 选择优化策略，这里使用默认的优化
@@ -102,7 +102,7 @@ def convert_model_to_mobile():
     # 进行转换
     tflite_model = converter.convert()
     # 保存TFLite模型
-    with open('banzhuan_mobilenetv3_model.tflite', 'wb') as f:
+    with open('classBitmapModel/banzhuan_mobilenetv3_model.tflite', 'wb') as f:
         f.write(tflite_model)
 
 def load_and_preprocess_image(image_path):
@@ -120,14 +120,14 @@ def load_and_preprocess_image(image_path):
 
 def predict_image(image_dir):
     # 文件路径
-    filename = 'class_labels.json'
+    filename = 'classBitmapModel/class_labels.json'
     # 打开文件并加载JSON数据
     with open(filename, 'r') as file:
         class_labels = json.load(file)
     print(len(class_labels))
     print(class_labels)
 
-    model = tf.keras.models.load_model('banzhuan_mobilenetv3_model.h5')
+    model = tf.keras.models.load_model('classBitmapModel/banzhuan_mobilenetv3_model.h5')
 
     rate = 0
     sum = 0
