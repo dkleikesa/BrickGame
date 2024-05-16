@@ -11,7 +11,8 @@ class brick_game_env(gym.Env):
         self.observation_space = spaces.Box(low=0, high=60, shape=self.board_size, dtype=np.int32)
         self.state = None
         self.reset()
-        jpype.startJVM()
+        jpype.startJVM(classpath=["/Users/jianzhangli/src/BrickGame/lib2.jar"])
+        self.brick_game = jpype.JClass('com.sogou.iot.lib2.BrickGameTipHelper')
 
 
     def reset(self):
@@ -48,6 +49,20 @@ class brick_game_env(gym.Env):
         jpype.shutdownJVM()
         print("close")
 
-        
+    def run(self):
+        array =  [[1, 0, 0, 1, 2, 1, 0, 1],
+                 [4, 1, 0, 1, 1, 3, 1, 0],
+                [1, 0, 1, 12, 1, 1, 1, 1],
+                [13, 14, 15, 16, 1, 1, 1, 1]]
+
+        result = self.brick_game.findMoves(array)
+        python_list = [[int(x) for x in ja] for ja in result]
+
+        # 现在 python_list 包含了 Python 中的整数列表，您可以打印它
+        print(python_list)
+
+
+
 if __name__ == '__main__':
     env = brick_game_env()
+    env.run()
