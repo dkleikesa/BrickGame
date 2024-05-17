@@ -136,7 +136,6 @@ def predict_image(image_dir):
             if not image_path.endswith('.png'):
                 continue
             full_image_path = os.path.join(root, image_path)
-            print(full_image_path)
             processed_image = load_and_preprocess_image(full_image_path)
             prediction = model.predict(processed_image)
             label = class_labels[np.argmax(prediction)]

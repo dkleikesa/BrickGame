@@ -1,48 +1,89 @@
 import numpy as np
+import jpype
+import os
 import gym
 from gym import spaces
-import jpype
+from jpype import JArray, JInt, startJVM, getDefaultJVMPath
+
+game_grid_path = "/Users/jianzhangli/src/BrickGame/full_grid"
 
 class brick_game_env(gym.Env):
     def __init__(self):
         super(brick_game_env, self).__init__()
         self.board_size = (14, 10)
-        self.action_space = spaces.MultiDiscrete([self.board_size[0] * self.board_size[1]] * 2)
-        self.observation_space = spaces.Box(low=0, high=60, shape=self.board_size, dtype=np.int32)
+        self.action_space =  spaces.Tuple((
+    spaces.Discrete(self.board_size[0] * self.board_size[1]),
+    spaces.Discrete(self.board_size[0] * self.board_size[1]),
+    spaces.Discrete(self.board_size[0] * self.board_size[1])
+))
+        self.observation_space = spaces.Box(low=0, high=59, shape=(self.board_size[0] * self.board_size[1],), dtype=np.int32)
+        self.game_list = []
         self.state = None
         self.reset()
         jpype.startJVM(classpath=["/Users/jianzhangli/src/BrickGame/lib2.jar"])
         self.brick_game = jpype.JClass('com.sogou.iot.lib2.BrickGameTipHelper')
 
 
+        def read_game(path):
+            array = []
+            with open(path, "r") as file:
+                for line in file:
+                    row = [int(x) for x in line.strip().split(",")]
+                    array.append(row)
+            return array
+
+        def write_game(path, array):
+            with open(path, "w") as file:
+                for row in array:
+                    file.write(",".join(str(x) for x in row) + "\n")
+
+
     def reset(self):
-        self.state = np.random.randint(1, 61, size=self.board_size) # todo
+        # 遍历目录下的所有文件和子目录
+        for root, dirs, files in os.walk(game_grid_path):
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                if filepath.endswith(".csv"):
+                    self.game_list.append(np.genfromtxt(filepath,dtype=np.int32, delimiter=','))
+                    print(filepath)
+        self.state = np.copy(self.game_list[0].flatten())
         return self.state
 
 
     def step(self, action):
-        idx1, idx2 = action
+        idx1, idx2,idx3 = action
         reward = 0
         done = False
         info = {}
+        python_action = [idx1 // self.board_size[1], idx1 % self.board_size[1],
+                       idx2 // self.board_size[1],idx2 % self.board_size[1],
+                       idx3 // self.board_size[1], idx3 % self.board_size[1]]
+        java_action = JArray(JInt)(python_action)
 
-        if self.can_remove(idx1, idx2):
-            reward = 1
-            self.state[idx1 // self.board_size[1]][idx1 % self.board_size[1]] = 0
-            self.state[idx2 // self.board_size[1]][idx2 % self.board_size[1]] = 0
-        else:
-            reward = -1
+        state_2d = self.state.reshape(self.board_size)
+        java_array = JArray(JArray(JInt))(state_2d.tolist())
 
-        if np.all(self.state == 0):
+        value = self.brick_game.actionStep(java_array,java_action)
+        self.state =np.array(java_array).flatten()
+        # int actionStep(int[][] grid, int[] action)
+        #2：游戏胜利 , 1：消除成功 ,-1：无法移动 , -2：游戏失败
+        if value == 2:
             done = True
+            reward = 2
+        elif value == 1:
+            done = False
+            reward = 1
+        elif value == -1:
+            done = False
+            reward = -1
+        else:
+            done = True
+            reward = -2
 
         return self.state, reward, done, info
 
-    def can_remove(self, idx1, idx2):
-        # 这里应该实现检查两个图标是否可以消除的逻辑
-        return True
-
     def render(self, mode='human'):
+        print('render')
         print(self.state)
 
     def close(self):
