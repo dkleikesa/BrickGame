@@ -23,7 +23,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                              tensor_spec.BoundedTensorSpec((),np.int32,0,self.board_size[0] * self.board_size[1] - 1),
                              tensor_spec.BoundedTensorSpec((),np.int32,0,self.board_size[0] * self.board_size[1] - 1))
 
-        self._observation_spec = array_spec.BoundedArraySpec(shape=(1,self.board_size[0] * self.board_size[1]),
+        self._observation_spec = array_spec.BoundedArraySpec(shape=(self.board_size[0] * self.board_size[1],),
                                                              dtype=np.int32, minimum=0, maximum=59, name='observation')
         self.game_list = []
         self._state = None
@@ -46,7 +46,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.game_count += 1
         self.step_count_current = 0
         self.success_step_current = 0
-        self._state = np.expand_dims(np.copy(self.game_list[0].flatten()), axis=0)
+        self._state = np.copy(self.game_list[0].flatten())
         print("reset -> total game count：" + str(self.game_count))
         return time_step.restart(self._state)
 
@@ -64,8 +64,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         java_array = JArray(JArray(JInt))(state_2d.tolist())
 
         value = self.brick_game.actionStep(java_array, java_action)
-        #self._state = np.array(java_array).flatten()
-        self._state = np.expand_dims(np.array(java_array).flatten(), axis=0)
+        self._state = np.array(java_array).flatten()
         # int actionStep(int[][] grid, int[] action)
         # 2：游戏胜利 , 1：消除成功 ,-1：无法移动 , -2：游戏失败
         if value == 2:
@@ -91,7 +90,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                     self.step_count_all) + " total step count:" + str(self.step_count_all))
             return time_step.termination(self._state, reward)
         else:
-            if self.step_count_current % 10000 == 0:
+            if self.step_count_current % 1000 == 0:
                 print(
                     "game is running! game num:" + str(self.game_count) + " step count:" + str(
                         self.step_count_current) + " brick num:" + str(
