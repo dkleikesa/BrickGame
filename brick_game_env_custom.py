@@ -6,6 +6,7 @@ from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step
 from tf_agents.specs import tensor_spec
+import random
 
 game_grid_path = "/Users/jianzhangli/src/BrickGame/full_grid"
 
@@ -17,6 +18,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.board_size = (14, 10)
         self.step_count_all = 0
         self.game_count = 0
+        self.current_game_file_name = None
         self.step_count_current = 0
         self.success_step_current = 0
         self._action_spec = (tensor_spec.BoundedTensorSpec((),np.int32,0,self.board_size[0] * self.board_size[1] - 1),
@@ -25,7 +27,8 @@ class brick_game_env_custom(py_environment.PyEnvironment):
 
         self._observation_spec = array_spec.BoundedArraySpec(shape=(self.board_size[0] * self.board_size[1],),
                                                              dtype=np.int32, minimum=0, maximum=59, name='observation')
-        self.game_list = []
+        self.game_list = {}
+        self.success_game_steps = []
         self._state = None
         jpype.startJVM(classpath=["/Users/jianzhangli/src/BrickGame/lib2.jar"])
         self.brick_game = jpype.JClass('com.sogou.iot.lib2.BrickGameTipHelper')
@@ -33,7 +36,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
             for filename in files:
                 filepath = os.path.join(root, filename)
                 if filepath.endswith(".csv"):
-                    self.game_list.append(np.genfromtxt(filepath, dtype=np.int32, delimiter=','))
+                    self.game_list[filename] = np.genfromtxt(filepath, dtype=np.int32, delimiter=',')
                     print("read game:" + filepath)
 
     def action_spec(self):
@@ -46,8 +49,13 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.game_count += 1
         self.step_count_current = 0
         self.success_step_current = 0
-        self._state = np.copy(self.game_list[0].flatten())
-        print("reset -> total game count：" + str(self.game_count))
+        self.success_game_steps = []
+        #key = list(self.game_list.keys())[0]
+        key, value = random.choice(list(self.game_list.items()))
+        self.current_game_file_name = key
+        self._state = np.copy(value.flatten())
+        print("reset -> total game count：" + str(self.game_count) +" "+key)
+        print("reset -> grid：\n" + str(self.game_list[key]))
         return time_step.restart(self._state)
 
     def _step(self, action):
@@ -69,17 +77,19 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         # 2：游戏胜利 , 1：消除成功 ,-1：无法移动 , -2：游戏失败
         if value == 2:
             done = True
-            reward = 2
+            reward = self.step_count_current / 1000+20
+            np.savetxt(f'game_steps_{self.current_game_file_name}.csv', self.success_game_steps, delimiter=',',fmt='%d')
         elif value == 1:
             done = False
-            reward = 1
+            reward = self.step_count_current / 1000
             self.success_step_current += 1
+            self.success_game_steps.append(python_action)
         elif value == -1:
             done = False
-            reward = -1
+            reward = -(self.step_count_current / 1000)
         else:
             done = True
-            reward = -2
+            reward = -(self.step_count_current / 1000)-20
 
         if done:
             if reward > 0:

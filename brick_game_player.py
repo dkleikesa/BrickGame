@@ -18,6 +18,8 @@ from tf_agents.specs import array_spec
 from tf_agents.environments import suite_gym
 from brick_game_env import brick_game_env
 
+tf.config.threading.set_inter_op_parallelism_threads(0)
+tf.config.threading.set_intra_op_parallelism_threads(0)
 # 创建环境
 env = brick_game_env_custom(True)
 train_env = tf_py_environment.TFPyEnvironment(env)
@@ -50,7 +52,7 @@ agent = ppo_agent.PPOAgent(
     train_step_counter=train_step_counter)
 agent.initialize()
 
-replay_buffer_capacity = 64 * 1000  # 回放缓冲区的大小
+replay_buffer_capacity = 64 * 100  # 回放缓冲区的大小
 num_epochs = 5
 
 replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
@@ -74,10 +76,10 @@ def train_agent(num_iterations):
         while not train_env.current_time_step().is_last():
             collect_step(train_env, agent.collect_policy, num_iterations)
             dataset = replay_buffer.as_dataset(
-                num_parallel_calls=8,
+                num_parallel_calls=tf.data.AUTOTUNE,
                 sample_batch_size=64,  # 每个批次样本的大小
                 num_steps=4,
-                single_deterministic_pass=True).prefetch(8)  # num_steps 是为 TD 或其他多步算法配置多步数
+                single_deterministic_pass=False).prefetch(tf.data.AUTOTUNE)  # num_steps 是为 TD 或其他多步算法配置多步数
             # 计算数据集中的批次数量
             train_loss = None
             for trajectories, _ in dataset:
@@ -98,18 +100,34 @@ def collect_step(environment, policy, steps):
         time_step = next_time_step
 
 
-
-#
 def test_agent():
     checkpoint_manager.restore_or_initialize()
     time_step = eval_env.reset()
+    total_step = 0
+    success_step = 0
     while not time_step.is_last():
         action_step = agent.collect_policy.action(time_step)
-        time_step = eval_env.step(action_step.action)
-        print(time_step.observation)
+        time_step: TimeStep = eval_env.step(action_step.action)
+        total_step += 1
+        time_step += 1
+
+    print("total_step:" + str(total_step) + " success_step:" + str(success_step))
+
+
+def convert_model_to_mobile():
+    saved_model_dir = 'saved_policy'
+    converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_dir)
+    # 选择优化策略，这里使用默认的优化
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    # 进行转换
+    tflite_model = converter.convert()
+    # 保存TFLite模型
+    with open(saved_model_dir + 'tflite/banzhuan_ppo_model.tflite', 'wb') as f:
+        f.write(tflite_model)
 
 
 if __name__ == '__main__':
     train_agent(replay_buffer_capacity)
-
+    convert_model_to_mobile()
+    test_agent()
     print('main')
