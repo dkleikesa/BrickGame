@@ -1,22 +1,16 @@
-import tensorflow as tf
-import tf_agents
-import numpy as np
 import math
+
+import tensorflow as tf
 from tf_agents.networks import actor_distribution_network, value_network
 from tf_agents.agents.ppo import ppo_agent
 from tf_agents.environments import tf_py_environment
 from brick_game_env_custom import brick_game_env_custom
 from tf_agents.trajectories import trajectory
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.trajectories import time_step
 from tf_agents.policies import policy_saver
-from tf_agents.environments import utils
-from tf_agents.specs import array_spec
-from tf_agents.environments import suite_gym
-from tf_agents.environments import utils
-from tf_agents.specs import array_spec
-from tf_agents.environments import suite_gym
-from brick_game_env import brick_game_env
+import numpy as np
+from tensorflow.python.eager import profiler
+import time
 
 tf.config.threading.set_inter_op_parallelism_threads(0)
 tf.config.threading.set_intra_op_parallelism_threads(0)
@@ -74,20 +68,35 @@ def train_agent(num_iterations):
     for _ in range(num_epochs):
         train_env.reset()
         while not train_env.current_time_step().is_last():
+            # tf.profiler.experimental.start(logdir)
+            print("Current timestamp1:", time.time())
             collect_step(train_env, agent.collect_policy, num_iterations)
+            print("Current timestamp2:", time.time())
             dataset = replay_buffer.as_dataset(
-                num_parallel_calls=tf.data.AUTOTUNE,
+                num_parallel_calls=10,
                 sample_batch_size=64,  # 每个批次样本的大小
-                num_steps=4,
-                single_deterministic_pass=False).prefetch(tf.data.AUTOTUNE)  # num_steps 是为 TD 或其他多步算法配置多步数
+                num_steps=2,
+                single_deterministic_pass=True).prefetch(10)  # num_steps 是为 TD 或其他多步算法配置多步数
+            print("Current timestamp3:", time.time())
             # 计算数据集中的批次数量
             train_loss = None
-            for trajectories, _ in dataset:
-                # 在一个序列批次上训练代理
-                train_loss = agent.train(experience=trajectories)
+            value = math.ceil(num_iterations/64)
+            iterator = iter(dataset)
+            for _ in range(value):
+                t, _ = next(iterator)
+                train_loss = agent.train(experience=t)
+            print("Current timestamp4:", time.time())
             checkpoint_manager.save()
             tf_policy_saver.save('saved_policy')
             print("train_loss:" + str(train_loss.loss.numpy()))
+            with summary_writer.as_default():
+                tf.summary.scalar('train_loss', train_loss.loss, step=env.step_count_current)
+                tf.summary.scalar('brick_num', np.count_nonzero(env._state), step=env.step_count_current)
+                tf.summary.scalar('same_brick_step_count', env.same_brick_step_count, step=env.step_count_current)
+                tf.summary.scalar('from_to_same_line_step_count', env.from_to_same_line_step_count, step=env.step_count_current)
+                tf.summary.scalar('from_to_same_line_can_move_step_count', env.from_to_same_line_can_move_step_count, step=env.step_count_current)
+                tf.summary.scalar('to_pair_same_line_step_count', env.to_pair_same_line_step_count, step=env.step_count_current)
+            # tf.profiler.experimental.stop()
 
 
 def collect_step(environment, policy, steps):
@@ -126,6 +135,8 @@ def convert_model_to_mobile():
         f.write(tflite_model)
 
 
+logdir = "logs"
+summary_writer = tf.summary.create_file_writer(logdir)
 if __name__ == '__main__':
     train_agent(replay_buffer_capacity)
     convert_model_to_mobile()

@@ -21,9 +21,14 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.current_game_file_name = None
         self.step_count_current = 0
         self.success_step_current = 0
-        self._action_spec = (tensor_spec.BoundedTensorSpec((),np.int32,0,self.board_size[0] * self.board_size[1] - 1),
-                             tensor_spec.BoundedTensorSpec((),np.int32,0,self.board_size[0] * self.board_size[1] - 1),
-                             tensor_spec.BoundedTensorSpec((),np.int32,0,self.board_size[0] * self.board_size[1] - 1))
+        self.same_brick_step_count = 0
+        self.from_to_same_line_step_count = 0
+        self.from_to_same_line_can_move_step_count = 0
+        self.to_pair_same_line_step_count = 0
+        self._action_spec = (
+            tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1),
+            tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1),
+            tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1))
 
         self._observation_spec = array_spec.BoundedArraySpec(shape=(self.board_size[0] * self.board_size[1],),
                                                              dtype=np.int32, minimum=0, maximum=59, name='observation')
@@ -50,11 +55,11 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.step_count_current = 0
         self.success_step_current = 0
         self.success_game_steps = []
-        #key = list(self.game_list.keys())[0]
+        # key = list(self.game_list.keys())[0]
         key, value = random.choice(list(self.game_list.items()))
         self.current_game_file_name = key
         self._state = np.copy(value.flatten())
-        print("reset -> total game count：" + str(self.game_count) +" "+key)
+        print("reset -> total game count：" + str(self.game_count) + " " + key)
         print("reset -> grid：\n" + str(self.game_list[key]))
         return time_step.restart(self._state)
 
@@ -73,23 +78,47 @@ class brick_game_env_custom(py_environment.PyEnvironment):
 
         value = self.brick_game.actionStep(java_array, java_action)
         self._state = np.array(java_array).flatten()
-        # int actionStep(int[][] grid, int[] action)
-        # 2：游戏胜利 , 1：消除成功 ,-1：无法移动 , -2：游戏失败
-        if value == 2:
+        GAME_SUCCESS = 2  # 游戏胜利
+        ACTION_SUCCESS = 1  # 消除成功
+        ACTION_FAIL = -1  # 无法移动
+        GAME_FAIL = -2  # 游戏失败
+        FROM_PAIR_SAME_BRICK = -3  # from 和 pair是相同的砖块
+        FROM_TO_SAME_LINE = -4  # from 和 to在一条直线上，但是不可移动
+        FROM_TO_SAME_LINE_CAN_MOVE = -5  # from 和to是可移动的
+        TO_PAIR_SAME_LINE = -6  # // to和pair在一条直线上，但是中间有砖块
+        done = False
+        if value == GAME_SUCCESS:
             done = True
-            reward = self.step_count_current / 1000+20
-            np.savetxt(f'game_steps_{self.current_game_file_name}.csv', self.success_game_steps, delimiter=',',fmt='%d')
-        elif value == 1:
+            reward = 100
+            np.savetxt(f'game_steps_{self.current_game_file_name}.csv', self.success_game_steps, delimiter=',',
+                       fmt='%d')
+        elif value == ACTION_SUCCESS:
             done = False
-            reward = self.step_count_current / 1000
+            reward = 20
             self.success_step_current += 1
             self.success_game_steps.append(python_action)
-        elif value == -1:
+        elif value == ACTION_FAIL:
             done = False
-            reward = -(self.step_count_current / 1000)
-        else:
+            reward = -1
+        elif value == GAME_FAIL:
             done = True
-            reward = -(self.step_count_current / 1000)-20
+            reward = -2
+        elif value == FROM_PAIR_SAME_BRICK:
+            done = False
+            reward = 5
+            self.same_brick_step_count += 1
+        elif value == FROM_TO_SAME_LINE:
+            done = False
+            reward = 6
+            self.from_to_same_line_step_count += 1;
+        elif value == FROM_TO_SAME_LINE_CAN_MOVE:
+            done = False
+            reward = 7
+            self.from_to_same_line_can_move_step_count += 1
+        elif value == TO_PAIR_SAME_LINE:
+            done = False
+            reward = 8
+            self.to_pair_same_line_step_count += 1
 
         if done:
             if reward > 0:
@@ -104,7 +133,16 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                 print(
                     "game is running! game num:" + str(self.game_count) + " step count:" + str(
                         self.step_count_current) + " brick num:" + str(
-                       np.count_nonzero(self._state)) + " success step count:" + str(self.success_step_current))
+                        np.count_nonzero(self._state)) + " success step count:" + str(self.success_step_current) +
+                    " same_brick_step_count:" + str(
+                        self.same_brick_step_count) + " from_to_same_line_step_count:" + str(
+                        self.from_to_same_line_step_count) + " from_to_same_line_can_move_step_count:" + str(
+                        self.from_to_same_line_can_move_step_count) + " to_pair_same_line_step_count:" + str(
+                        self.to_pair_same_line_step_count))
+                self.same_brick_step_count = 0
+                self.from_to_same_line_step_count = 0
+                self.from_to_same_line_can_move_step_count = 0
+                self.to_pair_same_line_step_count = 0
             return time_step.transition(self._state, reward)
 
     def render(self, mode='human'):
