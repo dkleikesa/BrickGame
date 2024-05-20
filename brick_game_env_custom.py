@@ -8,7 +8,7 @@ from tf_agents.trajectories import time_step
 from tf_agents.specs import tensor_spec
 import random
 
-game_grid_path = "/Users/jianzhangli/src/BrickGame/full_grid"
+game_grid_path = "full_grid"
 
 
 class brick_game_env_custom(py_environment.PyEnvironment):
@@ -36,7 +36,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.game_list = {}
         self.success_game_steps = []
         self._state = None
-        jpype.startJVM(classpath=["/Users/jianzhangli/src/BrickGame/lib2.jar"])
+        jpype.startJVM(classpath=["lib2.jar"])
         self.brick_game = jpype.JClass('com.sogou.iot.lib2.BrickGameTipHelper')
         for root, dirs, files in os.walk(game_grid_path):
             for filename in files:
