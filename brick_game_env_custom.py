@@ -25,6 +25,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         self.from_to_same_line_step_count = 0
         self.from_to_same_line_can_move_step_count = 0
         self.to_pair_same_line_step_count = 0
+        self.value_cache = []
         self._action_spec = (
             tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1),
             tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1),
@@ -129,7 +130,7 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                     self.step_count_all) + " total step count:" + str(self.step_count_all))
             return time_step.termination(self._state, reward)
         else:
-            if self.step_count_current % 1000 == 0:
+            if self.step_count_current % (64*20) == 0:
                 print(
                     "game is running! game num:" + str(self.game_count) + " step count:" + str(
                         self.step_count_current) + " brick num:" + str(
@@ -139,6 +140,11 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                         self.from_to_same_line_step_count) + " from_to_same_line_can_move_step_count:" + str(
                         self.from_to_same_line_can_move_step_count) + " to_pair_same_line_step_count:" + str(
                         self.to_pair_same_line_step_count))
+                self.value_cache.clear()
+                self.value_cache.append(self.same_brick_step_count)
+                self.value_cache.append(self.from_to_same_line_step_count)
+                self.value_cache.append(self.from_to_same_line_can_move_step_count)
+                self.value_cache.append(self.to_pair_same_line_step_count)
                 self.same_brick_step_count = 0
                 self.from_to_same_line_step_count = 0
                 self.from_to_same_line_can_move_step_count = 0

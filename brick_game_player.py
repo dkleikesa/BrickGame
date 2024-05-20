@@ -92,10 +92,10 @@ def train_agent(num_iterations):
             with summary_writer.as_default():
                 tf.summary.scalar('train_loss', train_loss.loss, step=env.step_count_current)
                 tf.summary.scalar('brick_num', np.count_nonzero(env._state), step=env.step_count_current)
-                tf.summary.scalar('same_brick_step_count', env.same_brick_step_count, step=env.step_count_current)
-                tf.summary.scalar('from_to_same_line_step_count', env.from_to_same_line_step_count, step=env.step_count_current)
-                tf.summary.scalar('from_to_same_line_can_move_step_count', env.from_to_same_line_can_move_step_count, step=env.step_count_current)
-                tf.summary.scalar('to_pair_same_line_step_count', env.to_pair_same_line_step_count, step=env.step_count_current)
+                tf.summary.scalar('same_brick_step_count', env.value_cache[0], step=env.step_count_current)
+                tf.summary.scalar('from_to_same_line_step_count', env.value_cache[1], step=env.step_count_current)
+                tf.summary.scalar('from_to_same_line_can_move_step_count',env.value_cache[2], step=env.step_count_current)
+                tf.summary.scalar('to_pair_same_line_step_count', env.value_cache[3], step=env.step_count_current)
             # tf.profiler.experimental.stop()
 
 
