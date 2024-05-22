@@ -24,11 +24,19 @@ eval_env = tf_py_environment.TFPyEnvironment(env)
 actor_net = actor_distribution_network.ActorDistributionNetwork(
     train_env.observation_spec(),
     train_env.action_spec(),
+    fc_layer_params=(256, 256, 128, 128, 64, 64)
     # 指定其他参数，比如 fc_layer_params，如果你的网络需要。
 )
+# 网络参数配置试错：
+# (200, 100)：满足from和pair砖块一致,from和To在一条线上无法支持
+# (200, 100, 3)：满足from和pair砖块一致,from和To在一条线上无法支持
+# (200, 100, 50)：
+# (512, 256)：
+# (512, 256, 128)：
 
 value_net = value_network.ValueNetwork(
     input_tensor_spec=train_env.observation_spec(),
+    fc_layer_params=(128, 128, 64, 64, 32)
 )
 
 # 创建PPO Agent
@@ -47,7 +55,7 @@ agent = ppo_agent.PPOAgent(
 agent.initialize()
 
 replay_buffer_capacity = 64 * 100  # 回放缓冲区的大小
-num_epochs = 5
+num_epochs = 50000000
 
 replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
     data_spec=agent.collect_data_spec,
@@ -96,6 +104,8 @@ def train_agent(num_iterations):
                 tf.summary.scalar('from_to_same_line_step_count', env.value_cache[1], step=env.step_count_current)
                 tf.summary.scalar('from_to_same_line_can_move_step_count',env.value_cache[2], step=env.step_count_current)
                 tf.summary.scalar('to_pair_same_line_step_count', env.value_cache[3], step=env.step_count_current)
+            if env.step_count_current > 64 * 100 * 30:
+                break
             # tf.profiler.experimental.stop()
 
 
