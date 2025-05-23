@@ -9,6 +9,12 @@ from tf_agents.trajectories import trajectory
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.policies import policy_saver
 import numpy as np
+from tf_agents.networks import network
+from tf_agents.networks import encoding_network
+from tf_agents.networks import actor_distribution_network
+# from official.nlp.modeling.layers import Transformer
+from tf_agents.specs import tensor_spec
+
 from tensorflow.python.eager import profiler
 import time
 
@@ -20,23 +26,102 @@ train_env = tf_py_environment.TFPyEnvironment(env)
 eval_env = tf_py_environment.TFPyEnvironment(env)
 # env = brick_game_env()
 # train_env = tf_py_environment.TFPyEnvironment(suite_gym.wrap_env(env))
+
+
+class CustomActorNetwork(network.Network):
+    def __init__(self, input_tensor_spec, output_tensor_spec, name='CustomActorNetwork', **kwargs):
+        super(CustomActorNetwork, self).__init__(
+            input_tensor_spec=input_tensor_spec,
+            state_spec=(),
+            name=name,
+            **kwargs)
+        # self.input_tensor_spec = input_tensor_spec;
+        self.output_tensor_spec = output_tensor_spec
+        # MLP for feature type 1
+        self.status_mlp = encoding_network.EncodingNetwork(
+            input_tensor_spec=input_tensor_spec['status'],
+            fc_layer_params=(4, 2,1))
+
+        self.mask_mlp = encoding_network.EncodingNetwork(
+            input_tensor_spec=input_tensor_spec['mask'],
+            fc_layer_params=(256, 128, 64,32,16))
+
+        self.item_mlp = encoding_network.EncodingNetwork(
+            input_tensor_spec=input_tensor_spec['items'],
+            fc_layer_params=(256, 128, 64, 32))
+
+        # self.transformer = Transformer(
+        #     num_layers=10,
+        #     num_heads=16,
+        #     key_dim=256,
+        #     value_dim=256,
+        #     dropout=0.1,
+        #     use_projection_bias_in_attention=True,
+        #     output_dropout=0.1,
+        #     attention_dropout=0.1,
+        #     activation='relu')
+
+        # Output layer to generate action distribution parameters
+        # self.output_layer = tf.keras.layers.Dense(
+        #     tf.nest.flatten(output_tensor_spec).shape[0],
+        #     activation=None)
+        self.output_layer = tf.keras.layers.Dense(
+            len(tf.nest.flatten(output_tensor_spec)),
+            activation=None)
+
+    def get_config(self):
+        config = super(CustomActorNetwork, self).get_config()
+        config.update({
+            'input_tensor_spec': self.input_tensor_spec,
+            'output_tensor_spec': self.output_tensor_spec,
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        input_tensor_spec = config['input_tensor_spec']
+        output_tensor_spec = config['output_tensor_spec']
+        return cls(input_tensor_spec, output_tensor_spec)
+
+
+    def call(self, observations, step_type=None, network_state=()):
+        # Extract features using MLP
+        status = observations['status']
+        mask = observations['mask']
+        items = observations['items']
+        status_features, _ = self.status_mlp(status)
+        mask_features, _ = self.mask_mlp(mask)
+
+        # Extract features using Transformer
+        transformer_features,_ = self.item_mlp(items)
+
+        # Combine features
+        combined_features = tf.concat([status_features, mask_features,transformer_features], axis=-1)
+
+        # Compute action distribution parameters
+        # outputs = self.output_layer(combined_features)
+        outputs={'status':status_features,
+                 'mask':mask_features,
+                 'items':transformer_features
+                 }
+
+        return outputs, network_state
+
+
 # 创建Actor和Value网络
 actor_net = actor_distribution_network.ActorDistributionNetwork(
-    train_env.observation_spec(),
+    env.state_spec,
     train_env.action_spec(),
-    fc_layer_params=(256, 256, 128, 128, 64, 64)
+    preprocessing_layers= CustomActorNetwork(env.state_spec, train_env.observation_spec),
+    preprocessing_combiner = tf.keras.layers.Concatenate(axis=-1),
+    fc_layer_params=(256, 128, 64, 32)
     # 指定其他参数，比如 fc_layer_params，如果你的网络需要。
 )
 # 网络参数配置试错：
-# (200, 100)：满足from和pair砖块一致,from和To在一条线上无法支持
-# (200, 100, 3)：满足from和pair砖块一致,from和To在一条线上无法支持
-# (200, 100, 50)：
-# (512, 256)：
-# (512, 256, 128)：
 
 value_net = value_network.ValueNetwork(
     input_tensor_spec=train_env.observation_spec(),
-    fc_layer_params=(128, 128, 64, 64, 32)
+    fc_layer_params=(128, 64, 32, 32, 15)
 )
 
 # 创建PPO Agent
@@ -54,7 +139,7 @@ agent = ppo_agent.PPOAgent(
     train_step_counter=train_step_counter)
 agent.initialize()
 
-replay_buffer_capacity = 64 * 100  # 回放缓冲区的大小
+replay_buffer_capacity = 64 * 10  # 回放缓冲区的大小
 num_epochs = 50000000
 
 replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
@@ -100,10 +185,10 @@ def train_agent(num_iterations):
             with summary_writer.as_default():
                 tf.summary.scalar('train_loss', train_loss.loss, step=env.step_count_current)
                 tf.summary.scalar('brick_num', np.count_nonzero(env._state), step=env.step_count_current)
-                tf.summary.scalar('same_brick_step_count', env.value_cache[0], step=env.step_count_current)
-                tf.summary.scalar('from_to_same_line_step_count', env.value_cache[1], step=env.step_count_current)
-                tf.summary.scalar('from_to_same_line_can_move_step_count',env.value_cache[2], step=env.step_count_current)
-                tf.summary.scalar('to_pair_same_line_step_count', env.value_cache[3], step=env.step_count_current)
+                # tf.summary.scalar('same_brick_step_count', env.value_cache[0], step=env.step_count_current)
+                # tf.summary.scalar('from_to_same_line_step_count', env.value_cache[1], step=env.step_count_current)
+                # tf.summary.scalar('from_to_same_line_can_move_step_count',env.value_cache[2], step=env.step_count_current)
+                # tf.summary.scalar('to_pair_same_line_step_count', env.value_cache[3], step=env.step_count_current)
             if env.step_count_current > 64 * 100 * 30:
                 break
             # tf.profiler.experimental.stop()

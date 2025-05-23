@@ -31,10 +31,16 @@ class brick_game_env_custom(py_environment.PyEnvironment):
             tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1),
             tensor_spec.BoundedTensorSpec((), np.int32, 0, self.board_size[0] * self.board_size[1] - 1))
 
-        self._observation_spec = array_spec.BoundedArraySpec(shape=(self.board_size[0] * self.board_size[1],),
-                                                             dtype=np.int32, minimum=0, maximum=59, name='observation')
+        self._observation_spec = array_spec.BoundedArraySpec(shape=(self.board_size[0]*self.board_size[1],),
+                                                             dtype=np.float32,  name='observation')
+        size =self.board_size[0] * self.board_size[1]
+        items_spec = array_spec.BoundedArraySpec(shape=(size, 3), dtype=np.int32, name='itmes')
+        mask_spec = array_spec.BoundedArraySpec(shape=(size,), dtype=np.int32, name='mask')
+        status_spec = array_spec.BoundedArraySpec(shape=(2,), dtype=np.int32, name='status')
+        self.state_spec = {"status":status_spec, "mask":mask_spec, "items":items_spec}
         self.game_list = {}
         self.success_game_steps = []
+        self.grid = None
         self._state = None
         jpype.startJVM(classpath=["lib2.jar"])
         self.brick_game = jpype.JClass('com.sogou.iot.lib2.BrickGameTipHelper')
@@ -59,10 +65,31 @@ class brick_game_env_custom(py_environment.PyEnvironment):
         # key = list(self.game_list.keys())[0]
         key, value = random.choice(list(self.game_list.items()))
         self.current_game_file_name = key
-        self._state = np.copy(value.flatten())
+        self.grid = np.copy(value)
         print("reset -> total game count：" + str(self.game_count) + " " + key)
         print("reset -> grid：\n" + str(self.game_list[key]))
-        return time_step.restart(self._state)
+        self._state = self.to_state(self.grid)
+        return time_step.restart(self._state) #todo
+
+    def to_state(self ,grid):
+        size = self.board_size[0]*self.board_size[1]
+        brick_num = np.count_nonzero(grid)
+        items = np.empty((size, 3),dtype= np.int32)
+        i = 0
+        for index, value in np.ndenumerate(grid):
+            items[i,0] =index[0]
+            items[i, 1] = index[1]
+            items[i, 2] = value
+            i = i+1
+
+        status = np.array([size,brick_num],dtype= np.int32)
+        mask = np.where(grid != 0, 1, grid).flatten()
+        return {'status':status,
+                'mask':mask,
+                'items':items
+
+        }
+
 
     def _step(self, action):
         self.step_count_current += 1
@@ -74,11 +101,10 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                          idx3 // self.board_size[1], idx3 % self.board_size[1]]
         java_action = JArray(JInt)(python_action)
 
-        state_2d = self._state.reshape(self.board_size)
-        java_array = JArray(JArray(JInt))(state_2d.tolist())
+        java_array = JArray(JArray(JInt))(self.grid.tolist())
 
         value = self.brick_game.actionStep(java_array, java_action)
-        self._state = np.array(java_array).flatten()
+        self.grid = np.array(java_array)
         GAME_SUCCESS = 2  # 游戏胜利
         ACTION_SUCCESS = 1  # 消除成功
         ACTION_FAIL = -1  # 无法移动
@@ -128,13 +154,14 @@ class brick_game_env_custom(py_environment.PyEnvironment):
             else:
                 print("game fail! game num:" + str(self.game_count) + " step count:" + str(
                     self.step_count_all) + " total step count:" + str(self.step_count_all))
+            self._state = self.to_state(self.grid)
             return time_step.termination(self._state, reward)
         else:
             if self.step_count_current % (64*20) == 0:
                 print(
                     "game is running! game num:" + str(self.game_count) + " step count:" + str(
                         self.step_count_current) + " brick num:" + str(
-                        np.count_nonzero(self._state)) + " success step count:" + str(self.success_step_current) +
+                        np.count_nonzero(self.grid)) + " success step count:" + str(self.success_step_current) +
                     " same_brick_step_count:" + str(
                         self.same_brick_step_count) + " from_to_same_line_step_count:" + str(
                         self.from_to_same_line_step_count) + " from_to_same_line_can_move_step_count:" + str(
@@ -149,11 +176,12 @@ class brick_game_env_custom(py_environment.PyEnvironment):
                 self.from_to_same_line_step_count = 0
                 self.from_to_same_line_can_move_step_count = 0
                 self.to_pair_same_line_step_count = 0
+            self._state = self.to_state(self.grid)
             return time_step.transition(self._state, reward)
 
     def render(self, mode='human'):
         print('render')
-        print(self._state)
+        print(self.grid)
 
     def close(self):
         jpype.shutdownJVM()
@@ -173,5 +201,6 @@ class brick_game_env_custom(py_environment.PyEnvironment):
 
 
 if __name__ == '__main__':
-    env = brick_game_env_custom()
-    env.run()
+    env = brick_game_env_custom(True)
+    env.reset()
+    print(str(env.to_state(env.grid)))
