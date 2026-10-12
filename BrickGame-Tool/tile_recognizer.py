@@ -31,6 +31,7 @@ import numpy as np
 
 CELL = 32          # 每格归一化后的边长
 INSET = 0.14       # 裁切时向内收缩的比例（去掉格子边框/圆角）
+FLAT_THR = 5.0     # 内部边缘能量低于它 = 平坦 = 已消除的空位（实测砖块最低 31、空位最高 0.8）
 
 
 # ---------------------------------------------------------------- 图像与投影
@@ -239,6 +240,92 @@ def trim_board_extent(tile: np.ndarray, axis: int) -> tuple[int, int]:
     return a, b
 
 
+def _board_blobs(img: np.ndarray):
+    """残局兜底用：找"棋盘底色"的最大连通域，再取域内非底色的色块（= 残余砖块）。
+
+    棋盘底色是画面里最大的一片均匀色（残局时反而最显眼），所以不必靠边沿/周期。
+    返回 (非底色掩码, 棋盘外框, 砖块外框列表)。
+    """
+    h, w = img.shape[:2]
+    y0, y1 = int(h * 0.12), int(h * 0.92)
+    x0, x1 = int(w * 0.05), int(w * 0.95)
+    region = img[y0:y1, x0:x1].reshape(-1, 3)
+    q = (region // 16).astype(np.int32)
+    key = q[:, 0] * 10000 + q[:, 1] * 100 + q[:, 2]
+    vals, counts = np.unique(key, return_counts=True)
+    bg = region[key == vals[np.argmax(counts)]].mean(axis=0).astype(np.float32)
+
+    dist = np.linalg.norm(img.astype(np.float32) - bg, axis=2)
+    is_bg = (dist < 45).astype(np.uint8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(is_bg, 8)
+    if n <= 1:
+        return None
+    k = 1 + int(np.argmax(stats[1:, 4]))
+    bx, by, bw, bh = (int(v) for v in stats[k, :4])
+    if bw < w * 0.3 or bh < h * 0.2:
+        return None
+
+    sub = (1 - is_bg[by:by + bh, bx:bx + bw]).astype(np.uint8)
+    n2, _, st2, _ = cv2.connectedComponentsWithStats(sub, 8)
+    boxes = [s for s in st2[1:] if s[2] > 12 and s[3] > 12]
+    if not boxes:
+        return None
+    # 去掉噪声小碎块：只留尺寸接近中位数的（砖块底托尺寸一致）
+    w_med = float(np.median([b[2] for b in boxes]))
+    h_med = float(np.median([b[3] for b in boxes]))
+    boxes = [b for b in boxes
+             if 0.5 * w_med <= b[2] <= 2.0 * w_med and 0.5 * h_med <= b[3] <= 2.0 * h_med]
+    if not boxes:
+        return None
+    return is_bg, (bx, by, bw, bh), boxes, (w_med, h_med)
+
+
+def _pitch_from_centers(centers: np.ndarray, plate: float) -> float:
+    """一串色块中心 → 格距。
+
+    不能用"色块宽度"当格距：砖块底托比格子小一圈（实测底托 103px、真实格距 110px），
+    按宽度算 1107/103 会得出 11 列（真值 10 列）。改用**相邻中心的最小间距**，
+    它只可能是格距的整数倍；再用"格子必定装得下底托"这个下限反推倍了几格。
+    """
+    c = np.unique(np.sort(centers))
+    if c.size >= 2 and plate > 0:
+        d = float(np.min(np.diff(c)))
+        if d >= plate * 0.85:
+            return d / max(1, int(d / (plate * 0.85)))
+    return plate if plate > 0 else 0.0
+
+
+def estimate_lattice_from_blobs(img: np.ndarray) -> dict | None:
+    """兜底：自相关失效（空棋盘只剩几块砖）时，用棋盘底色 + 砖块色块反推网格。
+
+    实测触发场景：棋盘只剩十几块砖时，边沿投影被天空/马路/UI 的边缘带偏，
+    算出的 x 周期 23px、y 周期 94px（真值 110/110），网格画到房子上去了，
+    于是切出一堆"半块砖"和背景。这里用棋盘外框 + 砖块间距重建等距网格。
+    """
+    got = _board_blobs(img)
+    if got is None:
+        return None
+    _, (bx, by, bw, bh), boxes, (w_med, h_med) = got
+    cx = np.array([b[0] + b[2] / 2.0 for b in boxes])
+    cy = np.array([b[1] + b[3] / 2.0 for b in boxes])
+    px = _pitch_from_centers(cx, w_med)
+    py = _pitch_from_centers(cy, h_med)
+    cand = [v for v in (px, py) if v > 0]
+    if not cand:
+        return None
+    pitch = float(np.median(cand))
+    cols = int(round(bw / pitch))
+    rows = int(round(bh / pitch))
+    if not (3 <= cols <= 30 and 3 <= rows <= 30):
+        return None
+    return {
+        "xlines": np.linspace(bx, bx + bw, cols + 1),
+        "ylines": np.linspace(by, by + bh, rows + 1),
+        "pitch_x": int(round(bw / cols)), "pitch_y": int(round(bh / rows)),
+        "source": "blob",
+    }
+
+
 def detect_grid(img: np.ndarray, min_pitch: int, inset: float = INSET,
                 verbose: bool = True) -> dict:
     """求周期/相位 → 精调网格线 → 定棋盘范围 → 裁格、算图标特征、标空位。
@@ -259,21 +346,62 @@ def detect_grid(img: np.ndarray, min_pitch: int, inset: float = INSET,
     ylines = refine_lines(row_prof, np.arange(lattice_phase(row_prof, pitch_y), h, pitch_y), pitch_y)
     xlines = refine_lines(col_prof, np.arange(lattice_phase(col_prof, pitch_x), w, pitch_x), pitch_x)
 
-    ring = cell_ring_score(img, xlines, ylines)
-    tile = ring >= 0.25 * float(np.percentile(ring, 95))
-    r0, r1 = trim_board_extent(tile, axis=0)
-    c0, c1 = trim_board_extent(tile, axis=1)
-    if r1 - r0 < 2 or c1 - c0 < 2:
-        raise SystemExit("网格定位失败：没找到成排的格子，检查截图或调小 --min-pitch")
+    # 砖块是正方形的 → x/y 周期必然接近。差得远就说明自相关被"空棋盘 + 天空/马路/UI 边缘"
+    # 带偏了（实测残局截图给的是 x23/y94，真值 110/110），这种网格会把砖块切成半块。
+    # 改用棋盘底色 + 残余砖块间距反推 —— 只在这一步兜底，可信的棋盘不受影响。
+    fallback = None
+    if max(pitch_x, pitch_y) > 1.35 * max(1, min(pitch_x, pitch_y)):
+        lat = estimate_lattice_from_blobs(img)
+        if lat is not None:
+            if verbose:
+                print(f"自相关不可信（x 周期{pitch_x} / y 周期{pitch_y} 相差过大）"
+                      f" → 用棋盘底色反推 {len(lat['xlines']) - 1} 列 x {len(lat['ylines']) - 1} 行"
+                      f"（格距 ~{lat['pitch_x']}px）")
+            fallback = lat["source"]
+            xlines, ylines = lat["xlines"], lat["ylines"]
+            pitch_x, pitch_y = lat["pitch_x"], lat["pitch_y"]
 
-    xlines, ylines = xlines[c0:c1 + 1], ylines[r0:r1 + 1]
+    ring = cell_ring_score(img, xlines, ylines)
+    if fallback is None:
+        # 自相关路径：网格线会溢出棋盘，用"砖块成排"的密度裁掉两端多余的行/列。
+        tile = ring >= 0.25 * float(np.percentile(ring, 95))
+        r0, r1 = trim_board_extent(tile, axis=0)
+        c0, c1 = trim_board_extent(tile, axis=1)
+        if r1 - r0 < 2 or c1 - c0 < 2:
+            raise SystemExit("网格定位失败：没找到成排的格子，检查截图或调小 --min-pitch")
+        xlines, ylines = xlines[c0:c1 + 1], ylines[r0:r1 + 1]
+    # 反推路径不裁：棋盘外框已是实测值，而 trim 用的是"最长连续段"，
+    # 残局里中间若干行全空，会把 10x14 的棋盘截成左上角那一小簇（2x3）。
     out = grid_from_lines(img, xlines, ylines, inset)
-    out.update({"pitch_x": int(pitch_x), "pitch_y": int(pitch_y),
+    out.update({"pitch_x": int(pitch_x), "pitch_y": int(pitch_y), "src": fallback or "autocorr",
                 "row_prof": row_prof, "col_prof": col_prof, "ac_x": ac_x, "ac_y": ac_y})
     if verbose:
-        print(f"候选网格: x 周期{pitch_x} ({len(xlines) - 1}列) / y 周期{pitch_y} ({len(ylines) - 1}行)")
+        print(f"网格: x 周期{pitch_x} ({len(xlines) - 1}列) / y 周期{pitch_y} ({len(ylines) - 1}行)"
+              f"{'（棋盘底色反推）' if fallback else ''}")
         print(f"  每行砖块数: " + " ".join(str(int(v)) for v in (out["score"] >= out["score_thr"]).sum(axis=1)))
         print(f"  每列砖块数: " + " ".join(str(int(v)) for v in (out["score"] >= out["score_thr"]).sum(axis=0)))
+    return out
+
+
+def cell_flatness(patches: np.ndarray, margin: float = 0.18) -> np.ndarray:
+    """每格"内部有没有东西"：格子内部（去掉外圈 margin）的 Sobel 边缘能量。
+
+    为什么不用"图标对比度"当空位判据（踩过）：
+      已消除的格子只剩棋盘底色 → 内部**完全平坦**（实测边缘能量 0.0~0.8）；
+      任何真砖块（哪怕白栅栏、白花菜这种浅色物品配浅绿底托）内部都有结构（实测最低 31）。
+      两者相差 40 倍且无重叠，所以用"平不平"判空，比"颜色差多少"稳得多。
+      原先的对比度判据会把 37 格浅色砖块误判成空位（整帧丢图）。
+    """
+    out = np.zeros(len(patches), np.float32)
+    for k, p in enumerate(patches):
+        gray = cv2.cvtColor(p.astype(np.uint8), cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        inner = gray[int(h * margin):int(h * (1 - margin)), int(w * margin):int(w * (1 - margin))]
+        if inner.size == 0:
+            continue
+        gx = cv2.Sobel(inner, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(inner, cv2.CV_32F, 0, 1, ksize=3)
+        out[k] = float(np.sqrt(gx ** 2 + gy ** 2).mean())
     return out
 
 
@@ -282,11 +410,12 @@ def grid_from_lines(img: np.ndarray, xlines, ylines, inset: float = INSET) -> di
     rects, patches = cut_cells(img, xlines, ylines, inset)
     dev, ratio = icon_features(patches)
     rows, cols = len(ylines) - 1, len(xlines) - 1
-    score = ratio.reshape(rows, cols)
-    thr = max(0.25 * float(np.percentile(score, 90)), 0.04)
+    # score 的语义：>= score_thr 表示"这一格有砖块"。用内部边缘能量（见 cell_flatness）。
+    score = cell_flatness(patches).reshape(rows, cols)
+    thr = FLAT_THR
     return {
         "xlines": np.asarray(xlines, dtype=np.float64), "ylines": np.asarray(ylines, dtype=np.float64),
-        "score": score, "score_thr": thr,
+        "score": score, "score_thr": thr, "icon_ratio": ratio.reshape(rows, cols),
         "patches": patches, "dev": dev, "rects": rects,
         "cols": cols, "rows": rows,
     }
