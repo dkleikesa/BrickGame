@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      首选并不需要它：悬浮窗走无障碍专属的 TYPE_ACCESSIBILITY_OVERLAY，系统直接放行。
+      留着是因为真机上该类型可能被拒（实测 BadTokenException），那时会降级到
+      TYPE_APPLICATION_OVERLAY —— 那一路才需要用户授权"显示在其他应用上层"。
+      详见 overlay/OverlayController.kt 的降级链。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -17,6 +25,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          截图与悬浮窗都走无障碍通道：
+          - AccessibilityService#takeScreenshot（API 30+）静默截屏，没有录屏授权弹窗；
+          - 悬浮窗用 TYPE_ACCESSIBILITY_OVERLAY，**不需要** SYSTEM_ALERT_WINDOW 权限。
+        -->
+        <service
+            android:name=".capture.BrickGameAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/brickgame_accessibility" />
+        </service>
     </application>
 
 </manifest>

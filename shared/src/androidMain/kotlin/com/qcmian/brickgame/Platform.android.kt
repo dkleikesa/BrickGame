@@ -1,4 +1,4 @@
-package com.example.brickgame
+package com.qcmian.brickgame
 
 import android.os.Build
 
