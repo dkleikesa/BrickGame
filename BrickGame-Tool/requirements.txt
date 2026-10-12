@@ -1,0 +1,4 @@
+opencv-python-headless>=4.8
+numpy>=1.24
+# 训练身份向量（train_recognizer.py）：macOS 上 PyPI 默认 wheel 即带 MPS 支持
+torch>=2.2
