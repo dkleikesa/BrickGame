@@ -8,7 +8,7 @@
 像素特征失效的典型症状就是"篝火被并进谷仓""麻袋和木桶同一组"。骨干换掉后这两个诉求同时满足：
 组内任意两张 ≤ 同款阈值（保证一样），而同一款的不同状态（冻结/选中）又能留在同一组。
 
-产出：cache/emb_resnet18.npz（cache/ 与数据集同级）
+产出：cache/emb_<骨干>.npz（cache/ 与数据集同级；项目选定 mobilenet_v3_large）
   ref: (N_ref, 512) float32 L2 归一化；ref_entry: entry 名
   cell: (N_cell, 512)；cell_path: dataset 相对路径（与 index.csv 的 path 对齐）
 
@@ -24,6 +24,7 @@ import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)          # 项目根（build-catalog 在那边）
+import sys
 import time
 
 import cv2
@@ -31,19 +32,55 @@ import numpy as np
 import torch
 import torchvision
 
+sys.path.insert(0, _HERE)                     # 本目录：兄弟模块 auto_classify
+from auto_classify import DEFAULT_BACKBONE    # noqa: E402 项目选定骨干，改那一个常量即整体切换
+
+
+def _ensure_dinov2_py39() -> None:
+    """DINOv2 官方代码用了 `X | None` 注解（Python 3.10+），3.9 下 import 阶段就崩。
+
+    这里在加载前给缓存副本补一行 `from __future__ import annotations`（幂等；
+    3.10+ 下也合法，所以不用判断版本）。只动 ~/.cache/torch/hub 里的第三方副本，
+    不碰本项目代码。首行插入是安全的：这两个文件开头都是注释，没有 module docstring。
+    """
+    root = os.path.expanduser("~/.cache/torch/hub/facebookresearch_dinov2_main")
+    for rel in ("dinov2/layers/attention.py", "dinov2/layers/block.py"):
+        p = os.path.join(root, rel)
+        if not os.path.exists(p):
+            continue
+        src = open(p).read()
+        if "from __future__ import annotations" in src:
+            continue
+        with open(p, "w") as f:
+            f.write("from __future__ import annotations\n" + src)
+
 
 def build_backbone(name: str) -> torch.nn.Module:
     if name == "resnet18":
         m = torchvision.models.resnet18(weights="IMAGENET1K_V1")
         body = torch.nn.Sequential(*list(m.children())[:-2])
-    elif name == "resnet50":
+        return torch.nn.Sequential(body, torch.nn.AdaptiveAvgPool2d(1),
+                                   torch.nn.Flatten()).eval()
+    if name == "resnet50":
         m = torchvision.models.resnet50(weights="IMAGENET1K_V1")
         body = torch.nn.Sequential(*list(m.children())[:-2])
-    elif name == "mobilenet_v3_small":
+        return torch.nn.Sequential(body, torch.nn.AdaptiveAvgPool2d(1),
+                                   torch.nn.Flatten()).eval()
+    if name == "mobilenet_v3_small":
         body = torchvision.models.mobilenet_v3_small(weights="IMAGENET1K_V1").features
-    else:
-        raise SystemExit(f"不支持的骨干: {name}")
-    return torch.nn.Sequential(body, torch.nn.AdaptiveAvgPool2d(1), torch.nn.Flatten()).eval()
+        return torch.nn.Sequential(body, torch.nn.AdaptiveAvgPool2d(1),
+                                   torch.nn.Flatten()).eval()
+    if name == "mobilenet_v3_large":
+        # V2 权重是更好的训练配方（同参数量，精度更高）
+        body = torchvision.models.mobilenet_v3_large(weights="IMAGENET1K_V2").features
+        return torch.nn.Sequential(body, torch.nn.AdaptiveAvgPool2d(1),
+                                   torch.nn.Flatten()).eval()
+    if name.startswith("dinov2_"):
+        # 自监督预训练（无标签），对比度/背景变化下的检索比 ImageNet 监督模型稳。
+        # 这个模型 forward 直接返回 CLS 向量（vits14 是 384 维），不需要再接池化。
+        _ensure_dinov2_py39()
+        return torch.hub.load("facebookresearch/dinov2", name, verbose=False).eval()
+    raise SystemExit(f"不支持的骨干: {name}")
 
 
 @torch.no_grad()
@@ -70,6 +107,8 @@ def embed(model: torch.nn.Module, paths: list[str], size: int, bs: int, dev: str
 def extract(dataset: str, catalog: str, backbone: str = "resnet18", size: int = 224,
             batch: int = 32, out: str = "", device: str = "auto", quiet: bool = False) -> str:
     """给图鉴图 + 截图格提特征并缓存，返回 npz 路径。"""
+    if backbone.startswith("dinov2_") and size % 14:
+        size = int(round(size / 14)) * 14      # ViT patch=14，边长必须是 14 的整数倍
     dev = ("mps" if torch.backends.mps.is_available() else "cpu") if device == "auto" else device
     model = build_backbone(backbone).to(dev)
     cache = os.path.join(os.path.dirname(os.path.abspath(dataset)), "cache")
@@ -96,8 +135,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="预训练 CNN → 身份特征缓存")
     ap.add_argument("--dataset", default=os.path.join(_HERE, "dataset"))
     ap.add_argument("--catalog", default=os.path.join(_ROOT, "build-catalog", "catalog"))
-    ap.add_argument("--backbone", default="resnet18",
-                    choices=["resnet18", "resnet50", "mobilenet_v3_small"])
+    ap.add_argument("--backbone", default=DEFAULT_BACKBONE,
+                    choices=["resnet18", "resnet50", "mobilenet_v3_small",
+                             "mobilenet_v3_large", "dinov2_vits14", "dinov2_vitb14"],
+                    help=f"默认 {DEFAULT_BACKBONE}（项目选定）；dinov2_* 是自监督预训练，"
+                         f"首次会自动下载权重")
     ap.add_argument("--size", type=int, default=224)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--out", default="", help="默认写到 cache/emb_<backbone>.npz")

@@ -9,8 +9,12 @@
 点第 1 列的单张图 → 右侧面板：这一张的候选 / 搜索全量 class_id / 保持 / 标未知（单张粒度）。
 
 标注存浏览器 localStorage；"导出标注 JSON"下载后由 apply_corrections.py 写回 index.csv。
+
+**增量**：默认只铺出 frames.csv 里 status != done 的帧（没有台账则退回全量）。
+所以每批新帧标完、apply_corrections 写了台账后，下次界面里就只剩新帧 —— 不用在旧格子里翻。
 用法：
-  .venv/bin/python visualize_groups.py             # 生成 annotate.html
+  .venv/bin/python visualize_groups.py             # 生成 annotate.html（只待标注帧）
+  .venv/bin/python visualize_groups.py --all       # 全量铺出（复查旧帧时用）
   .venv/bin/python visualize_groups.py --thr 0.30  # 低置信阈值（页面上还能改）
 """
 from __future__ import annotations
@@ -139,6 +143,9 @@ th,td{padding:5px 7px;border-bottom:1px solid #eef0f2;vertical-align:middle;text
 th{color:#8b8f96;font-size:10px;font-weight:400;position:sticky;top:var(--hdr);z-index:5;border-bottom:1px solid #e3e5e8;white-space:nowrap;box-shadow:0 1px 0 #e3e5e8}
 tr.frow td{background:#eef1f4;font-weight:600;font-size:12px;padding:7px;border-bottom:1px solid #e3e5e8}
 tr.frow span{font-weight:400;color:#8b8f96;font-size:10px}
+/* "本帧标完"：靠右，点了变绿；不过滤掉本帧（可当场撤销） */
+.fdone{float:right;font-size:11px;padding:2px 9px}
+tr.frow.done td{background:#f0f9f2}
 td.c1,th.c1{width:40%;white-space:nowrap}
 td.c2,th.c2{width:10%}
 td.c3,th.c3{width:50%}
@@ -153,7 +160,7 @@ tr.split td{background:#fffaf0}
 .mem.man img{border-color:#2da44e}
 .mem.unk img{opacity:.35;border-color:#c9ced4}
 .cid{font-weight:600;font-variant-numeric:tabular-nums}
-.cid.aut{color:#8250df}.cid.man{color:#1a7f37}.cid.non{color:#b54708}
+.cid.aut{color:#8250df}.cid.man{color:#1a7f37}.cid.non{color:#b54708}.cid.emp{color:#6b7280}
 .tag{font-size:9px;color:#8b8f96;line-height:1.35;min-height:12px}
 .cellimg{width:58px;height:58px;image-rendering:pixelated;border-radius:5px;background:#eee;display:block;border:1px solid #e4e7ea}
 .cand{display:inline-block;text-align:center;margin-right:4px;cursor:pointer;padding:2px;border-radius:6px;border:2px solid transparent}
@@ -172,6 +179,7 @@ tr.split td{background:#fffaf0}
 <body>
 <header>
   <b>截图格 class_id 标注</b>
+  <span id="mdl" style="background:#eef4ff;border:1px solid #c7d9ff;color:#1f6feb;border-radius:5px;padding:2px 7px;font-weight:600"></span>
   <select id="fs"></select>
   <button id="low">只看低置信</button>
   <button id="man">只看已改</button>
@@ -190,27 +198,65 @@ tr.split td{background:#fffaf0}
 const DATA = __DATA__;
 const KEY = 'bgcls:' + DATA.dataset;
 const LS = (() => { try { localStorage.setItem('_t','1'); localStorage.removeItem('_t'); return localStorage; } catch(e) { return null; } })();
+// S.done = 本轮"本帧标完"的帧；S.edits = 逐格改动。两者都会写进导出的 JSON。
 let S = (LS && JSON.parse(LS.getItem(KEY) || 'null')) || {edits: {}};
+if (!S.edits) S.edits = {};
+if (!S.done) S.done = {};
 let THR = parseFloat(document.getElementById('thr').value) || 0.3;
 let SEL = null, SCOPE = 'one';   // 抽屉里的改动范围：one = 当前这张，g = 整组
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ENTRY = {}; DATA.refs.forEach(([cid, entry]) => ENTRY[String(cid)] = entry);
 const refSrc = cid => { const e = ENTRY[String(cid)]; return e ? DATA.tiles + e + '.png' : ''; };
+const absPath = p => DATA.root ? DATA.root + '/' + p : p;   // index.csv 里的相对路径 → 绝对路径
 const save = () => { if (LS) LS.setItem(KEY, JSON.stringify(S)); render(); renderPanel(); stats(); };
+
+// 复制文本：优先 Clipboard API；file:// 下老浏览器没有它，退回 textarea + execCommand。
+// 成功后在按钮上闪一下"已复制"，不然点了没有任何反馈。
+function copyText(text, btn) {
+  const ok = () => {
+    if (!btn) return;
+    clearTimeout(btn._t);
+    if (btn._label === undefined) btn._label = btn.textContent;
+    btn.textContent = '已复制 ✓'; btn.classList.add('on');
+    btn._t = setTimeout(() => { btn.textContent = btn._label; btn.classList.remove('on'); }, 900);
+  };
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let done = false;
+    try { done = document.execCommand('copy'); } catch (e) { done = false; }
+    ta.remove();
+    if (done) ok(); else prompt('自动复制失败，请手动复制：', text);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(ok, fallback);
+  } else fallback();
+}
 
 function mview(m) {                                  // 单张图最终显示什么
   const e = S.edits[m.path];
   if (e && e.unknown) return {cid: '未知', kind: 'non', cls: 'unk', src: ''};
   if (e) return {cid: String(e.class_id), kind: 'man', cls: 'man', src: refSrc(e.class_id)};
+  if (m.emp || m.cid === 0) return {cid: '背景 0', kind: 'non', cls: 'emp', src: refSrc(0), d: m.d};
   if (!m.cid) return {cid: '未识别', kind: 'non', cls: '', src: ''};
   return {cid: String(m.cid), kind: 'aut', cls: '', src: refSrc(m.cid), d: m.d};
 }
 function gview(g) {                                  // 这一组：多数 class_id + 一致性
-  const cids = g.members.map(m => mview(m)).filter(v => /^\d+$/.test(v.cid)).map(v => v.cid);
+  // 背景在 mview 里显示成文字"背景 0"，这里先还原成类别 0 再统计 ——
+  // 否则整组背景会因为"背景 0"不匹配 /^\d+$/ 而落到下面的"未识别"分支：
+  // 第 2 列恒显示"未识别"、参考图空白（成员明明写着"背景 0"）。
+  const cidOf = v => v.cid === '背景 0' ? '0' : v.cid;
+  const cids = g.members.map(m => cidOf(mview(m))).filter(v => /^\d+$/.test(v));
   if (!cids.length) return {cid: '未识别', kind: 'non', same: 0, n: 0, src: ''};
   const cnt = {}; cids.forEach(c => cnt[c] = (cnt[c] || 0) + 1);
   const best = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || a - b)[0];
-  return {cid: best, kind: S.edits[g.members[0].path] ? 'man' : 'aut',
+  const isBg = best === '0' || g.members.every(m => m.emp);
+  // 背景组用灰色(non)显示，别混进"自动识别(aut)"的紫色，一眼看出这不是要认的物品
+  const kind = isBg ? 'non' : (S.edits[g.members[0].path] ? 'man' : 'aut');
+  return {cid: isBg ? '背景 0' : best, kind,
           same: cnt[best], n: g.members.length, src: refSrc(best),
           split: cids.length === g.members.length && cnt[best] !== g.members.length};
 }
@@ -246,11 +292,17 @@ function rowsHtml() {
     const groups = f.groups.filter(g => {
       const anyEdit = g.members.some(m => S.edits[m.path]);
       if (onlyMan && !anyEdit) return false;
-      if (onlyLow) return anyEdit || g.members.some(m => !m.cid || (m.d || 0) > THR);
+      // 背景格不算低置信（没有距离可比），否则"只看低置信"会把整页背景全捞出来
+      if (onlyLow) return anyEdit || g.members.some(m =>
+        !(m.emp || m.cid === 0) && (!m.cid || (m.d || 0) > THR));
       return true;
     });
     if (!groups.length) continue;
-    body += `<tr class="frow"><td colspan="3">${esc(f.frame)}<span> 棋盘 ${f.rows}x${f.cols}，${f.cells} 格 / ${f.groups.length} 组，显示 ${groups.length} 组</span></td></tr>`
+    const done = !!S.done[f.frame];
+    body += `<tr class="frow${done ? ' done' : ''}"><td colspan="3">`
+      + `<button class="fdone${done ? ' on' : ''}" data-frame="${esc(f.frame)}">`
+      + `${done ? '已标完 ✓' : '本帧标完'}</button>`
+      + `${esc(f.frame)}<span> 棋盘 ${f.rows}x${f.cols}，${f.cells} 格 / ${f.groups.length} 组，显示 ${groups.length} 组</span></td></tr>`
       + groups.map(g => {
         const v = gview(g);
         return `<tr data-key="${esc(g.key)}" class="${v.split ? 'split' : ''}${SEL && SEL.key === g.key ? ' sel' : ''}">
@@ -263,7 +315,9 @@ function rowsHtml() {
         </tr>`;
       }).join('');
   }
-  if (!body) return '<div class="sec">没有符合筛选条件的组。</div>';
+  if (!body) return DATA.frames.length
+    ? '<div class="sec">没有符合筛选条件的组。</div>'
+    : '<div class="sec">没有待标注的帧（都标完了）。加一批新截图重跑 build_dataset.py 即可。</div>';
   return `<table><tr>
       <th class="c1">① 待标注的图</th>
       <th class="c2">② 自动类别</th>
@@ -285,7 +339,8 @@ const HELP = '<div class="sec">怎么看 / 怎么标</div>'
   + '③ <b>近似图</b>：与这组最像的 12 个图鉴物品，<b>点一下 = 整组指派</b><br><br>'
   + '点第 1 列的单张图 → 抽屉里选"改动范围"（这一张 / 整组），再点图鉴条目即可指派<br>'
   + '顶栏：<b>只看低置信</b>（d &gt; 阈值）、<b>只看已改</b>、阈值可调<br>'
-  + '标完点右上角<b>导出标注 JSON</b>，再跑 apply_corrections.py 写回 index.csv'
+  + '一帧看完点它标题行右侧的<b>本帧标完</b>；标完点右上角<b>导出标注 JSON</b>，'
+  + '再跑 apply_corrections.py 写回（写回的帧下次不再出现，界面只剩新帧）'
   + '</div>';
 
 const openPanel = () => {
@@ -305,7 +360,7 @@ function renderPanel() {
   const targets = () => SCOPE === 'g' ? g.members : [m];
   p.innerHTML = `
     <div><img src="${m.src}" style="width:158px;height:158px;image-rendering:pixelated;border-radius:8px;background:#eee">
-      <div class="tag" style="margin-top:4px">${esc(m.path.split('/').pop())} · 帧 ${esc(m.frame)} · 第 ${m.row} 行 ${m.col} 列
+      <div class="tag" style="margin-top:4px">${esc(m.path)} · 帧 ${esc(m.frame)} · 第 ${m.row} 行 ${m.col} 列
         ${m.raw ? ` · <a href="${m.raw}" target="_blank">查看原始截图</a>` : ''}</div></div>
     <div class="acts" style="margin-top:10px">
       <span class="sec" style="margin:0">改动范围</span>
@@ -315,6 +370,7 @@ function renderPanel() {
     <div class="acts" style="margin-top:6px">
       <button id="keep">保持判定</button>
       <button id="unk">标为未知</button>
+      <button id="cp" title="复制这张图的绝对路径：${esc(absPath(m.path))}">复制图片路径</button>
     </div>
     <div class="sec">点下面的图鉴条目 → 指派给${SCOPE === 'g' ? '整组' : '这一张'}（共 ${DATA.refs.length} 个，可按编号或 entry 搜）</div>
     <input id="q" placeholder="如 1428 / p010" style="width:100%">
@@ -331,6 +387,8 @@ function renderPanel() {
   p.querySelector('#unk').onclick = () => {
     targets().forEach(x => S.edits[x.path] = {unknown: true}); save(); closePanel();
   };
+  // 复制路径：不关抽屉、不改标注，只把这张图的绝对路径写进剪贴板
+  p.querySelector('#cp').onclick = ev => copyText(absPath(m.path), ev.currentTarget);
   const q = p.querySelector('#q'), box = p.querySelector('#all');
   // 一次性全量渲染（2368 个），图片走 loading=lazy，滚动到哪加载到哪
   const paint = list => {
@@ -352,12 +410,22 @@ function stats() {
     total++;
     const e = S.edits[m.path];
     if (e && e.unknown) unk++; else if (e) man++;
-    else if (!m.cid || (m.d || 0) > THR) low++;
+    // 背景格（class_id=0 / cls_src=empty）不算"低置信"：它们本来就没有距离，
+    // 算进去会让"低置信"虚高一份背景（202 格），真正要看的疑难格子被淹掉
+    else if (!(m.emp || m.cid === 0) && (!m.cid || (m.d || 0) > THR)) low++;
   }
-  document.getElementById('stat').textContent = `已改 ${man} / 未知 ${unk} / 低置信 ${low} / 共 ${total}`;
+  const doneN = DATA.frames.filter(f => S.done[f.frame]).length;
+  document.getElementById('stat').textContent =
+    `已改 ${man} / 未知 ${unk} / 低置信 ${low} / 共 ${total} 张 · 本帧标完 ${doneN}/${DATA.frames.length} 帧`;
 }
 
 document.getElementById('list').addEventListener('click', ev => {
+  const fd = ev.target.closest('.fdone');
+  if (fd) {                                     // 帧标题行：标记本帧标完（再点撤销）
+    const fr = fd.dataset.frame;
+    if (S.done[fr]) delete S.done[fr]; else S.done[fr] = 1;
+    save(); return;
+  }
   const cand = ev.target.closest('.cand');
   if (cand) {                                   // 第 3 列：整组指派
     const tr = cand.closest('tr'), g = BYKEY[tr.dataset.key];
@@ -379,10 +447,13 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel()
 document.getElementById('thr').onchange = e => { THR = parseFloat(e.target.value) || 0.3; render(); stats(); };
 document.getElementById('clr').onclick = () => {
   if (!confirm('清空所有标注？（已导出的 JSON 不受影响）')) return;
-  S = {edits: {}}; save();
+  S = {edits: {}, done: {}}; save();
 };
 document.getElementById('exp').onclick = () => {
   const out = {dataset: DATA.dataset, created: new Date().toISOString(),
+    // frames：本帧标完的帧 —— apply_corrections 据此把 frames.csv 的 status 写 done，
+    // 下次生成界面时这些帧就不再出现（增量的闭环）。
+    frames: Object.keys(S.done).filter(f => S.done[f]),
     corrections: Object.entries(S.edits).map(([path, e]) => e.unknown
       ? {path, unknown: true} : {path, class_id: e.class_id})};
   const a = document.createElement('a');
@@ -391,6 +462,10 @@ document.getElementById('exp').onclick = () => {
 };
 document.getElementById('fs').innerHTML = '<option value="">全部帧</option>' +
   DATA.frames.map(f => `<option value="${f.frame}">${esc(f.frame)}</option>`).join('');
+// 页头标明这套标签是哪个模型打出来的（多模型对比时靠它区分）
+const mdl = document.getElementById('mdl');
+mdl.textContent = '识别模型：' + DATA.model;
+mdl.title = '特征缓存：cache/' + DATA.emb;
 // 表头的粘性偏移 = 顶栏实测高度。
 // 必须在 render()/stats() 之后量：顶栏里的下拉框选项、统计文字都会改变它的高度；
 // 量早了 --hdr 就会偏小，表头被顶栏压住（这也是之前反复出问题的原因之一）。
@@ -413,6 +488,19 @@ def load_rows(path: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+def pending_frames_of(dataset: str) -> set[str] | None:
+    """台账里还没标完的帧（status != done）。没有台账时返回 None = "无从判断，全部当待标注"。
+
+    为什么要这一步：标注界面是**增量**的入口 —— 只该铺出还没标完的帧。
+    否则每加一批新帧，旧帧都会随全量重铺一遍，人工就得在已经标过的格子里重新找新格子。
+    """
+    p = os.path.join(dataset, "frames.csv")
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return {r["frame"] for r in csv.DictReader(f) if r.get("status") != "done"}
+
+
 def sample_file_of(samples: str, frame: str) -> str:
     """帧名 → 原始截图文件名（帧名就是原名去掉扩展名，所以直接按扩展名找）。"""
     for ext in (".jpg", ".jpeg", ".png", ".JPG", ".PNG"):
@@ -424,10 +512,22 @@ def sample_file_of(samples: str, frame: str) -> str:
 def build_html(dataset: str = "dataset", catalog: str = "catalog", samples: str = "samples",
                html: str = "annotate.html", thr: float = 0.30, top: int = 12, emb: str = "",
                same_thr: float = 0.10, color_thr: float = 0.35, quiet: bool = False,
-               cache: str = "") -> str:
-    """生成标注界面，返回 html 路径。"""
+               cache: str = "", only_pending: bool = True) -> str:
+    """生成标注界面，返回 html 路径。
+
+    only_pending=True（默认）时只铺出 frames.csv 里 status != done 的帧 —— 这就是"标注支持增量"：
+    每批新帧标完并写回台账后，下一次界面里只剩新帧。没有台账（老数据集）则退回全量。
+    """
     cache = cache or cache_dir_of(dataset)
     rows = load_rows(os.path.join(dataset, "index.csv"))
+    if only_pending:
+        pend = pending_frames_of(dataset)
+        if pend is not None:
+            n_all = len(rows)
+            rows = [r for r in rows if r["frame"] in pend]
+            if not quiet:
+                print(f"  只显示待标注帧：{n_all} → {len(rows)} 格"
+                      f"（{len(pend)} 帧未标完；要全量加 --all）")
     frame_rows = rows
     refs = load_rows(os.path.join(catalog, "index.csv"))
     base = os.path.dirname(os.path.abspath(html))
@@ -480,21 +580,25 @@ def build_html(dataset: str = "dataset", catalog: str = "catalog", samples: str 
                     "frame": fr, "row": int(os.path.basename(ms[i]["path"])[1:3]),
                     "col": int(os.path.basename(ms[i]["path"])[4:6]), "raw": raw,
                     "cid": int(ms[i]["class_id"]) if ms[i].get("class_id") else 0,
+                    "emp": 1 if ms[i].get("cls_src") == "empty" else 0,
                     "d": float(ms[i]["cls_dist"]) if ms[i].get("cls_dist") else 0.0,
                 } for i in idx],
             })
             group_keys.append(key)
             group_dev.append(dev[idx].mean(0))
     # 组代表 = 成员特征的均值（再归一化），和全部图鉴图算余弦距离取 top-N
-    rep = np.stack(group_dev)
-    rep = rep / (np.linalg.norm(rep, axis=1, keepdims=True) + 1e-8)
-    Dc = np.clip(1.0 - rep @ emb_ref.T, 0.0, 2.0)
-    order = np.argsort(Dc, axis=1)[:, :top]
-    gi_of = {k: i for i, k in enumerate(group_keys)}
-    for fr in groups:
-        for g in groups[fr]:
-            i = gi_of[g["key"]]
-            g["cands"] = [[int(ref_class_of[j]), round(float(Dc[i, j]), 3)] for j in order[i]]
+    if not group_dev:                                      # 没有待标注帧（增量常态）：空页面
+        groups = {}
+    else:
+        rep = np.stack(group_dev)
+        rep = rep / (np.linalg.norm(rep, axis=1, keepdims=True) + 1e-8)
+        Dc = np.clip(1.0 - rep @ emb_ref.T, 0.0, 2.0)
+        order = np.argsort(Dc, axis=1)[:, :top]
+        gi_of = {k: i for i, k in enumerate(group_keys)}
+        for fr in groups:
+            for g in groups[fr]:
+                i = gi_of[g["key"]]
+                g["cands"] = [[int(ref_class_of[j]), round(float(Dc[i, j]), 3)] for j in order[i]]
     print(f"按 embedding+色相 分组: {len(group_keys)} 组 / {len(frame_rows)} 张，"
           f"阈值 embedding≤{same_thr} 且 色相≤{color_thr}")
     # 棋盘行列直接由格子里最大行列推出（文件名 r03c05 = 第3行第5列），不再需要 frames.csv
@@ -508,6 +612,10 @@ def build_html(dataset: str = "dataset", catalog: str = "catalog", samples: str 
             "cells": sum(g["n"] for g in groups[fr]), "groups": groups[fr]})
     data = {
         "dataset": dataset,
+        "root": os.path.abspath(dataset),          # 抽屉里"复制图片路径"给的是绝对路径
+        # 页头显示"这套标签是用哪个模型打出来的"——多模型对比时不用猜
+        "model": str(z["backbone"]) if "backbone" in z else os.path.basename(emb_path),
+        "emb": os.path.basename(emb_path),
         "tiles": rel(os.path.join(catalog, "tiles")) + "/",
         "refs": [[int(r["class_id"]), r["entry"]] for r in refs],
         "frames": frames, "cands": cands,
@@ -516,8 +624,9 @@ def build_html(dataset: str = "dataset", catalog: str = "catalog", samples: str 
         f.write(HTML.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
                     .replace("__THR__", str(thr)))
     n_auto = sum(1 for r in frame_rows if r.get("cls_src") == "auto")
+    n_bg = sum(1 for r in frame_rows if r.get("cls_src") == "empty")
     if not quiet:
-        print(f"  标注界面: 自动识别 {n_auto}/{len(frame_rows)} 张 → {html}")
+        print(f"  标注界面: 砖块 {n_auto} + 背景 {n_bg} = {len(frame_rows)} 张 → {html}")
     return html
 
 
@@ -536,9 +645,12 @@ def main() -> None:
                          "0.10 落在两簇中间的空隙里")
     ap.add_argument("--color-thr", type=float, default=0.35,
                     help="色相直方图距离阈值：同款 0.01~0.07、异款 0.8+，用于挡住同形状不同色")
+    ap.add_argument("--all", action="store_true",
+                    help="铺出全部帧（默认只铺 frames.csv 里 status != done 的待标注帧）")
     args = ap.parse_args()
     build_html(args.dataset, args.catalog, args.samples, args.html, args.thr, args.top,
-               args.emb, args.same_thr, args.color_thr, cache=args.cache)
+               args.emb, args.same_thr, args.color_thr, cache=args.cache,
+               only_pending=not args.all)
 
 
 if __name__ == "__main__":
