@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">BrickGame</string>
+    <string name="accessibility_service_label">BrickGame 提示</string>
+    <string name="accessibility_service_description">读取屏幕内容以标定棋盘并给出消除提示。不上传任何画面，也不需要窗口内容权限。</string>
 </resources>

@@ -1,4 +1,4 @@
-package com.example.brickgame
+package com.qcmian.brickgame
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image

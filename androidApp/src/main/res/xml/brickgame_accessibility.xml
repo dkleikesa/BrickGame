@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只需要"截屏"这一项能力：
+  - canTakeScreenshot（API 30+）：AccessibilityService#takeScreenshot 的开关；
+  - canRetrieveWindowContent=false：不读窗口节点树，权限面尽量小；
+  - 事件类型只订阅窗口状态变化：够触发一次重新分析，又不会因为每帧事件把 CPU 拉满。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="200" />

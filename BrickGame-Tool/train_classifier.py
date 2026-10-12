@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""物品识别模型训练：素材库(图鉴) → 跨域身份 embedding + 原型库。
+"""物品识别模型训练：图鉴素材 + 真实截图 → 跨域身份 embedding + 2369 类原型库。
+
+**数据（`--data real`，默认）**：只用磁盘上现成的真实图片，不渲染、不重染、不生成新图 ——
+  ① 图鉴 build-catalog/catalog/tiles/*.png：每类 1 张，原样
+  ② 截图 build-dataset/dataset/images/frame/**：标注过的格子，原样
+正样本对 = 同类（图鉴图 ↔ 该类的真实格），跨域对齐就是域适配的全部信号。
+按**帧**留出验证集（同帧格子近重复，按格划分会虚高）。
+
+**骨干**：默认从 ImageNet 预训练的 mobilenet_v3_large 微调（与自动识别用的骨干同一个，
+见 auto_classify.DEFAULT_BACKBONE）；`--backbone scratch` 回到"从零训小 CNN"的老行为。
+预训练骨干走 `--img 224`（ImageNet 原分辨率），scratch 走 64。
 
 设计要点（与方案 v2 对应）：
 
@@ -21,8 +31,10 @@
 训练脚本。上游数据由 build-catalog/（图鉴素材）与 build-dataset/（截图标注）产出。
 
 用法：
-  python train_classifier.py --catalog catalog --samples samples --out out/clf --epochs 30
-  python train_classifier.py --eval-only
+  python train_classifier.py                       # 默认 --data real：只用真实图，零合成
+  python train_classifier.py --data synth          # 旧的合成增广流程（图鉴图重染造视图）
+  python train_classifier.py --freeze-backbone     # 只训投影头（数据少时更稳）
+  python train_classifier.py --eval-only           # 只评测已有权重
 """
 from __future__ import annotations
 
@@ -38,11 +50,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-catalog"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-dataset"))
 import tile_recognizer as T                 # noqa: E402
 from build_catalog import bg_surface        # noqa: E402
+import auto_classify                        # noqa: E402  DEFAULT_BACKBONE：与自动识别保持同一骨干
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -52,8 +67,13 @@ IMG = 64       # 模型输入尺寸
 
 # ---------------------------------------------------------------- 模型
 def to_tensor(batch: np.ndarray) -> torch.Tensor:
-    """BGR uint8 (N,64,64,3) → RGB float32 (N,3,64,64)，ImageNet 归一化。"""
-    x = torch.from_numpy(batch[..., ::-1].copy()).float().permute(0, 3, 1, 2) / 255.0
+    """BGR uint8 (N,H,W,3) → RGB float32 (N,3,H,W)，ImageNet 归一化。
+
+    `.contiguous()` 不能省：`from_numpy(...).permute()` 得到的是非连续张量，
+    送进 mobilenet 的 depthwise / Squeeze-Excitation 分支后，**MPS 上的反向**会直接炸
+    「view size is not compatible with input tensor's size and stride」（实测 CPU 不炸、MPS 炸）。
+    """
+    x = torch.from_numpy(batch[..., ::-1].copy()).float().permute(0, 3, 1, 2).contiguous() / 255.0
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     return (x - mean) / std
@@ -93,6 +113,63 @@ class Embedder(nn.Module):
         f = F.adaptive_avg_pool2d(h, 1).flatten(1)
         e = F.normalize(self.embed(f), dim=1)
         return e, (self.state(f) if self.state is not None else None)
+
+
+# ---------------------------------------------------------------- 预训练骨干
+# 与 embed_features.py 用**同一套骨干定义和同一档权重**（mobilenet_v3_large 用 V2），
+# 这样"自动识别用的特征"和"训练起点"是同一个域，微调是在同一个度量空间里往前推。
+_BACKBONES = {
+    "mobilenet_v3_large": torchvision.models.mobilenet_v3_large,
+    "mobilenet_v3_small": torchvision.models.mobilenet_v3_small,
+    "resnet18": torchvision.models.resnet18,
+    "resnet50": torchvision.models.resnet50,
+}
+_BODY_DIM = {"mobilenet_v3_large": 960, "mobilenet_v3_small": 576,
+             "resnet18": 512, "resnet50": 2048}
+
+
+def build_body(name: str) -> nn.Module:
+    """ImageNet 预训练骨干：图像 → 全局池化特征（不含分类头）。
+
+    类别数是 2370 而每类只有 1 张参考图，绝不能用骨干自带的 1000 类头，
+    也不能接 2370 路 softmax（会直接背下那一张）。骨干只当特征提取器用。
+    """
+    if name not in _BACKBONES:
+        raise SystemExit(f"不支持的骨干: {name}（可选 scratch / " + " / ".join(_BACKBONES) + "）")
+    m = _BACKBONES[name](weights="IMAGENET1K_V2" if name.startswith("mobilenet")
+                         else "IMAGENET1K_V1")
+    body = nn.Sequential(*list(m.children())[:-2]) if name.startswith("resnet") else m.features
+    return nn.Sequential(body, nn.AdaptiveAvgPool2d(1), nn.Flatten())
+
+
+class PretrainedEmbedder(nn.Module):
+    """预训练骨干 + 投影头 → 128/256 维 L2 归一化身份向量。
+
+    投影头不是可有可无：ImageNet 特征只负责"通用物体"，对"二萬 / 三萬"这种只差一个字的
+    图标区分度不够（实测最近邻会互相抢）。SupCon 把骨干拉进"图鉴域 ↔ 截图域"的共同度量空间，
+    投影头就是这段适配的落点 —— 原型库用的也是同一个头的输出，训练/推理才一致。
+    """
+
+    def __init__(self, backbone: str = "mobilenet_v3_large", embed_dim: int = 256,
+                 n_state: int = 0, drop: float = 0.0):
+        super().__init__()
+        self.backbone_name = backbone
+        self.body = build_body(backbone)
+        self.feat_dim = _BODY_DIM[backbone]
+        self.dropout = nn.Dropout(drop) if drop > 0 else nn.Identity()
+        self.embed = nn.Linear(self.feat_dim, embed_dim)
+        self.state = nn.Linear(self.feat_dim, n_state) if n_state > 0 else None
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        f = self.dropout(self.body(x))
+        e = F.normalize(self.embed(f), dim=1)
+        return e, (self.state(f) if self.state is not None else None)
+
+
+def make_model(backbone: str, embed_dim: int, width: int, n_state: int = 0) -> nn.Module:
+    if backbone == "scratch":
+        return Embedder(embed_dim, n_state, width)
+    return PretrainedEmbedder(backbone, embed_dim, n_state)
 
 
 # ---------------------------------------------------------------- 数据
@@ -291,10 +368,10 @@ def embed(models: torch.nn.Module, imgs: np.ndarray, device: str, bs: int = 256)
 
 
 def eval_holdout(model, icons: Icons, bgs: np.ndarray, hold: np.ndarray, device: str,
-                 rng: np.random.Generator, n_view: int = 4) -> dict:
+                 rng: np.random.Generator, n_view: int = 4, bs: int = 256) -> dict:
     """留出类：图鉴图当原型，困难增强视图当查询。这是"新物品上线"的场景。"""
     gal = embed(model, np.stack([render(icons.icon[i], icons.canvas_from_catalog(i), rng)
-                                 for i in range(icons.n)]), device)
+                                 for i in range(icons.n)]), device, bs)
     proto = gal / (np.linalg.norm(gal, axis=1, keepdims=True) + 1e-8)
     hq = np.where(hold)[0]
     if hq.size == 0:
@@ -304,7 +381,7 @@ def eval_holdout(model, icons: Icons, bgs: np.ndarray, hold: np.ndarray, device:
         for v in range(n_view):
             q_imgs.append(render(icons.icon[i], bgs[rng.integers(len(bgs))], rng, hard=True))
             q_lab.append(i)
-    q = embed(model, np.stack(q_imgs), device)
+    q = embed(model, np.stack(q_imgs), device, bs)
     qn = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-8)
     D = np.clip(1.0 - qn @ proto.T, 0, 2)                 # (nq, n_class)
     pred = D.argmin(1)
@@ -372,33 +449,411 @@ def eval_frames(model, samples: str, device: str) -> dict:
             "mdl_clusters": float(np.mean([r["mdl_clusters"] for r in rows])), "detail": rows}
 
 
+def load_weights(model: nn.Module, ck_path: str, dev: str, args) -> dict:
+    """载入权重前先核对骨干/输入尺寸 —— 对不上就直说，别让 load_state_dict 抛一堆 shape 错。"""
+    ck = torch.load(ck_path, map_location=dev, weights_only=False)
+    bb, im = ck.get("backbone"), ck.get("img")
+    if bb and bb != args.backbone:
+        raise SystemExit(f"{ck_path} 是 {bb} 训出来的，当前 --backbone={args.backbone}；"
+                         f"加 --backbone {bb} 重跑")
+    if im and int(im) != IMG:
+        raise SystemExit(f"{ck_path} 的输入尺寸是 {im}，当前 {IMG}；加 --img {im} 重跑")
+    model.load_state_dict(ck["model"])
+    return ck
+
+
+def trainable_groups(model: nn.Module, args) -> list[dict]:
+    """分两组学习率：投影头（新初始化的）用 --lr，预训练骨干用 --lr×--backbone-lr-scale。
+
+    骨干一上来就用大学习率会把 ImageNet 特征冲掉（每类只有 1 张参考图，救不回来）。
+    """
+    head = [p for n, p in model.named_parameters() if not n.startswith("body.")]
+    body = [p for n, p in model.named_parameters() if n.startswith("body.")]
+    if args.freeze_backbone:
+        for p in body:
+            p.requires_grad = False
+    groups = [{"params": head, "lr": args.lr}]
+    if body and not args.freeze_backbone:
+        groups.append({"params": body, "lr": args.lr * args.backbone_lr_scale})
+    return groups
+
+
+def ckpt_dict(model: nn.Module, args, ep: int, cat: "Catalog" | None = None,
+              icons=None) -> dict:
+    """权重 + 复现所需的全部信息（推理端靠 backbone/img 才能重建同一个模型）。"""
+    ids = cat.class_ids if cat is not None else icons.class_ids
+    entries = cat.entries if cat is not None else icons.entries
+    return {"model": model.state_dict(), "epoch": ep, "args": vars(args),
+            "arch": "scratch" if args.backbone == "scratch" else "pretrained",
+            "backbone": args.backbone, "embed_dim": args.embed_dim, "width": args.width,
+            "img": IMG, "crop": CROP, "data": args.data,
+            "class_ids": ids, "entries": entries}
+
+
+def config_dict(args) -> dict:
+    return {"data": args.data, "backbone": args.backbone,
+            "freeze_backbone": args.freeze_backbone, "img": IMG, "crop": CROP,
+            "embed_dim": args.embed_dim, "epochs": args.epochs, "lr": args.lr,
+            "backbone_lr_scale": args.backbone_lr_scale, "seed": args.seed, "aug": args.aug}
+
+
+# ---------------------------------------------------------------- 真实数据（零合成）
+# 训练只用磁盘上现成的两类图片，不渲染、不重染、不生成任何新图：
+#   ① 图鉴 build-catalog/catalog/tiles/*.png —— 每类 1 张，原样
+#   ② 截图 build-dataset/dataset/images/frame/** —— 标注过的格子，原样
+# 正样本对来自"同类"：图鉴图 ↔ 该类的真实格，即跨域对齐 —— 这就是域适配的全部信号。
+class Catalog:
+    """图鉴参考图（每类 1 张真实图，原样保留底色）。"""
+
+    def __init__(self, catalog: str, crop: int):
+        by_class: dict[int, dict] = {}
+        for r in csv.DictReader(open(os.path.join(catalog, "index.csv"))):
+            by_class.setdefault(int(r["class_id"]), r)
+        ids = sorted(by_class)
+        self.class_ids = ids
+        self.index = {c: i for i, c in enumerate(ids)}
+        self.entries = [by_class[c]["entry"] for c in ids]
+        self.faded = np.array([int(by_class[c]["faded"]) for c in ids], np.int8)
+        self.img = np.zeros((len(ids), crop, crop, 3), np.uint8)
+        for i, c in enumerate(ids):
+            bgr = cv2.imread(os.path.join(catalog, by_class[c]["tile"]), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise SystemExit(f"读不到 {by_class[c]['tile']}，先跑 build_catalog.py")
+            self.img[i] = cv2.resize(bgr, (crop, crop), interpolation=cv2.INTER_AREA)
+        self.n = len(ids)
+        print(f"图鉴: {self.n} 类，每类 1 张真实参考图（{crop}x{crop}，无合成/无重染）")
+
+
+class Real:
+    """dataset 真实截图格。只收有标签的（空位/未知不收）；训练/验证**按帧**划分。
+
+    为什么按帧分：同一帧里同一物品会出现十几次、底色与缩放完全一致，按格随机划分会让
+    验证集里全是训练集的近重复 —— 指标虚高。留出整帧才等于"换一张新截图来测"。
+    """
+
+    def __init__(self, dataset: str, cat: "Catalog", max_dist: float, val_frames: int, seed: int):
+        rows = list(csv.DictReader(open(os.path.join(dataset, "index.csv"))))
+        kept, drop = [], {"空位/未知": 0, "不在图鉴": 0, "auto 距离过大": 0}
+        for r in rows:
+            src, cid = r.get("cls_src", ""), r.get("class_id", "")
+            if src in ("", "empty", "unknown") or not cid:
+                drop["空位/未知"] += 1
+                continue
+            c = int(cid)
+            if c not in cat.index:
+                drop["不在图鉴"] += 1
+                continue
+            d = float(r["cls_dist"]) if r.get("cls_dist") else 9.0
+            if src == "auto" and d > max_dist:          # manual 一律保留
+                drop["auto 距离过大"] += 1
+                continue
+            kept.append((cat.index[c], r["path"], r["frame"]))
+
+        frames = sorted({k[2] for k in kept})
+        rng = np.random.default_rng(seed)
+        n_val = min(val_frames, max(0, len(frames) - 1))
+        val = set(rng.choice(frames, n_val, replace=False).tolist()) if n_val else set()
+        self.cache: dict[str, np.ndarray] = {}
+        self.train: list[tuple[int, str]] = []
+        self.val: list[tuple[int, str]] = []
+        for ci, p, fr in kept:
+            img = cv2.imread(os.path.join(dataset, p), cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            self.cache[p] = img
+            (self.val if fr in val else self.train).append((ci, p))
+        self.val_frames = sorted(val)
+        self.by_class: dict[int, list[str]] = {}
+        for ci, p in self.train:
+            self.by_class.setdefault(ci, []).append(p)
+        self.train_classes = sorted(self.by_class)
+        dropped = "、".join(f"{k} {v}" for k, v in drop.items() if v) or "无"
+        print(f"真实格: 收 {len(kept)}/{len(rows)}（丢弃 {dropped}）→ "
+              f"训练 {len(self.train)} 格 / 验证 {len(self.val)} 格（留出帧 {self.val_frames or '无'}）")
+        print(f"  涉及 {len({c for c, _ in self.train + self.val})} 类；其中 {len(self.train_classes)} 类"
+              f"有训练格（占 {len(self.train_classes) / cat.n:.1%}），其余类只当负样本")
+
+    def imgs(self, items: list[tuple[int, str]]) -> np.ndarray:
+        return np.stack([self.cache[p] for _, p in items])
+
+
+def aug_light(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """真实图的轻量增广：平移 / 亮度对比度 / JPEG。
+
+    刻意不做的事：**不镜像**（图标里有文字、数字，镜像会变成另一个物品）、不改底色、
+    不生成任何图鉴合成图。默认 `--aug none` 完全关掉。
+    """
+    out = img.astype(np.float32)
+    if rng.random() < 0.5:
+        M = np.float32([[1, 0, rng.uniform(-2, 2)], [0, 1, rng.uniform(-2, 2)]])
+        out = cv2.warpAffine(out, M, (out.shape[1], out.shape[0]), borderMode=cv2.BORDER_REPLICATE)
+    out = out * (1 + rng.uniform(-0.15, 0.15)) + rng.uniform(-10, 10)
+    if rng.random() < 0.3:
+        g = out.mean(axis=2, keepdims=True)
+        out = out * 0.8 + g * 0.2
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    if rng.random() < 0.5:
+        ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, int(rng.integers(60, 96))])
+        if ok:
+            out = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    return out
+
+
+def real_batch(cat: "Catalog", real: "Real", rng, n_class: int, views: int, aug: bool,
+               real_ratio: float) -> tuple[list[np.ndarray], np.ndarray]:
+    """一批 = 若干类 ×（图鉴图 + 该类的真实格）。
+
+    采样**偏向有真实格的类**：2369 类里只有 78 类有真实格，均匀抽 64 个平均只命中 2 个，
+    跨域正样本对太稀，等于没在适配。其余类补进来只当负样本 —— 把空间撑开，
+    避免模型只顾这 78 类、把别的物品混到一起。
+
+    返回**列表**而不是堆好的数组：图鉴图是 96x96、真实格是 64x64，尺寸不同堆不到一起，
+    统一在 to_tensor_batch 里 resize 到 IMG（与 embed() 的预处理保持同一条路）。
+    """
+    n_real = min(len(real.train_classes), max(1, int(n_class * real_ratio)))
+    cls = [int(c) for c in rng.choice(real.train_classes, n_real, replace=False)] if n_real else []
+    if len(cls) < n_class:
+        rest = np.setdiff1d(np.arange(cat.n), np.array(cls, np.int64))
+        cls += [int(c) for c in rng.choice(rest, min(n_class - len(cls), rest.size), replace=False)]
+    imgs: list[np.ndarray] = []
+    labs: list[int] = []
+    for c in cls:
+        imgs.append(cat.img[c])
+        labs.append(c)
+        ps = real.by_class.get(c)
+        if ps:
+            for k in rng.choice(len(ps), min(views, len(ps)), replace=False):
+                imgs.append(real.cache[ps[int(k)]])
+                labs.append(c)
+    if aug:                                   # 每个样本再补一个增广视图 → 每类都有正样本对
+        n0 = len(imgs)
+        for i in range(n0):
+            imgs.append(aug_light(imgs[i], rng))
+            labs.append(labs[i])
+    return imgs, np.array(labs, np.int64)
+
+
+def build_prototypes(model, cat: "Catalog", real: "Real", dev: str, bs: int, fuse: bool
+                     ) -> np.ndarray:
+    """2369 类原型。fuse=True 时把"该类训练帧真实格"的 embedding 均值也融进来 ——
+    原型中心因此偏向截图域，检索不必只靠图鉴那一张图。原型只用**训练帧**的真实格，
+    不含验证帧，否则评测就泄漏了。"""
+    gal = embed(model, cat.img, dev, bs)
+    if fuse:
+        for c in real.train_classes:
+            ps = real.by_class[c]
+            e = embed(model, np.stack([real.cache[p] for p in ps]), dev, bs).mean(0)
+            g = gal[c] / (np.linalg.norm(gal[c]) + 1e-8)
+            gal[c] = 0.5 * g + 0.5 * e / (np.linalg.norm(e) + 1e-8)
+    return (gal / (np.linalg.norm(gal, axis=1, keepdims=True) + 1e-8)).astype(np.float32)
+
+
+def eval_real(model, cat: "Catalog", real: "Real", proto: np.ndarray, dev: str, bs: int) -> dict:
+    """真实域评测：留出帧的真实格当查询，在 2369 类原型上算 top1/top5。
+
+    除整体（micro）外还报**逐类平均（macro）**：你关心的是"这 78 类准不准"，
+    而不是"格子多的类准不准"—— 出现次数多的类会把 micro 拉高。
+    另外把"该类有训练格 / 没有训练格"分开报，后者才是"新物品只给一张图鉴图"的场景。
+    """
+    if not real.val:
+        return {}
+    q = embed(model, real.imgs(real.val), dev, bs)
+    qn = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-8)
+    D = np.clip(1.0 - qn @ proto.T, 0.0, 2.0)
+    lab = np.array([c for c, _ in real.val])
+    order = np.argsort(D, axis=1)
+    hit1 = (order[:, 0] == lab)
+    hit5 = (order[:, :5] == lab[:, None]).any(1)
+    per_cls: dict[int, list[float]] = {}
+    for i, c in enumerate(lab):
+        per_cls.setdefault(int(c), []).append(float(hit1[i]))
+    same = D[np.arange(len(lab)), lab]
+    D2 = D.copy()
+    D2[np.arange(len(lab)), lab] = 9.0
+    other = D2.min(1)
+    seen = np.array([c in real.by_class for c in lab])
+    return {
+        "n_query": len(lab), "n_class": cat.n, "n_query_class": len(per_cls),
+        "top1": float(hit1.mean()), "top5": float(hit5.mean()),
+        "top1_macro": float(np.mean([np.mean(v) for v in per_cls.values()])),
+        "n_seen": int(seen.sum()), "n_unseen": int((~seen).sum()),
+        "top1_seen_cls": float(hit1[seen].mean()) if seen.any() else 0.0,
+        "top1_unseen_cls": float(hit1[~seen].mean()) if (~seen).any() else 0.0,
+        "same_mean": float(same.mean()), "same_p95": float(np.percentile(same, 95)),
+        "wrong_dist_p5": float(np.percentile(other, 5)),
+        "hit_dist_p95": float(np.percentile(same[hit1], 95)) if hit1.any() else 0.0,
+    }
+
+
+def run_real(args, dev: str) -> None:
+    """只用真实图（图鉴 + 截图）训练，零合成。"""
+    rng = np.random.default_rng(args.seed)
+    cat = Catalog(args.catalog, CROP)
+    real = Real(args.real, cat, args.real_max_dist, args.val_frames, args.seed)
+    if not real.train:
+        raise SystemExit("没有可用的真实训练格：检查 dataset/index.csv 的 cls_src / class_id")
+
+    model = make_model(args.backbone, args.embed_dim, args.width).to(dev)
+    opt = torch.optim.AdamW(trainable_groups(model, args), weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    n_tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"骨干 {args.backbone}（{'冻结' if args.freeze_backbone else '微调'}）输入 {IMG}x{IMG}，"
+          f"身份向量 {args.embed_dim} 维，可训参数 {n_tr / 1e6:.2f}M，"
+          f"增广 {'light' if args.aug == 'light' else '无'}")
+
+    def save_ckpt(path: str, ep: int) -> None:
+        torch.save(ckpt_dict(model, args, ep, cat), path)
+
+    start = 0
+    if args.resume:
+        ck = load_weights(model, args.resume, dev, args)
+        start = ck.get("epoch", 0)
+        print(f"续训: 从 epoch {start} 恢复（{args.resume}）")
+
+    hist = []
+    if not args.eval_only:
+        for ep in range(start, args.epochs):
+            model.train()
+            t0, run = time.time(), 0.0
+            for _ in range(args.steps_per_epoch):
+                imgs, labs = real_batch(cat, real, rng, args.classes_per_batch, args.views,
+                                        args.aug == "light", args.real_ratio)
+                x = to_tensor_batch(imgs).to(dev)
+                e, _ = model(x)
+                loss = supcon(e, torch.from_numpy(labs).to(dev), args.tau).mean()
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                opt.step()
+                run += float(loss.detach())
+            sched.step()
+            msg = f"epoch {ep + 1:3d}/{args.epochs} loss {run / args.steps_per_epoch:.4f} " \
+                  f"{time.time() - t0:.1f}s"
+            if (ep + 1) % 5 == 0 or ep + 1 == args.epochs:
+                proto = build_prototypes(model, cat, real, dev, args.eval_batch, args.fuse_proto)
+                ev = eval_real(model, cat, real, proto, dev, args.eval_batch)
+                msg += (f" | 留出帧 top1 {ev['top1']:.3f}/top5 {ev['top5']:.3f}"
+                        f"（逐类均 {ev['top1_macro']:.3f}，有训练格 {ev['top1_seen_cls']:.3f}"
+                        f" / 无 {ev['top1_unseen_cls']:.3f}）")
+                hist.append({"epoch": ep + 1, "loss": run / args.steps_per_epoch, **ev})
+                with open(os.path.join(args.out, "history.csv"), "w", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=list(hist[0].keys()))
+                    w.writeheader()
+                    w.writerows(hist)
+                save_ckpt(os.path.join(args.out, "last.pt"), ep + 1)
+                if ev["top1"] >= max([h["top1"] for h in hist[:-1]] + [0.0]):
+                    save_ckpt(os.path.join(args.out, "best.pt"), ep + 1)
+                    msg += " → best.pt"
+            print(msg, flush=True)
+
+    ck_path = args.resume or os.path.join(
+        args.out, "best.pt" if os.path.exists(os.path.join(args.out, "best.pt")) else "last.pt")
+    ck = load_weights(model, ck_path, dev, args)
+    print(f"\n=== 评测（权重 {ck_path}，epoch {ck.get('epoch')}，骨干 {ck.get('backbone', '?')}）")
+    proto = build_prototypes(model, cat, real, dev, args.eval_batch, args.fuse_proto)
+    ev = eval_real(model, cat, real, proto, dev, args.eval_batch)
+    fr = eval_frames(model, args.samples, dev)
+    np.savez(os.path.join(args.out, "prototypes.npz"),
+             proto=proto, class_ids=np.array(cat.class_ids), entries=np.array(cat.entries),
+             faded=cat.faded, backbone=np.array(args.backbone), img=np.array(IMG),
+             embed_dim=np.array(args.embed_dim), data=np.array(args.data))
+    if ev:
+        print(f"留出帧真实评测（{ev['n_query']} 格 / {ev['n_query_class']} 类 / 共 {ev['n_class']} 类原型）:")
+        print(f"  top1 {ev['top1']:.3f}  top5 {ev['top5']:.3f}  逐类平均 top1 {ev['top1_macro']:.3f}")
+        print(f"  有训练格的类 {ev['top1_seen_cls']:.3f}（{ev['n_seen']} 格）"
+              f" / 只在留出帧出现的类 {ev['top1_unseen_cls']:.3f}（{ev['n_unseen']} 格）")
+        print(f"  命中距离均值 {ev['same_mean']:.3f}(p95 {ev['same_p95']:.3f})，"
+              f"最近异类距离 p5 {ev['wrong_dist_p5']:.3f}，命中 p95 {ev['hit_dist_p95']:.3f}"
+              f"（可当 low-confidence 阈值参考）")
+    if fr:
+        print(f"真实截图帧内一致性: {fr['frames']} 帧；像素基线 偶数约束通过 {fr['pix_parity_ok']:.2f} "
+              f"平均簇数 {fr['pix_clusters']:.1f}；模型 {fr['mdl_parity_ok']:.2f} 平均簇数 {fr['mdl_clusters']:.1f}")
+    with open(os.path.join(args.out, "metrics.json"), "w") as f:
+        json.dump({"config": config_dict(args), "real": ev, "frames": fr, "history": hist}, f,
+                  indent=2, ensure_ascii=False)
+    print(f"输出: {args.out}/best.pt / prototypes.npz({cat.n} 类原型) / metrics.json / history.csv")
+
+
 # ---------------------------------------------------------------- 主流程
-def main() -> None:
-    ap = argparse.ArgumentParser(description="图鉴素材库 → 物品 embedding + 原型库")
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="图鉴素材 + 真实截图 → 物品 embedding + 原型库")
     ap.add_argument("--catalog", default=os.path.join(_ROOT, "build-catalog", "catalog"))
     ap.add_argument("--samples", default=os.path.join(_ROOT, "build-dataset", "samples"))
-    ap.add_argument("--out", default=os.path.join(_ROOT, "out/clf"))
+    ap.add_argument("--out", default="",
+                    help="输出目录，留空= out/clf_real（--data real）/ out/clf（--data synth）")
+    # ---- 数据来源 ----
+    ap.add_argument("--data", default="real", choices=["real", "synth"],
+                    help="real（默认）=只用真实图：图鉴参考图 + 截图标注，零合成；"
+                         "synth=旧的合成增广流程（图鉴图按底色重染造视图）")
+    ap.add_argument("--real", default=os.path.join(_ROOT, "build-dataset", "dataset"),
+                    help="--data real 用的截图数据集目录（含 index.csv 与 images/）")
+    ap.add_argument("--real-max-dist", type=float, default=0.15,
+                    help="auto 标签只收识别距离 ≤ 该值的；人工标注 manual 一律保留；9=全收")
+    ap.add_argument("--real-ratio", type=float, default=0.6,
+                    help="每个 batch 从\"有真实格的类\"里抽的比例，其余从全类抽（只当负样本）")
+    ap.add_argument("--val-frames", type=int, default=3,
+                    help="留出多少帧做真实域验证：这些帧的格子完全不参与训练")
+    ap.add_argument("--aug", default="none", choices=["none", "light"],
+                    help="none（默认）=原图直接喂，零增广；light=真实图上做平移/亮度/JPEG")
+    ap.add_argument("--fuse-proto", action=argparse.BooleanOptionalAction, default=True,
+                    help="原型是否融合\"该类训练帧真实格\"的 embedding 均值（默认融合）")
+    # ---- 模型 ----
+    ap.add_argument("--backbone", default=auto_classify.DEFAULT_BACKBONE,
+                    choices=["scratch"] + sorted(_BACKBONES),
+                    help=f"默认 {auto_classify.DEFAULT_BACKBONE}（与自动识别同骨干，读 auto_classify 常量）；"
+                         f"scratch = 从零训小 CNN（老行为）")
+    ap.add_argument("--img", type=int, default=0,
+                    help="模型输入边长，0=自动（预训练骨干 224 / scratch 64）")
+    ap.add_argument("--crop", type=int, default=0, help="内存里存的图边长，0=自动（96，与图鉴 tiles 同尺寸）")
+    ap.add_argument("--freeze-backbone", action="store_true",
+                    help="冻住骨干只训投影头（每类只有 1 张参考图时更稳，也是最快的对照）")
+    ap.add_argument("--backbone-lr-scale", type=float, default=0.1,
+                    help="微调时骨干的学习率 = --lr × 该系数（投影头用 --lr）")
+    ap.add_argument("--embed-dim", type=int, default=0,
+                    help="身份向量维度，0=自动（预训练骨干 256 / scratch 64）")
+    ap.add_argument("--width", type=int, default=32, help="scratch 骨干的宽度")
+    # ---- 训练 ----
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--steps-per-epoch", type=int, default=40)
     ap.add_argument("--classes-per-batch", type=int, default=64)
-    ap.add_argument("--views", type=int, default=2)
-    ap.add_argument("--embed-dim", type=int, default=64)
-    ap.add_argument("--width", type=int, default=32)
+    ap.add_argument("--views", type=int, default=2, help="每个类抽几张真实格进 batch")
+    ap.add_argument("--eval-batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--tau", type=float, default=0.08)
-    ap.add_argument("--holdout-every", type=int, default=10)
-    ap.add_argument("--max-classes", type=int, default=0)
+    ap.add_argument("--holdout-every", type=int, default=10, help="--data synth 用：每 N 类留出 1 类")
+    ap.add_argument("--max-classes", type=int, default=0, help="--data synth 用：只用这么多类")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", default="")
     ap.add_argument("--eval-only", action="store_true")
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    # 尺寸是模块级全局（to_tensor_batch 都在用），这里按骨干定下来
+    global IMG, CROP
+    if args.crop:
+        CROP = args.crop
+    pretrained = args.backbone != "scratch"
+    IMG = args.img or (224 if pretrained else 64)
+    if not args.embed_dim:
+        args.embed_dim = 256 if pretrained else 64
+    if not args.out:
+        args.out = os.path.join(_ROOT, "out/clf" if args.data == "synth" else "out/clf_real")
 
     dev = ("mps" if torch.backends.mps.is_available() else "cpu") if args.device == "auto" else args.device
     torch.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
     os.makedirs(args.out, exist_ok=True)
+    if args.data == "synth":
+        run_synth(args, dev)
+    else:
+        run_real(args, dev)
 
+
+def run_synth(args, dev: str) -> None:
+    """旧的合成增广流程（图鉴图 + 底色重染造视图）。--data synth 才走这里。"""
+    rng = np.random.default_rng(args.seed)
     icons = Icons(args.catalog, args.max_classes, args.seed)
     bgs = real_canvases(args.samples, 400, args.seed)
     cat_bgs = np.stack([icons.canvas_from_catalog(i) for i in range(min(icons.n, 300))])
@@ -428,15 +883,36 @@ def main() -> None:
                     gray_pairs.append((ms[a], ms[b]))
     print(f"有真值的同素材对: {len(gray_pairs)} 对（去重组成员 + 灰区近重复）")
 
-    model = Embedder(args.embed_dim, 0, args.width).to(dev)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    model = make_model(args.backbone, args.embed_dim, args.width).to(dev)
+    # 分两组学习率：投影头（新初始化的）用 --lr，预训练骨干用 --lr×--backbone-lr-scale。
+    # 骨干一上来就用大学习率会把 ImageNet 特征冲掉（每类只有 1 张参考图，救不回来）。
+    head = [(n, p) for n, p in model.named_parameters() if not n.startswith("body.")]
+    body = [(n, p) for n, p in model.named_parameters() if n.startswith("body.")]
+    if args.freeze_backbone:
+        for _, p in body:
+            p.requires_grad = False
+    groups = [{"params": [p for _, p in head], "lr": args.lr}]
+    if body and not args.freeze_backbone:
+        groups.append({"params": [p for _, p in body], "lr": args.lr * args.backbone_lr_scale})
+    opt = torch.optim.AdamW(groups, weight_decay=1e-4)
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"骨干 {args.backbone}（{'冻结' if args.freeze_backbone else '微调'}）"
+          f"输入 {IMG}x{IMG}，身份向量 {args.embed_dim} 维，可训参数 {n_train / 1e6:.2f}M")
+
+    def save_ckpt(path: str, ep: int) -> None:
+        """权重 + 复现所需的全部信息（推理端要靠 backbone/img 才能重建同一个模型）。"""
+        torch.save({"model": model.state_dict(), "epoch": ep, "args": vars(args),
+                    "arch": "scratch" if args.backbone == "scratch" else "pretrained",
+                    "backbone": args.backbone, "embed_dim": args.embed_dim,
+                    "width": args.width, "img": IMG, "crop": CROP,
+                    "class_ids": icons.class_ids, "entries": icons.entries}, path)
+
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     start = 0
     if args.resume:
-        ck = torch.load(args.resume, map_location=dev, weights_only=False)
-        model.load_state_dict(ck["model"])
+        ck = load_weights(model, args.resume, dev, args)
         start = ck.get("epoch", 0)
-        print(f"续训: 从 epoch {start} 恢复")
+        print(f"续训: 从 epoch {start} 恢复（{args.resume}）")
 
     hist = []
     if not args.eval_only:
@@ -464,40 +940,34 @@ def main() -> None:
             msg = f"epoch {ep + 1:3d}/{args.epochs} loss {run / args.steps_per_epoch:.4f} " \
                   f"{time.time() - t0:.1f}s"
             if (ep + 1) % 5 == 0 or ep + 1 == args.epochs:
-                ev = eval_holdout(model, icons, bank, hold, dev, rng)
+                ev = eval_holdout(model, icons, bank, hold, dev, rng, bs=args.eval_batch)
                 msg += (f" | 留出类 top1 {ev['top1']:.3f} 同类均值 {ev['same_mean']:.3f} / "
                         f"异类均值 {ev['other_mean']:.3f} (间隔 {ev['margin']:.3f})")
                 hist.append({"epoch": ep + 1, "loss": run / args.steps_per_epoch, **ev})
                 with open(os.path.join(args.out, "history.csv"), "w", newline="") as f:
                     w = csv.DictWriter(f, fieldnames=list(hist[0].keys()))
                     w.writeheader(); w.writerows(hist)
-                torch.save({"model": model.state_dict(), "epoch": ep + 1, "args": vars(args),
-                            "embed_dim": args.embed_dim, "width": args.width,
-                            "class_ids": icons.class_ids, "entries": icons.entries}, 
-                           os.path.join(args.out, "last.pt"))
+                save_ckpt(os.path.join(args.out, "last.pt"), ep + 1)
                 if ev["top1"] >= max([h["top1"] for h in hist[:-1]] + [0.0]):
-                    torch.save({"model": model.state_dict(), "epoch": ep + 1, "args": vars(args),
-                                "embed_dim": args.embed_dim, "width": args.width,
-                                "class_ids": icons.class_ids, "entries": icons.entries},
-                               os.path.join(args.out, "best.pt"))
+                    save_ckpt(os.path.join(args.out, "best.pt"), ep + 1)
                     msg += " → best.pt"
             print(msg, flush=True)
 
     ck_path = args.resume or os.path.join(
         args.out, "best.pt" if os.path.exists(os.path.join(args.out, "best.pt")) else "last.pt")
-    ck = torch.load(ck_path, map_location=dev, weights_only=False)
-    model.load_state_dict(ck["model"])
-    print(f"\n=== 评测（权重 {ck_path}，epoch {ck.get('epoch')}）")
-    ev = eval_holdout(model, icons, bank, hold, dev, rng)
+    ck = load_weights(model, ck_path, dev, args)
+    print(f"\n=== 评测（权重 {ck_path}，epoch {ck.get('epoch')}，骨干 {ck.get('backbone', '?')}）")
+    ev = eval_holdout(model, icons, bank, hold, dev, rng, bs=args.eval_batch)
     pr = eval_pairs(model, icons, gray_pairs, rng, dev)
     fr = eval_frames(model, args.samples, dev)
 
     gal = embed(model, np.stack([render(icons.icon[i], icons.canvas_from_catalog(i), rng)
-                                 for i in range(icons.n)]), dev)
+                                 for i in range(icons.n)]), dev, args.eval_batch)
     proto = (gal / (np.linalg.norm(gal, axis=1, keepdims=True) + 1e-8)).astype(np.float32)
     np.savez(os.path.join(args.out, "prototypes.npz"),
              proto=proto, class_ids=np.array(icons.class_ids),
-             entries=np.array(icons.entries), faded=icons.faded)
+             entries=np.array(icons.entries), faded=icons.faded,
+             backbone=np.array(args.backbone), img=np.array(IMG), embed_dim=np.array(args.embed_dim))
 
     print(f"留出类({ev.get('n_query', 0)} 查询/{ev.get('n_class', 0)} 类): top1 {ev.get('top1', 0):.3f}，"
           f"同类均值 {ev.get('same_mean', 0):.3f}(p99 {ev.get('same_p99', 0):.3f}) / "
@@ -511,7 +981,11 @@ def main() -> None:
         print(f"真实截图帧内一致性: {fr['frames']} 帧；像素基线 偶数约束通过 {fr['pix_parity_ok']:.2f} "
               f"平均簇数 {fr['pix_clusters']:.1f}；模型 {fr['mdl_parity_ok']:.2f} 平均簇数 {fr['mdl_clusters']:.1f}")
     with open(os.path.join(args.out, "metrics.json"), "w") as f:
-        json.dump({"holdout": ev, "dup_pairs": pr, "frames": fr, "history": hist}, f, indent=2,
+        json.dump({"config": {"backbone": args.backbone, "freeze_backbone": args.freeze_backbone,
+                              "img": IMG, "crop": CROP, "embed_dim": args.embed_dim,
+                              "epochs": args.epochs, "lr": args.lr,
+                              "backbone_lr_scale": args.backbone_lr_scale, "seed": args.seed},
+                   "holdout": ev, "dup_pairs": pr, "frames": fr, "history": hist}, f, indent=2,
                   ensure_ascii=False)
     print(f"输出: {args.out}/best.pt(权重) / prototypes.npz({icons.n} 类原型) / metrics.json / history.csv")
 

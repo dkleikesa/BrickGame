@@ -17,3 +17,7 @@ captures
 !*.xcworkspace/contents.xcworkspacedata
 **/xcshareddata/WorkspaceSettings.xcsettings
 node_modules/
+
+# Python 虚拟环境与导出产物（不入库）
+BrickGame-Tool/.venv/
+BrickGame-Tool/out/

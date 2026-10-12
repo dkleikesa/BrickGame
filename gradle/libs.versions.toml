@@ -13,8 +13,13 @@ composeMultiplatform = "1.12.1"
 junit = "4.13.2"
 kotlin = "2.4.20"
 material3 = "1.12.0-alpha03"
+opencv = "4.13.0"
+# 与 BrickGame-Tool 里校验 ONNX 用的 python onnxruntime 同版本（1.19.2），避免加载期版本歧义
+onnxruntime = "1.19.2"
 
 [libraries]
+opencv = { module = "org.opencv:opencv", version.ref = "opencv" }
+onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntime" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 kotlin-testJunit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
 junit = { module = "junit:junit", version.ref = "junit" }
