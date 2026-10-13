@@ -42,16 +42,19 @@ object OpenCvBoardScanner {
     const val MIN_PITCH = 12
 
     /**
-     * 网格尺寸的合理范围。真实棋盘是 **14 行 × 10 列**（`build_dataset/frames.csv` 台账里所有帧一致），
-     * 留点余量覆盖不同关卡。
+     * 网格尺寸的合理范围。真实棋盘在 `build_dataset/frames.csv` 台账里是 **14 行 × 10 列**，
+     * 当前关卡实测 **16 行 × 10 列** —— 列数稳定在 10，行数随关卡变，上下限按这个留余量。
      *
      * 为什么必须卡住上限：自相关会被画面内容带偏，实测拿到过 **199×10（1990 格）** 的假网格，
      * 而下游是 O(n²)（图标两两距离）甚至更差，那一帧跑了 **24.8 秒**，整个提示循环看起来就是"卡死"。
      * 尺寸离谱就直接当"没定位到棋盘"丢掉这一帧 —— 宁可不出提示，也不能卡住。
+     *
+     * 下限同样重要：周期取到谐波时会给出 **6×6** 这种"看着像棋盘"的网格，照样能算出一堆提示，
+     * 但格子全是错的（真机实测：行周期 307 = 3×102，棋盘被切成左上角 6×6）。
      */
-    const val MIN_ROWS = 3
+    const val MIN_ROWS = 8
     const val MAX_ROWS = 20
-    const val MIN_COLS = 3
+    const val MIN_COLS = 8
     const val MAX_COLS = 16
 
     private const val RING_LO = 0.04
@@ -127,9 +130,41 @@ object OpenCvBoardScanner {
             var fromBlobs = false
             var diag = ""
 
-            // 砖块是正方形的 → x/y 周期必然接近。差得远说明自相关被"空棋盘 + 天空/马路/UI 边缘"
-            // 带偏了（实测残局截图给的是 x23/y94，真值 110/110），这种网格会把砖块切成半块。
-            if (max(px, py) > 1.35 * max(1, min(px, py))) {
+            // 砖块是正方形的 → x/y 周期必然接近。差得远说明自相关取歪了，两种都实测过：
+            //  - 取到 2/3 倍谐波：行周期 307 = 3×102，棋盘被切成左上角 6×6，提示全错；
+            //  - 被"空棋盘 + 天空/马路/UI 边缘"带偏：残局截图给 x23/y94，真值 110/110，砖块被切成半块。
+            // 先按方形砖块先验把大周期除回基波；除不动再走棋盘底色 + 残余砖块间距反推；
+            // 两条路都不认就丢掉这一帧 —— 宁可不出提示，也不能拿错网格给提示。
+            val (fixedPx, fixedPy) = LatticeMath.reconcilePitches(px, py)
+            // 修正必须给出"列数合理"的格距才算数：残局那种 x23/y94（真值 110/110）除一下
+            // 也能凑成 23/23，但那样一屏会有 40+ 列，明显不是棋盘 —— 这种情况留给反推兜底。
+            val harmonicPlausible =
+                (fixedPx != px || fixedPy != py) && w / fixedPx in MIN_COLS..MAX_COLS
+            if (harmonicPlausible) {
+                px = fixedPx
+                py = fixedPy
+                // 用修正后的周期重新求相位 + 精调网格线
+                xlines = LatticeMath.refineLines(
+                    colProf,
+                    LatticeMath.arange(
+                        LatticeMath.latticePhase(colProf, px).toDouble(),
+                        w.toDouble(),
+                        px.toDouble(),
+                    ),
+                    px,
+                )
+                ylines = LatticeMath.refineLines(
+                    rowProf,
+                    LatticeMath.arange(
+                        LatticeMath.latticePhase(rowProf, py).toDouble(),
+                        h.toDouble(),
+                        py.toDouble(),
+                    ),
+                    py,
+                )
+                diag = "谐波修正（$pitchX/$pitchY → $px/$py）"
+                Log.i(TAG, "x/y 周期不一致，按方形砖块先验做谐波修正：$pitchX/$pitchY → $px/$py")
+            } else if (max(px, py) > 1.35 * max(1, min(px, py))) {
                 val lat = BlobLattice.estimate(img)
                 if (lat != null) {
                     xlines = lat.xlines
@@ -137,6 +172,9 @@ object OpenCvBoardScanner {
                     px = lat.pitchX
                     py = lat.pitchY
                     fromBlobs = true
+                } else {
+                    Log.w(TAG, "x/y 周期差太远（$pitchX/$pitchY）且棋盘反推失败 → 丢弃这一帧")
+                    return null
                 }
             }
 
@@ -160,7 +198,7 @@ object OpenCvBoardScanner {
                 }
                 val (r0, r1) = LatticeMath.trimBoardExtent(rowCounts)
                 val (c0, c1) = LatticeMath.trimBoardExtent(colCounts)
-                diag = "环带阈值=${"%.2f".format(keepThreshold)} 行计数=${rowCounts.joinToString("/")} " +
+                diag += "环带阈值=${"%.2f".format(keepThreshold)} 行计数=${rowCounts.joinToString("/")} " +
                     "列计数=${colCounts.joinToString("/")} trim=[$r0,$r1]x[$c0,$c1]"
                 if (r1 - r0 < 2 || c1 - c0 < 2) return null
 
