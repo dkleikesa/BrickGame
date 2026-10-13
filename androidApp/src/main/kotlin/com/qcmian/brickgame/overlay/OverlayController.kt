@@ -97,6 +97,17 @@ class OverlayController(context: Context) {
         hintView.frame = frame
     }
 
+    /**
+     * 截图期间把提示层藏起来（只改可见性，不摘窗口）。
+     *
+     * 上一帧画在屏幕上的提示框会进本次截图：框边的强边缘会带偏标定，
+     * 50% 的红色也会改变砖块颜色、影响识别。控制条**不藏** —— 它在棋盘外面，
+     * 而且用户要靠它点「刷新」。
+     */
+    fun setHintLayerVisible(visible: Boolean) {
+        hintView.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
     fun updateBar(state: ControlBarView.State?) {
         barView.state = state
     }
