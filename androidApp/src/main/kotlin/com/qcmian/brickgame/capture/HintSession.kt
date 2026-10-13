@@ -77,6 +77,7 @@ class HintSession(
     private val captureTimeout = Runnable {
         if (capturing.compareAndSet(true, false)) {
             active.set(false)
+            overlay.setHintLayerVisible(true)      // 截图没回来，别把提示层永久藏掉
             Log.w(TAG, "截屏回调超时：${CAPTURE_TIMEOUT_MS}ms 内既没成功也没失败")
             updateBar("截屏超时", "", "takeScreenshot 回调超时，点「刷新」重试")
         }
@@ -169,7 +170,11 @@ class HintSession(
         main.removeCallbacks(captureTimeout)
         main.removeCallbacks(analysisTimeout)
         main.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
+        // 截图前把提示层收掉：上一帧画在屏幕上的提示框会污染本次截图（强边缘带偏标定、
+        // 50% 红色改变砖块颜色）。只藏提示层，控制条留着。
+        overlay.setHintLayerVisible(false)
         screenshots.capture { bitmap, reason ->
+            overlay.setHintLayerVisible(true)
             main.removeCallbacks(captureTimeout)
             if (bitmap == null) {
                 val message = reason ?: "截屏失败"
