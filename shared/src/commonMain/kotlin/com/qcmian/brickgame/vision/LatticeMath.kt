@@ -88,6 +88,33 @@ object LatticeMath {
         return lag to ac
     }
 
+    /**
+     * 用"砖块是方的 → x/y 周期必然接近"这个先验，把取歪的大周期除回基波。
+     *
+     * 自相关取到 2/3 倍谐波时，两个周期会差出 2~3 倍（真机实测：行周期 307 = 3×102，
+     * 走完一回合后行投影周期变弱，3 倍峰就赢了）。不修正的话网格会被切成棋盘左上角
+     * 一小块（6×6），提示全错。
+     *
+     * @param tolerance 认为"除回去了"的相对容差
+     * @return 修正后的 (px, py)；两边本来就接近、或除不回去时原样返回
+     */
+    fun reconcilePitches(
+        px: Int,
+        py: Int,
+        tolerance: Double = 0.15,
+        maxDivisor: Int = 4,
+    ): Pair<Int, Int> {
+        val small = min(px, py)
+        val big = max(px, py)
+        if (small <= 0 || big <= 1.35 * small) return px to py
+        for (k in 2..maxDivisor) {
+            if (abs(big / k - small) <= tolerance * small) {
+                return if (px < py) px to big / k else big / k to py
+            }
+        }
+        return px to py
+    }
+
     /** 在给定周期下求相位：让网格线尽量落在强边上的那个偏移。 */
     fun latticePhase(prof: DoubleArray, pitch: Int): Int {
         val n = prof.size
