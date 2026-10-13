@@ -34,9 +34,7 @@ class HintEngineTest {
             ylines = ylines,
             score = score,
             scoreThreshold = 5f,
-            iconRatio = FloatArray(rows * cols),
             rects = rects,
-            patches = TileFrame(rows, cols, 2, FloatArray(rows * cols * 2 * 2 * 3)),
             pitchX = 10,
             pitchY = 10,
         )

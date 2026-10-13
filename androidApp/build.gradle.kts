@@ -15,8 +15,11 @@ dependencies {
 
     implementation(libs.androidx.activity.compose)
     implementation(libs.opencv)
-    // 物品识别模型（brick_embedder.onnx）的运行时，模型与原型在 src/main/assets/
-    implementation(libs.onnxruntime.android)
+    // 物品识别模型（brick_embedder.tflite）的运行时，模型与原型在 src/main/assets/
+    implementation(libs.tensorflow.lite)
+    // 识别跑在 GPU delegate 上（三者里最快），见 ml/TfliteTileClassifier
+    implementation(libs.tensorflow.lite.gpu)
+    implementation(libs.tensorflow.lite.gpu.api)
 
     implementation(libs.compose.runtime)
     implementation(libs.compose.foundation)

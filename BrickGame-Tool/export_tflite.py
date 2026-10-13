@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""brick_embedder.onnx → brick_embedder.tflite，并现场与 ONNX 输出对拍。
+
+Android 侧的识别模型就是这个 tflite（`ml/TfliteTileClassifier`，跑 GPU delegate），
+ONNX 只留在这边当转换源和数值基准 —— 12.8MB 的 .onnx 不往 APK 里塞。
+
+为什么从 ONNX 转而不是从 `best.pt` 重导：模型包里已经有校验过的 ONNX，
+再装一套 torch 只会多一个版本漂移的来源。
+
+用法：
+  ~/.venvs/brick-tflite/bin/python export_tflite.py
+  ~/.venvs/brick-tflite/bin/python export_tflite.py --batch 0     # 保留动态 batch
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import shutil
+
+import numpy as np
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ASSETS = os.path.join(os.path.dirname(_HERE), "androidApp", "src", "main", "assets")
+
+# ONNX 的两个可能位置：从 APK 目录挪出来的那份，或 export_mobile.py 的默认输出位置
+_ONNX_CANDIDATES = (
+    os.path.join(_HERE, "out", "brick_embedder.onnx"),
+    os.path.join(_ASSETS, "brick_embedder.onnx"),
+)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="ONNX → TFLite（Android 侧速度对照用）")
+    ap.add_argument(
+        "--onnx",
+        default=next((p for p in _ONNX_CANDIDATES if os.path.exists(p)), _ONNX_CANDIDATES[0]),
+    )
+    ap.add_argument("--out", default=os.path.join(_ASSETS, "brick_embedder.tflite"))
+    ap.add_argument("--batch", type=int, default=32, help="固定成这个 batch；0 = 保留动态维")
+    ap.add_argument("--workdir", default=os.path.join(_HERE, "out", "tflite"))
+    args = ap.parse_args()
+
+    if not os.path.exists(args.onnx):
+        raise SystemExit(
+            f"找不到 {args.onnx}\n（先跑 export_mobile.py，或把它产出的 .onnx 放到 BrickGame-Tool/out/）"
+        )
+
+    import onnx2tf
+
+    # onnx2tf 不做增量，直接清掉上次的产物，避免拿到旧文件
+    if os.path.isdir(args.workdir):
+        shutil.rmtree(args.workdir)
+    os.makedirs(args.workdir, exist_ok=True)
+
+    src = args.onnx
+    if args.batch > 0:
+        src = os.path.join(args.workdir, f"brick_embedder_b{args.batch}.onnx")
+        fix_batch(args.onnx, src, args.batch)
+
+    onnx2tf.convert(
+        input_onnx_file_path=src,
+        output_folder_path=args.workdir,
+        batch_size=args.batch if args.batch > 0 else None,
+        non_verbose=True,
+    )
+
+    all_tflite = sorted(glob.glob(os.path.join(args.workdir, "**", "*.tflite"), recursive=True))
+    # onnx2tf 会同时吐 float32 和 float16 两份。默认取 float32：float16 那份是权重量化，
+    # 算子行为和精度都不一样，塞进 APK 会让"谁更快"这个问题变成"量化后谁更快"。
+    produced = [p for p in all_tflite if "float16" not in os.path.basename(p)] or all_tflite
+    if not produced:
+        raise SystemExit(f"{args.workdir} 里没有产出 .tflite")
+    shutil.copyfile(produced[0], args.out)
+    print(f"写入 {args.out}（{os.path.getsize(args.out) / 1e6:.1f} MB，源 {os.path.basename(produced[0])}）")
+
+    verify(args.onnx, args.out, args.batch)
+
+
+def fix_batch(onnx_path: str, out_path: str, batch: int) -> None:
+    """把输入/输出的 batch 维从符号固定成常量。
+
+    为什么不直接靠 onnx2tf 的 `batch_size`：实测这个版本对动态输入不生效，导出来还是
+    动态 batch —— 而动态 batch 会让 XNNPACK 在 prepare 阶段就失败
+    （`failed to reshape runtimeNode ...`），TFLite 只能退回未优化的 CPU kernel，
+    那时候量出来的速度就不是 TFLite 的真实水平了。
+    """
+    import onnx
+
+    model = onnx.load(onnx_path)
+    for value in list(model.graph.input) + list(model.graph.output):
+        dims = value.type.tensor_type.shape.dim
+        if len(dims) > 0 and dims[0].dim_param:
+            dims[0].ClearField("dim_param")
+            dims[0].dim_value = batch
+    onnx.save(model, out_path)
+    print(f"固定 batch={batch} → {os.path.basename(out_path)}")
+
+
+def verify(onnx_path: str, tflite_path: str, batch: int) -> None:
+    """同一批随机输入跑两边，比余弦相似度 —— 不一致就别塞进 APK。"""
+    import onnxruntime as ort
+    from ai_edge_litert.interpreter import Interpreter
+
+    meta = json.load(open(os.path.join(_ASSETS, "model_meta.json"), encoding="utf-8"))
+    side = int(meta["input"]["size"][2])
+    dim = int(meta["output"]["size"][1])
+
+    rng = np.random.default_rng(0)
+    n = batch if batch > 0 else 8
+    x = rng.random((n, 3, side, side), dtype=np.float32)
+
+    ref = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"]).run(
+        None, {"input": x}
+    )[0]
+
+    interp = Interpreter(model_path=tflite_path, num_threads=4)
+    in_shape = list(interp.get_input_details()[0]["shape"])
+    print(f"TFLite 输入 shape: {in_shape}")
+    if in_shape[0] != n:
+        # 动态 batch 时按本次的 n 固定下来（Android 侧同样会 resize 到 BATCH）
+        for name in ("resize_tensor_input", "resize_input"):
+            fn = getattr(interp, name, None)
+            if fn is not None:
+                fn(0, [n, 3, side, side])
+                break
+    interp.allocate_tensors()
+    inp = interp.get_input_details()[0]
+    out = interp.get_output_details()[0]
+    # onnx2tf 会把输入换成 TFLite 惯用的 NHWC —— 那正是 XNNPACK 的原生布局，
+    # 所以保留它（Android 侧按 NHWC 喂，不做 NCHW→NHWC 的图内 transpose）
+    shape = list(inp["shape"])
+    feed = np.transpose(x, (0, 2, 3, 1)) if shape[1:3] == [side, side] else x
+    interp.set_tensor(inp["index"], np.ascontiguousarray(feed, dtype=np.float32))
+    interp.invoke()
+    got = interp.get_tensor(out["index"]).reshape(n, dim)
+    print(f"TFLite 输出 shape: {list(out['shape'])}")
+
+    cos = np.sum(ref * got, axis=1) / (
+        np.linalg.norm(ref, axis=1) * np.linalg.norm(got, axis=1) + 1e-9
+    )
+    print(
+        f"对拍：输入 {inp['shape'].tolist()} 输出 {list(got.shape)}；"
+        f"与 ONNX 余弦 min {cos.min():.6f} / mean {cos.mean():.6f}，最大绝对差 {np.abs(ref - got).max():.3e}"
+    )
+    if cos.min() < 0.999:
+        raise SystemExit("TFLite 与 ONNX 输出差太多，先别接 Android")
+
+
+if __name__ == "__main__":
+    main()
