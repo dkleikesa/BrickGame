@@ -11,6 +11,7 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import com.qcmian.brickgame.HintUiBus
 import com.qcmian.brickgame.ml.BrickClassifiers
+import com.qcmian.brickgame.ml.OnnxTileClassifier
 import com.qcmian.brickgame.overlay.OverlayController
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.concurrent.Executor
@@ -109,8 +110,8 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
         else -> "截屏失败（code=$code）"
     }
 
-    /** assets 里有身份模型就用模型，否则落到帧内像素聚类，见 [BrickClassifiers]。 */
-    private fun buildClassifier(): TileClassifier = BrickClassifiers.create(this)
+    /** 加载 assets 里的身份模型，见 [BrickClassifiers]。 */
+    private fun buildClassifier(): TileClassifier = OnnxTileClassifier.load(this)
 
     companion object {
         private const val TAG = "BrickGameA11y"

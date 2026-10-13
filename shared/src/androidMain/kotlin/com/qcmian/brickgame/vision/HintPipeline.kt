@@ -20,8 +20,6 @@ object HintPipeline {
         val state: BoardState,
         /** 下一条可操作提示；没有可消除对时为 null。 */
         val hint: Hint?,
-        /** 本次用的识别实现（模型还是像素聚类）。 */
-        val classifierName: String,
         val elapsedMs: Long,
     ) {
         val cleared: Boolean get() = HintEngine.isCleared(state)
@@ -43,7 +41,7 @@ object HintPipeline {
             val labels = classifier.classify(frame, scan)
             val state = BoardState.of(scan, labels)
             val hint = HintEngine.nextHint(scan, state)
-            Result(scan, state, hint, classifier.name, (System.nanoTime() - start) / 1_000_000)
+            Result(scan, state, hint,  (System.nanoTime() - start) / 1_000_000)
         } catch (e: Throwable) {
             Log.w(TAG, "分析失败", e)
             null

@@ -2,9 +2,7 @@ package com.qcmian.brickgame.ml
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.util.Log
 import com.qcmian.brickgame.vision.BoardScan
-import com.qcmian.brickgame.vision.PixelClusterTileClassifier
 import com.qcmian.brickgame.vision.TileClassifier
 import org.opencv.android.Utils
 import org.opencv.core.Mat
@@ -175,34 +173,5 @@ class OnnxTileClassifier private constructor(
             ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(out)
             return out
         }
-    }
-}
-
-/**
- * 选识别实现：assets 里有模型就用模型，否则退回帧内像素聚类。
- *
- * 模型加载失败会**报出来**而不是静默降级（加载不上基本等于接线错了，藏起来最难查），
- * 但仍退回聚类，保证悬浮窗还能出提示。
- */
-object BrickClassifiers {
-
-    fun create(context: Context): TileClassifier {
-        if (!hasModelAssets(context)) return PixelClusterTileClassifier()
-        return try {
-            OnnxTileClassifier.load(context)
-        } catch (e: Throwable) {
-            Log.e("BrickClassifiers", "身份模型加载失败，退回像素聚类", e)
-            PixelClusterTileClassifier()
-        }
-    }
-
-    fun hasModelAssets(context: Context): Boolean = try {
-        listOf(
-            BrickEmbedderModel.MODEL_ASSET,
-            BrickEmbedderModel.PROTOTYPES_ASSET,
-            BrickEmbedderModel.META_ASSET,
-        ).all { context.assets.open(it).use { stream -> stream.read() >= 0 } }
-    } catch (e: Throwable) {
-        false
     }
 }

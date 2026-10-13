@@ -5,12 +5,12 @@ import android.graphics.Bitmap
 /**
  * 识别层：切好的格子 → 每格的类别 id（0 = 背景/空位）。
  *
- * 接口放在 androidMain，是因为两种实现（像素聚类、TFLite 模型）都要碰 [Bitmap] 或 Android 位图裁切。
+ * 接口放在 androidMain，是因为实现要碰 [Bitmap] 与 Android 位图裁切。
  * 上层（[HintEngine]）只认 [BoardState]，所以换识别实现不影响算法与 UI。
  */
 interface TileClassifier {
 
-    /** 给 UI 显示用的名字（"像素聚类（未接模型）"/"TFLite 模型"）。 */
+    /** 给 UI 显示用的名字（如 "ONNX 身份向量（2369 类，256 维）"）。 */
     val name: String
 
     /**

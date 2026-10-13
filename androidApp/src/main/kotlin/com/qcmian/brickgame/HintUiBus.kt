@@ -10,7 +10,6 @@ data class HintUiState(
     val running: Boolean = false,
     val frames: Int = 0,
     val scanSummary: String = "",
-    val classifier: String = "",
     val hintText: String = "",
     val cleared: Boolean = false,
     val stuck: Boolean = false,

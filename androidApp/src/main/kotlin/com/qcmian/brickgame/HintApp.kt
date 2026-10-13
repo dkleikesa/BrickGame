@@ -89,11 +89,6 @@ fun HintApp() {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("BrickGame 提示", style = MaterialTheme.typography.headlineSmall)
-            Text(
-                "截图 → 切图 → 识别 → 接入算法 → 可操作提示",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
 
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -107,7 +102,6 @@ fun HintApp() {
                         },
                     )
                     StatusLine("OpenCV", when (openCvReady) { null -> "加载中…"; true -> "已加载"; false -> "加载失败" })
-                    StatusLine("识别实现", ui.classifier.ifBlank { "—" })
                     StatusLine("运行状态", if (ui.running) "提示中（第 ${ui.frames} 帧）" else "已停止")
                     StatusLine(
                         "悬浮窗",
@@ -255,20 +249,6 @@ fun HintApp() {
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp)),
                 )
-            }
-
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("提示会时不时让本应用自己跳到前台？", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "本应用没有任何地方会主动打开自己的界面（只有这两个按钮和授权按钮会跳转）。" +
-                            "那种「跳回原应用」是 MIUI 在后台把进程杀掉后又重新拉起，顺手把界面带到了前台。" +
-                            "去 设置 → 应用管理 → BrickGame：把「自启动」「后台弹出界面」打开，" +
-                            "省电策略改成「无限制」，能明显减少。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
 
             Box(Modifier.height(24.dp))
