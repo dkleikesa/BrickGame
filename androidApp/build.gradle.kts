@@ -36,10 +36,9 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1
         versionName = "1.0"
-        // OpenCV 的 AAR 带了 4 套 ABI 的 .so（还有 onnxruntime），全打进去 debug 包 240MB+。
-        // 只留真机主流 + 模拟器：要真机全量再补 armeabi-v7a / x86。
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            //noinspection ChromeOsAbiSupport
+            abiFilters += listOf("arm64-v8a")
         }
     }
     packaging {
