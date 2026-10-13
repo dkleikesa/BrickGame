@@ -2,7 +2,7 @@ package com.qcmian.brickgame.vision
 
 // 本文件由 BrickGame-Tool/gen_vision_golden.py 生成，请勿手改。
 // 用途：把 Kotlin 的重写钉在 tile_recognizer.py 的数值结果上（改了 Python 逻辑就重跑生成器）。
-// 数据来源：BrickGame-Tool/build-dataset/samples/screenshot_01.jpg 的投影 + 公式化合成 patch。
+// 数据来源：BrickGame-Tool/build-dataset/samples/screenshot_01.jpg 的行/列投影。
 internal object VisionGolden {
     const val IMAGE = "screenshot_01.jpg"
     const val MIN_PITCH = 12
@@ -15,30 +15,4 @@ internal object VisionGolden {
     const val YLINES = "32.5466,78.509,124.471,170.434,216.396,262.359,308.321,354.283,400.246,446.208,492.171,538.133,584.095,630.058,676.02,721.982,767.945,813.907,859.87,905.832,951.794,997.757,1043.72"
     const val XLINES = "11.8265,57.9578,104.089,150.22,196.352,242.483,288.614,334.745,380.877,427.008,473.139"
 
-    const val CELL = 32
-    val ICON_RATIO = doubleArrayOf(0.09765625, 0.09765625, 1.00000000)
-    val ICON_DEV_SUM = doubleArrayOf(9000.0000, 9000.0000, 517120.0000)
-    val ICON_DEV_NNZ = intArrayOf(300, 300, 3072)
-
-    val ALIGNED = arrayOf(
-        doubleArrayOf(0.000000000, 0.000000000, 0.800000012, 1.000000000),
-        doubleArrayOf(0.000000000, 0.000000000, 0.800000012, 1.000000000),
-        doubleArrayOf(0.800000012, 0.800000012, 0.000000000, 1.000000000),
-        doubleArrayOf(1.000000000, 1.000000000, 1.000000000, 0.000000000),
-    )
-
-    val CLUSTER_CLASSES = intArrayOf(0, 0, 0, 0, 1, 1)
-    val CLUSTER_DIST = arrayOf(
-        doubleArrayOf(0.000000000, 0.039999999, 0.180000007, 0.189999998, 0.899999976, 0.899999976),
-        doubleArrayOf(0.039999999, 0.000000000, 0.170000002, 0.180000007, 0.899999976, 0.899999976),
-        doubleArrayOf(0.180000007, 0.170000002, 0.000000000, 0.050000001, 0.899999976, 0.899999976),
-        doubleArrayOf(0.189999998, 0.180000007, 0.050000001, 0.000000000, 0.899999976, 0.899999976),
-        doubleArrayOf(0.899999976, 0.899999976, 0.899999976, 0.899999976, 0.000000000, 0.029999999),
-        doubleArrayOf(0.899999976, 0.899999976, 0.899999976, 0.899999976, 0.029999999, 0.000000000),
-    )
-    const val CLUSTER_GAP = 0.544999957
-    const val CLUSTER_THR = 0.050000001
-    const val CLUSTER_OK = true
-    val CLUSTER_LABELS = intArrayOf(1, 1, 2, 2, 3, 3)
-    val MERGED_LABELS = intArrayOf(1, 1, 1, 1, 3, 3)
 }

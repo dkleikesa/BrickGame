@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.qcmian.brickgame.capture.BrickGameAccessibilityService
+import com.qcmian.brickgame.ml.TfliteTileClassifier
 import com.qcmian.brickgame.vision.OpenCvBoardScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -67,6 +68,8 @@ fun HintApp() {
         var enabledInSystem by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
         var busy by remember { mutableStateOf(false) }
         var openCvReady by remember { mutableStateOf<Boolean?>(null) }
+        // 识别只跑 GPU delegate；本机不支持时会退到 CPU，界面照实说明（见 TfliteTileClassifier）
+        val gpuReady = remember { TfliteTileClassifier.gpuSupported() }
 
         LaunchedEffect(Unit) {
             while (true) {
@@ -102,6 +105,7 @@ fun HintApp() {
                         },
                     )
                     StatusLine("OpenCV", when (openCvReady) { null -> "加载中…"; true -> "已加载"; false -> "加载失败" })
+                    StatusLine("识别实现", if (gpuReady) "TFLite（GPU）" else "TFLite（CPU 回退）")
                     StatusLine("运行状态", if (ui.running) "提示中（第 ${ui.frames} 帧）" else "已停止")
                     StatusLine(
                         "悬浮窗",

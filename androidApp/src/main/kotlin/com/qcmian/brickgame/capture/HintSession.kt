@@ -13,8 +13,11 @@ import com.qcmian.brickgame.HintUiState
 import com.qcmian.brickgame.overlay.ControlBarView
 import com.qcmian.brickgame.overlay.HintOverlayView
 import com.qcmian.brickgame.overlay.OverlayController
+import com.qcmian.brickgame.vision.BoardDiagnostics
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -101,8 +104,6 @@ class HintSession(
         overlay.onRefresh = { refreshNow() }
         overlay.onClose = { stop() }
     }
-
-    val isRunning: Boolean get() = running.get()
 
     /** 开始提示：挂悬浮窗 + 立刻跑一帧，之后等用户点「刷新」。 */
     fun start() {
@@ -262,8 +263,61 @@ class HintSession(
             )
         }
 
+        val diag = BoardDiagnostics.report(result.scan, result.state, result.hint) + classifier.diagnostics()
+        logDiagnostics(result, diag)
+        dumpDebugFrame(bitmap, result, frame, diag)
+
         if (HintUiBus.previewEnabled) {
             HintUiBus.preview = renderPreview(frame, bitmap)
+        }
+    }
+
+    /**
+     * 把这一帧的体检报告逐行打到 `BoardDiag` tag 上（标定几何 / 每格平坦度 / 类别 / 类别计数 / 相似度）。
+     *
+     * 目的是从真机日志上区分"格线切歪了"和"砖块认错了"，见 [BoardDiagnostics] 的说明。
+     * `adb logcat -s BoardDiag` 就能捞出整帧。
+     */
+    private fun logDiagnostics(result: HintPipeline.Result, lines: List<String>) {
+        Log.i(BoardDiagnostics.TAG, "frame=$frames elapsed=${result.elapsedMs}ms ${result.scan.rows}x${result.scan.cols}")
+        for (line in lines) {
+            Log.i(BoardDiagnostics.TAG, line)
+        }
+    }
+
+    /**
+     * 把调试图（截图 + 全部网格线 + 全部类别号）与报告写到 app 外部私有目录，方便 `adb pull` 核对。
+     *
+     * 文本日志能说清"数字是多少"，但"格线到底压在砖块上还是缝里"只有看图最快，
+     * 所以这里固定覆盖写 `latest.png` / `latest.txt`，不攒历史（一次只查最近一帧）。
+     */
+    private fun dumpDebugFrame(
+        background: Bitmap,
+        result: HintPipeline.Result,
+        frame: HintOverlayView.Frame,
+        diag: List<String>,
+    ) {
+        val dir = context.getExternalFilesDir(DUMP_DIR) ?: return
+        if (!dir.exists() && !dir.mkdirs()) return
+        val image = renderPreview(
+            frame.copy(background = background, showGrid = true, showLabels = true),
+            background,
+        )
+        try {
+            val png = File(dir, "latest.png")
+            FileOutputStream(png).use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            File(dir, "latest.txt").writeText(
+                buildString {
+                    appendLine("# 第 $frames 帧 ${result.scan.rows}行x${result.scan.cols}列 ${result.elapsedMs}ms")
+                    appendLine("hint ${result.hint?.describe() ?: "无"}")
+                    diag.forEach { appendLine(it) }
+                },
+            )
+            Log.i(TAG, "调试帧已写出：$png")
+        } catch (e: Throwable) {
+            Log.w(TAG, "调试帧写出失败", e)
+        } finally {
+            image.recycle()
         }
     }
 
@@ -305,5 +359,11 @@ class HintSession(
         const val ANALYSIS_TIMEOUT_MS = 8000L
 
         const val PREVIEW_SCALE = 0.5f
+
+        /**
+         * 调试图与体检报告的落盘目录（app 外部私有目录下）。
+         * 取出来核对：`adb pull /sdcard/Android/data/com.qcmian.brickgame/files/debug-frames/`。
+         */
+        const val DUMP_DIR = "debug-frames"
     }
 }

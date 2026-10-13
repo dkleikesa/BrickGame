@@ -200,7 +200,10 @@ object OpenCvBoardScanner {
                 val (c0, c1) = LatticeMath.trimBoardExtent(colCounts)
                 diag += "环带阈值=${"%.2f".format(keepThreshold)} 行计数=${rowCounts.joinToString("/")} " +
                     "列计数=${colCounts.joinToString("/")} trim=[$r0,$r1]x[$c0,$c1]"
-                if (r1 - r0 < 2 || c1 - c0 < 2) return null
+                if (r1 - r0 < 2 || c1 - c0 < 2) {
+                    Log.w(TAG, "棋盘范围裁空了（trim=[$r0,$r1]x[$c0,$c1]）pitch=($px,$py) $diag → 丢弃这一帧")
+                    return null
+                }
 
                 xlines = xlines.copyOfRange(c0, c1 + 1)
                 ylines = ylines.copyOfRange(r0, r1 + 1)
@@ -218,13 +221,16 @@ object OpenCvBoardScanner {
                     " 精调线=${xlines.size - 1}列x${ylines.size - 1}行 → 裁后=${cols}列x${rows}行 $diag",
             )
             if (rows < MIN_ROWS || rows > MAX_ROWS || cols < MIN_COLS || cols > MAX_COLS) {
-                Log.w(TAG, "网格尺寸不合理：${rows}x$cols（真实棋盘是 14x10）→ 丢弃这一帧")
+                Log.w(
+                    TAG,
+                    "网格尺寸不合理：${rows}x$cols（合理 ${MIN_ROWS}~$MAX_ROWS 行 / ${MIN_COLS}~$MAX_COLS 列）" +
+                        "pitch=($px,$py) 自相关原始=($pitchX,$pitchY) $diag → 丢弃这一帧",
+                )
                 return null
             }
 
             val (rects, frame) = cutCells(img, xlines, ylines, inset)
             val score = FeatureMath.cellFlatness(frame)
-            val icon = FeatureMath.iconFeatures(frame)
 
             return BoardScan(
                 rows = ylines.size - 1,
@@ -233,9 +239,7 @@ object OpenCvBoardScanner {
                 ylines = ylines,
                 score = score,
                 scoreThreshold = FLAT_THR,
-                iconRatio = icon.ratio,
                 rects = rects,
-                patches = frame,
                 pitchX = px,
                 pitchY = py,
             )

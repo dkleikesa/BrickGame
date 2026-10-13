@@ -10,8 +10,7 @@ import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import com.qcmian.brickgame.HintUiBus
-import com.qcmian.brickgame.ml.BrickClassifiers
-import com.qcmian.brickgame.ml.OnnxTileClassifier
+import com.qcmian.brickgame.ml.TfliteTileClassifier
 import com.qcmian.brickgame.overlay.OverlayController
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.concurrent.Executor
@@ -110,8 +109,12 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
         else -> "截屏失败（code=$code）"
     }
 
-    /** 加载 assets 里的身份模型，见 [BrickClassifiers]。 */
-    private fun buildClassifier(): TileClassifier = OnnxTileClassifier.load(this)
+    /**
+     * 加载 assets 里的身份模型。
+     *
+     * 只在 worker 线程第一次用到时才构造（见 [HintSession]），这里不挡主线程。
+     */
+    private fun buildClassifier(): TileClassifier = TfliteTileClassifier.load(this)
 
     companion object {
         private const val TAG = "BrickGameA11y"
@@ -121,8 +124,6 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
 
         /** 无障碍服务已经在系统里开启并绑定。 */
         fun isConnected(): Boolean = active != null
-
-        fun isRunning(): Boolean = active?.session?.isRunning == true
 
         /** @return 服务没连上时返回 false，界面据此提示去设置里开启。 */
         fun start(): Boolean {

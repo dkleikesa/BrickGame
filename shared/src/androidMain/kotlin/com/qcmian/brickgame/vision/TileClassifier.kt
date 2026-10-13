@@ -19,4 +19,12 @@ interface TileClassifier {
      * @return 行优先、长度 `rows*cols` 的类别 id；0 表示背景/空位。
      */
     fun classify(frame: Bitmap, scan: BoardScan): IntArray
+
+    /**
+     * 上一帧的识别诊断（每格的置信度等），只给日志用；没有就返回空。
+     *
+     * 为什么要有：分数普遍低 = 裁出来的东西模型没见过（多半是格线切歪了），
+     * 分数很高但类别乱 = 模型/原型本身的问题 —— 这两条路的修法完全不同。
+     */
+    fun diagnostics(): List<String> = emptyList()
 }
