@@ -234,7 +234,6 @@ class HintSession(
             frames = frames,
             scanSummary = "${scan.rows}行×${scan.cols}列，砖块 $bricks，空位 ${scan.cellCount - bricks}，" +
                 "格距 ${scan.pitchX}×${scan.pitchY}px，耗时 ${result.elapsedMs}ms（第 $frames 帧）",
-            classifier = result.classifierName,
             hintText = hintText,
             cleared = result.cleared,
             stuck = result.stuck,
@@ -251,7 +250,7 @@ class HintSession(
             showLabels = HintUiBus.showLabels,
         )
         overlay.updateHint(frame)
-        updateBar(hintText, "第 $frames 帧 · ${result.elapsedMs}ms · ${result.classifierName}")
+        updateBar(hintText, "第 $frames 帧 · ${result.elapsedMs}ms")
 
         // 只在前几帧和每 10 帧打一条：真机排查时靠它判断"链路走通没有"，又不至于刷屏
         if (frames <= 3 || frames % 10 == 0) {
