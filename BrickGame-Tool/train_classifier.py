@@ -4,7 +4,7 @@
 
 **数据（`--data real`，默认）**：只用磁盘上现成的真实图片，不渲染、不重染、不生成新图 ——
   ① 图鉴 build-catalog/catalog/tiles/*.png：每类 1 张，原样
-  ② 截图 build-dataset/dataset/images/frame/**：标注过的格子，原样
+  ② 截图 build-dataset/dataset/images/frame/**：所有格子原样收进来（含空位 = class 0）
 正样本对 = 同类（图鉴图 ↔ 该类的真实格），跨域对齐就是域适配的全部信号。
 按**帧**留出验证集（同帧格子近重复，按格划分会虚高）。
 
@@ -525,27 +525,27 @@ class Catalog:
 
 
 class Real:
-    """dataset 真实截图格。只收有标签的（空位/未知不收）；训练/验证**按帧**划分。
+    """dataset 真实截图格。全部收：空位格是 class 0（图鉴里就有这个类），不做任何筛选。
 
-    为什么按帧分：同一帧里同一物品会出现十几次、底色与缩放完全一致，按格随机划分会让
-    验证集里全是训练集的近重复 —— 指标虚高。留出整帧才等于"换一张新截图来测"。
+    为什么不按识别距离筛：每帧都在标注页人工复核过（frames.csv status=done），标签即真值；
+    再拿自动识别的距离过滤一遍，等于按"模型当时有多自信"扔掉真实样本（实测扔过半）。
+    唯一还会丢的是 unknown（人工判为"认不出"）和不在图鉴里的 class_id —— 后者没有原型可用。
+
+    训练/验证**按帧**划分：同一帧里同一物品会出现十几次、底色与缩放完全一致，按格随机划分
+    会让验证集里全是训练集的近重复 —— 指标虚高。留出整帧才等于"换一张新截图来测"。
     """
 
-    def __init__(self, dataset: str, cat: "Catalog", max_dist: float, val_frames: int, seed: int):
+    def __init__(self, dataset: str, cat: "Catalog", val_frames: int, seed: int):
         rows = list(csv.DictReader(open(os.path.join(dataset, "index.csv"))))
-        kept, drop = [], {"空位/未知": 0, "不在图鉴": 0, "auto 距离过大": 0}
+        kept, drop = [], {"未知": 0, "不在图鉴": 0}
         for r in rows:
-            src, cid = r.get("cls_src", ""), r.get("class_id", "")
-            if src in ("", "empty", "unknown") or not cid:
-                drop["空位/未知"] += 1
+            cid = r.get("class_id", "")
+            if r.get("cls_src") == "unknown" or not cid:
+                drop["未知"] += 1
                 continue
             c = int(cid)
             if c not in cat.index:
                 drop["不在图鉴"] += 1
-                continue
-            d = float(r["cls_dist"]) if r.get("cls_dist") else 9.0
-            if src == "auto" and d > max_dist:          # manual 一律保留
-                drop["auto 距离过大"] += 1
                 continue
             kept.append((cat.index[c], r["path"], r["frame"]))
 
@@ -689,7 +689,7 @@ def run_real(args, dev: str) -> None:
     """只用真实图（图鉴 + 截图）训练，零合成。"""
     rng = np.random.default_rng(args.seed)
     cat = Catalog(args.catalog, CROP)
-    real = Real(args.real, cat, args.real_max_dist, args.val_frames, args.seed)
+    real = Real(args.real, cat, args.val_frames, args.seed)
     if not real.train:
         raise SystemExit("没有可用的真实训练格：检查 dataset/index.csv 的 cls_src / class_id")
 
@@ -787,8 +787,6 @@ def parse_args() -> argparse.Namespace:
                          "synth=旧的合成增广流程（图鉴图按底色重染造视图）")
     ap.add_argument("--real", default=os.path.join(_ROOT, "build-dataset", "dataset"),
                     help="--data real 用的截图数据集目录（含 index.csv 与 images/）")
-    ap.add_argument("--real-max-dist", type=float, default=0.15,
-                    help="auto 标签只收识别距离 ≤ 该值的；人工标注 manual 一律保留；9=全收")
     ap.add_argument("--real-ratio", type=float, default=0.6,
                     help="每个 batch 从\"有真实格的类\"里抽的比例，其余从全类抽（只当负样本）")
     ap.add_argument("--val-frames", type=int, default=3,
