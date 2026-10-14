@@ -3,6 +3,7 @@ package com.qcmian.brickgame
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.io.File
 
 /**
  * 运行状态快照。
@@ -32,4 +33,14 @@ object HintUiBus {
 
     /** 实际生效的悬浮窗窗口类型（2032=无障碍专属 / 2038=应用上层），null=还没挂上。 */
     var overlayWindowType by mutableStateOf<Int?>(null)
+
+    /**
+     * 低置信度留档里现存的截图（按文件名 = 时间序），主页的"相册"与张数都读它。
+     *
+     * 写盘在服务线程（见 `LowConfStore`，每存一帧/删一次刷新一遍），界面只读；
+     * 界面启动时自己列一遍目录，免得服务没连上就看不到已有的那些。
+     */
+    var lowConfShots by mutableStateOf<List<File>>(emptyList())
+
+    val lowConfCount: Int get() = lowConfShots.size
 }

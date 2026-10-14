@@ -43,6 +43,21 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/brickgame_accessibility" />
         </service>
+
+        <!--
+          分享低置信度留档的 ZIP：把 cache 里的文件包成 content:// 交给系统分享
+          （直接给 file:// 在 Android 7+ 会抛 FileUriExposedException）。
+          只暴露 lowconf-share/ 这一个子目录，见 res/xml/file_paths.xml。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

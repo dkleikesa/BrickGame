@@ -13,11 +13,6 @@ import com.qcmian.brickgame.overlay.HintOverlayView
 import com.qcmian.brickgame.overlay.OverlayController
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
-import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -89,9 +84,6 @@ class HintSession(
     }
 
     private var frames = 0
-
-    /** 已写出的类别数组文件序号（每成功一帧 +1）。 */
-    private var matrixFiles = 0
 
     /**
      * 上一帧已经画出去的调试图层。
@@ -188,7 +180,7 @@ class HintSession(
                 // 抛出来的那类异常 —— 工作线程上没人接就是整个进程崩掉。失败不缓存，点「刷新」会重试。
                 val analysis = runCatching { HintPipeline.analyze(bitmap, classifier) }
                 // 模型没把握就趁原图还在手上留档（在 worker 线程写盘，别占主线程）
-                analysis.getOrNull()?.let { dumpLowConfidence(bitmap, it) }
+                analysis.getOrNull()?.let { LowConfStore.save(context, bitmap, it) }
                 main.post {
                     if (gen != generation.get()) {
                         // 会话已经停了、这一帧算作废：丢掉结果，别再往画面上画
@@ -277,87 +269,6 @@ class HintSession(
             )
         }
 
-        dumpMatrix(result)
-    }
-
-    /**
-     * 每识别成功一帧，就把这一帧的**二维类别数组**单独存一个文件（`debug-frames/matrix/NNNN.txt`）。
-     *
-     * 0 = 空位；行优先，一行一格行。文件头带上格距/空位数/可消对，方便事后拿真实盘面回放算法。
-     */
-    private fun dumpMatrix(result: HintPipeline.Result) {
-        val dir = context.getExternalFilesDir(DUMP_DIR) ?: return
-        val sub = File(dir, MATRIX_DIR)
-        if (!sub.exists() && !sub.mkdirs()) return
-        matrixFiles++
-        val scan = result.scan
-        val labels = result.state.labels
-        val file = File(sub, String.format("%04d.txt", matrixFiles))
-        try {
-            file.writeText(
-                buildString {
-                    appendLine("# ${scan.rows}x${scan.cols} pitch=${scan.pitchX}x${scan.pitchY} " +
-                        "空位=${scan.empty.count { it }}/${scan.cellCount} 可消对=${result.hints.size} " +
-                        "耗时=${result.elapsedMs}ms")
-                    appendLine("# " + result.hints.joinToString(" ") { it.pairText() })
-                    for (r in 0 until scan.rows) {
-                        val from = r * scan.cols
-                        appendLine((0 until scan.cols).joinToString(" ") { labels[from + it].toString() })
-                    }
-                },
-            )
-            Log.i(TAG, "第 $matrixFiles 帧的类别数组已写出：$file")
-        } catch (e: Throwable) {
-            Log.w(TAG, "类别数组写出失败", e)
-        }
-    }
-
-    /**
-     * 低置信度帧留档：模型对某些格子没把握时，把这一帧**原图**连同识别结果写进
-     * `debug-frames/low-conf/`，事后拿去补标注重训。
-     *
-     * 为什么连原图一起存：模型优化要的是"当时屏幕上的样子"，只有矩阵文件没法补标注。
-     * 一对文件同名（`lowconf_MMdd-HHmmss.png/.txt`），txt 里写明可疑格子和它的相似度 + 整盘矩阵，
-     * 拿到就能直接对着图找那些格子。
-     */
-    private fun dumpLowConfidence(bitmap: Bitmap, result: HintPipeline.Result) {
-        if (result.lowConfidence.isEmpty()) return
-        val dir = context.getExternalFilesDir(DUMP_DIR)?.let { File(it, LOW_CONF_DIR) } ?: return
-        if (!dir.exists() && !dir.mkdirs()) return
-        val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
-        val scan = result.scan
-        try {
-            File(dir, "$stem.png").outputStream().use {
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
-            }
-            File(dir, "$stem.txt").writeText(
-                buildString {
-                    appendLine("# ${scan.rows}x${scan.cols} pitch=${scan.pitchX}x${scan.pitchY} " +
-                        "空位=${scan.empty.count { it }}/${scan.cellCount} 耗时=${result.elapsedMs}ms")
-                    appendLine("# 没把握的格子（序号=相似度）：" + result.lowConfidence.joinToString(" ") {
-                        "(${it.first / scan.cols},${it.first % scan.cols})=${it.second}"
-                    })
-                    appendLine("# 可消对 " + result.hints.joinToString(" ") { it.pairText() })
-                    for (r in 0 until scan.rows) {
-                        val from = r * scan.cols
-                        appendLine((0 until scan.cols).joinToString(" ") { result.state.labels[from + it].toString() })
-                    }
-                },
-            )
-            trimLowConfidence(dir)
-            Log.i(TAG, "低置信度帧已留档：$stem.png（${result.lowConfidence.size} 个可疑格：${result.lowConfidence}）")
-        } catch (e: Throwable) {
-            Log.w(TAG, "低置信度帧留档失败", e)
-        }
-    }
-
-    /** 只留最近 [LOW_CONF_KEEP] 帧，别把手机存储攒满（手动刷新一次最多一张）。 */
-    private fun trimLowConfidence(dir: File) {
-        val pngs = dir.listFiles { f -> f.name.endsWith(".png") }?.sortedBy { it.name } ?: return
-        for (old in pngs.dropLast(LOW_CONF_KEEP)) {
-            runCatching { old.delete() }
-            runCatching { File(dir, old.name.removeSuffix(".png") + ".txt").delete() }
-        }
     }
 
     private fun updateBar(hintText: String, statusText: String, message: String? = null) {
@@ -369,20 +280,5 @@ class HintSession(
 
         /** 截屏回调迟迟不回来时的兜底时限（分析那一段不设限，见类注释）。 */
         const val CAPTURE_TIMEOUT_MS = 3000L
-
-        /**
-         * 调试图与体检报告的落盘目录（app 外部私有目录下）。
-         * 取出来核对：`adb pull /sdcard/Android/data/com.qcmian.brickgame/files/debug-frames/`。
-         */
-        const val DUMP_DIR = "debug-frames"
-
-        /** 每帧一个二维类别数组文件，存在 [DUMP_DIR] 下这个子目录里。 */
-        const val MATRIX_DIR = "matrix"
-
-        /** 模型没把握的那几帧：原图 + 说明，存在 [DUMP_DIR] 下这个子目录里（供补标注重训）。 */
-        const val LOW_CONF_DIR = "low-conf"
-
-        /** [LOW_CONF_DIR] 里最多留这么多帧。 */
-        const val LOW_CONF_KEEP = 200
     }
 }
