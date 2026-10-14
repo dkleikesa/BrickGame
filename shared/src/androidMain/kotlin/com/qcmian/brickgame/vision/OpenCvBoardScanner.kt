@@ -76,6 +76,7 @@ object OpenCvBoardScanner {
      */
     fun scan(bitmap: Bitmap, minPitch: Int = MIN_PITCH, inset: Double = INSET): BoardScan? {
         ensureNativeLoaded()
+        val t0 = System.nanoTime()
         val rgba = Mat()
         Utils.bitmapToMat(bitmap, rgba)
         val bgr = Mat()
@@ -85,14 +86,14 @@ object OpenCvBoardScanner {
                 3 -> rgba.copyTo(bgr)
                 else -> Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_GRAY2BGR)
             }
-            return scanBgr(bgr, minPitch, inset)
+            return scanBgr(bgr, minPitch, inset, System.nanoTime() - t0)
         } finally {
             rgba.release()
             bgr.release()
         }
     }
 
-    private fun scanBgr(img: Mat, minPitch: Int, inset: Double): BoardScan? {
+    private fun scanBgr(img: Mat, minPitch: Int, inset: Double, prepNs: Long): BoardScan? {
         val h = img.rows()
         val w = img.cols()
         if (h < 32 || w < 32) return null
@@ -103,15 +104,22 @@ object OpenCvBoardScanner {
         val mag = Mat()
         val blurred = Mat()
         try {
+            // 分段计时：标定真机上占整帧 ~40%（415ms），但这一段内部是"OpenCV native + 大数组
+            // JNI 拷贝 + 三处 Kotlin 循环"混在一起，不拆开就只能靠猜 —— 之前猜错过一次。
+            var t = System.nanoTime()
             Imgproc.cvtColor(img, gray, Imgproc.COLOR_BGR2GRAY)
             Imgproc.Sobel(gray, gx, CvType.CV_32F, 1, 0, 3)
             Imgproc.Sobel(gray, gy, CvType.CV_32F, 0, 1, 3)
             Core.magnitude(gx, gy, mag)
             Imgproc.GaussianBlur(mag, blurred, Size(3.0, 3.0), 0.0)
+            val gradNs = System.nanoTime() - t
 
+            t = System.nanoTime()
             val rowProf = rowSums(blurred)
             val colProf = colSums(blurred)
+            val projNs = System.nanoTime() - t
 
+            t = System.nanoTime()
             val (pitchY, _) = LatticeMath.fundamentalPitch(rowProf, minPitch, (h * 0.25).toInt())
             val (pitchX, _) = LatticeMath.fundamentalPitch(colProf, minPitch, (w * 0.25).toInt())
 
@@ -178,6 +186,10 @@ object OpenCvBoardScanner {
                 }
             }
 
+            // 周期 + 相位 + 精调线 + 谐波修正/反推，全都算这一段
+            val pitchNs = System.nanoTime() - t
+
+            t = System.nanoTime()
             if (!fromBlobs) {
                 // 自相关路径：网格线会溢出棋盘，用"砖块成排"的密度裁掉两端多余的行/列。
                 val ring = cellRingScore(gx, gy, xlines, ylines)
@@ -229,8 +241,20 @@ object OpenCvBoardScanner {
                 return null
             }
 
+            val ringNs = System.nanoTime() - t
+
+            t = System.nanoTime()
             val (rects, frame) = cutCells(img, xlines, ylines, inset)
             val score = FeatureMath.cellFlatness(frame)
+            val cutNs = System.nanoTime() - t
+
+            // 分段耗时（ms）：标定真机上占整帧约 40%，拆开才知道该动哪一块
+            Log.i(
+                TAG,
+                "标定分段(ms)：转BGR ${prepNs / 1_000_000} 梯度 ${gradNs / 1_000_000} " +
+                    "投影 ${projNs / 1_000_000} 周期 ${pitchNs / 1_000_000} " +
+                    "环带 ${ringNs / 1_000_000} 裁格判空 ${cutNs / 1_000_000}",
+            )
 
             return BoardScan(
                 rows = ylines.size - 1,
@@ -254,30 +278,40 @@ object OpenCvBoardScanner {
 
     // ------------------------------------------------------------------ 投影
 
-    /** `g.sum(axis=1)`：每行一个和，长度 = 行数。 */
+    /**
+     * `g.sum(axis=1)`：每行一个和，长度 = 行数。
+     *
+     * 交给 `Core.reduce` 在 native 里做，不再 `Mat.get(0, 0, FloatArray)` 把整张 1080x2400 的
+     * float 图（**10.4MB**）拷进 Java 堆、再用 Kotlin 循环累加 259 万次 —— 那两件事
+     * 真机实测要 65~120ms（"投影"那一段），现在只剩一次 native reduce + 一次小数组取回。
+     *
+     * 精度：native 按 float32 累加，原来是 double 累加，差在 1e-5 相对量级。
+     * 下游只是拿它去找自相关峰值，不会改变 argmax；而且这几个函数**没有 golden 覆盖**
+     * （`VisionGolden` 里那份投影是 Python 预先算好的常量，测的是 `LatticeMath`，不是这里）。
+     */
     private fun rowSums(m: Mat): DoubleArray {
-        val buf = FloatArray(m.rows() * m.cols())
-        m.get(0, 0, buf)
-        val out = DoubleArray(m.rows())
-        for (y in 0 until m.rows()) {
-            var s = 0.0
-            val base = y * m.cols()
-            for (x in 0 until m.cols()) s += buf[base + x]
-            out[y] = s
+        val dst = Mat()
+        try {
+            Core.reduce(m, dst, 1, Core.REDUCE_SUM, CvType.CV_32F)   // dim=1 → 塌成一列
+            val buf = FloatArray(m.rows())
+            dst.get(0, 0, buf)
+            return DoubleArray(m.rows()) { buf[it].toDouble() }
+        } finally {
+            dst.release()
         }
-        return out
     }
 
-    /** `g.sum(axis=0)`：每列一个和，长度 = 列数。 */
+    /** `g.sum(axis=0)`：每列一个和，长度 = 列数。与 [rowSums] 同理。 */
     private fun colSums(m: Mat): DoubleArray {
-        val buf = FloatArray(m.rows() * m.cols())
-        m.get(0, 0, buf)
-        val out = DoubleArray(m.cols())
-        for (y in 0 until m.rows()) {
-            val base = y * m.cols()
-            for (x in 0 until m.cols()) out[x] += buf[base + x]
+        val dst = Mat()
+        try {
+            Core.reduce(m, dst, 0, Core.REDUCE_SUM, CvType.CV_32F)   // dim=0 → 塌成一行
+            val buf = FloatArray(m.cols())
+            dst.get(0, 0, buf)
+            return DoubleArray(m.cols()) { buf[it].toDouble() }
+        } finally {
+            dst.release()
         }
-        return out
     }
 
     // ------------------------------------------------------------------ 环带打分
@@ -368,11 +402,14 @@ object OpenCvBoardScanner {
 
         val pixels = FloatArray(nx * ny * CELL * CELL * 3)
         val rects = Array(nx * ny) { CellRect(0, 0, 0, 0) }
-        // resize 的输出是 CV_8UC3（跟着源图类型走），必须按字节读再转浮点：
-        // 直接 `Mat.get(0, 0, FloatArray)` 会抛 `UnsupportedOperationException: Mat data type is not compatible: 16`。
-        // Python 侧是 `patch.astype(np.float32)`，语义一致（0~255 的浮点副本）。
-        val buf = ByteArray(CELL * CELL * 3)
+        // resize 的输出是 CV_8UC3（跟着源图类型走），直接 `Mat.get(0, 0, FloatArray)` 会抛
+        // `UnsupportedOperationException: Mat data type is not compatible: 16`。
+        // 所以先用 convertTo 在 native 里转成 32F，再一次性取回 float —— 与 Python 侧
+        // `patch.astype(np.float32)` 数值等价（0~255 的浮点副本），但省掉每格 3072 次
+        // Kotlin 循环（一帧 43 万次）。
+        val floats = FloatArray(CELL * CELL * 3)
         val dst = Mat()
+        val dstF = Mat()
 
         try {
             var k = 0
@@ -390,14 +427,15 @@ object OpenCvBoardScanner {
 
                     val cell = img.submat(c, d, a, b)
                     Imgproc.resize(cell, dst, Size(CELL.toDouble(), CELL.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
-                    dst.get(0, 0, buf)
-                    val base = k * CELL * CELL * 3
-                    for (p in buf.indices) pixels[base + p] = (buf[p].toInt() and 0xFF).toFloat()
+                    dst.convertTo(dstF, CvType.CV_32F)
+                    dstF.get(0, 0, floats)
+                    System.arraycopy(floats, 0, pixels, k * CELL * CELL * 3, floats.size)
                     k++
                 }
             }
         } finally {
             dst.release()
+            dstF.release()
         }
 
         return rects to TileFrame(ny, nx, CELL, pixels)

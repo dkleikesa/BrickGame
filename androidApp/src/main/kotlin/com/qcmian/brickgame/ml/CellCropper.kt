@@ -3,6 +3,7 @@ package com.qcmian.brickgame.ml
 import android.graphics.Bitmap
 import com.qcmian.brickgame.vision.BoardScan
 import org.opencv.android.Utils
+import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
@@ -33,7 +34,12 @@ internal class CellCropper(val inputSize: Int) {
     private val tmp64 = Mat()
     private val tmpInput = Mat()
     private val tmpRgb = Mat()
-    private val bytes = ByteArray(inputSize * inputSize * 3)
+
+    /** cvtColor 之后直接 convertTo 成 32F（值域 0~1）用，省掉逐元素除法。 */
+    private val tmpFloat = Mat()
+
+    /** 一次 JNI 取回的整格 float 像素，再 `System.arraycopy` 进目标数组。 */
+    private val tmpFloats = FloatArray(floatsPerTile)
 
     /** 与 `build_dataset.frame_cells` 同式：格距中位数 × (1 - 2*OUT_INSET)。 */
     fun cropSide(scan: BoardScan): Int {
@@ -70,16 +76,21 @@ internal class CellCropper(val inputSize: Int) {
             Imgproc.INTER_LINEAR,
         )
         Imgproc.cvtColor(tmpInput, tmpRgb, Imgproc.COLOR_BGR2RGB)
-        tmpRgb.get(0, 0, bytes)
 
-        // bytes 本身就是 HWC 交错的 RGB，顺序拷一遍即可
-        for (i in bytes.indices) out[offset + i] = (bytes[i].toInt() and 0xFF) / 255f
+        // 8U → 32F 的 /255 交给 native，再一次性取回：
+        // 原先是 `for (i in bytes.indices) out[offset + i] = (bytes[i] and 0xFF) / 255f`，
+        // 一格 76800 次 Kotlin 循环，140 格就是 **1000 万次**（真机"裁格"那 ~300ms 的大头）。
+        // convertTo 的 alpha=1/255 与逐元素除法数值等价（都是 saturate_cast<float>(v/255)）。
+        tmpRgb.convertTo(tmpFloat, CvType.CV_32F, 1.0 / 255.0)
+        tmpFloat.get(0, 0, tmpFloats)
+        System.arraycopy(tmpFloats, 0, out, offset, floatsPerTile)
     }
 
     fun release() {
         tmp64.release()
         tmpInput.release()
         tmpRgb.release()
+        tmpFloat.release()
     }
 
     companion object {

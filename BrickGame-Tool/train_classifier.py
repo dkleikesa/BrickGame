@@ -119,13 +119,19 @@ class Embedder(nn.Module):
 # 与 embed_features.py 用**同一套骨干定义和同一档权重**（mobilenet_v3_large 用 V2），
 # 这样"自动识别用的特征"和"训练起点"是同一个域，微调是在同一个度量空间里往前推。
 _BACKBONES = {
+    "mobilenet_v2": torchvision.models.mobilenet_v2,
     "mobilenet_v3_large": torchvision.models.mobilenet_v3_large,
     "mobilenet_v3_small": torchvision.models.mobilenet_v3_small,
     "resnet18": torchvision.models.resnet18,
     "resnet50": torchvision.models.resnet50,
 }
-_BODY_DIM = {"mobilenet_v3_large": 960, "mobilenet_v3_small": 576,
+_BODY_DIM = {"mobilenet_v2": 1280, "mobilenet_v3_large": 960, "mobilenet_v3_small": 576,
              "resnet18": 512, "resnet50": 2048}
+# 权重档按骨干逐个写死：mobilenet_v3_small 官方只发过 V1，写 V2 会 KeyError（实测）。
+# large 仍用 V2 —— 与 embed_features.py / auto_classify 的选型保持一致。
+_WEIGHTS = {"mobilenet_v2": "IMAGENET1K_V1",
+            "mobilenet_v3_large": "IMAGENET1K_V2", "mobilenet_v3_small": "IMAGENET1K_V1",
+            "resnet18": "IMAGENET1K_V1", "resnet50": "IMAGENET1K_V1"}
 
 
 def build_body(name: str) -> nn.Module:
@@ -136,8 +142,7 @@ def build_body(name: str) -> nn.Module:
     """
     if name not in _BACKBONES:
         raise SystemExit(f"不支持的骨干: {name}（可选 scratch / " + " / ".join(_BACKBONES) + "）")
-    m = _BACKBONES[name](weights="IMAGENET1K_V2" if name.startswith("mobilenet")
-                         else "IMAGENET1K_V1")
+    m = _BACKBONES[name](weights=_WEIGHTS[name])
     body = nn.Sequential(*list(m.children())[:-2]) if name.startswith("resnet") else m.features
     return nn.Sequential(body, nn.AdaptiveAvgPool2d(1), nn.Flatten())
 

@@ -2,6 +2,7 @@ package com.qcmian.brickgame.capture
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.util.Log
 import com.qcmian.brickgame.HintUiBus
 import com.qcmian.brickgame.vision.HintPipeline
@@ -40,14 +41,18 @@ object LowConfStore {
         val dir = ensureDir(context) ?: return
         val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
         val scan = result.scan
+        val t0 = SystemClock.elapsedRealtime()
         try {
             File(dir, "$stem.png").outputStream().use {
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
             File(dir, "$stem.txt").writeText(
                 buildString {
+                    // 记下是哪个模型判的没把握：两个模型的留档阈值不同（见 ModelMeta.dumpSimilarity），
+                    // 混在一起补标注时分不清是"模型不行"还是"阈值太灵敏"
                     appendLine("# ${scan.rows}x${scan.cols} pitch=${scan.pitchX}x${scan.pitchY} " +
-                        "空位=${scan.empty.count { it }}/${scan.cellCount} 耗时=${result.elapsedMs}ms")
+                        "空位=${scan.empty.count { it }}/${scan.cellCount} 模型=${result.modelLabel} " +
+                        result.timingText())
                     appendLine("# 没把握的格子（序号=相似度）：" + result.lowConfidence.joinToString(" ") {
                         "(${it.first / scan.cols},${it.first % scan.cols})=${it.second}"
                     })
@@ -60,7 +65,13 @@ object LowConfStore {
             )
             trim(dir)
             publish(context)
-            Log.i(TAG, "低置信度帧已留档：$stem.png（${result.lowConfidence.size} 个可疑格：${result.lowConfidence}）")
+            // 写盘耗时打进日志：这一段不在帧耗时里（见 HintSession 的 dumpExecutor），
+            // 但它块头不小（整屏 PNG 无损压缩实测 ~1.6s），排查"点了要等几秒"时必须能看到
+            Log.i(
+                TAG,
+                "低置信度帧已留档：$stem.png（${result.lowConfidence.size} 个可疑格：" +
+                    "${result.lowConfidence}），写盘 ${SystemClock.elapsedRealtime() - t0}ms",
+            )
         } catch (e: Throwable) {
             Log.w(TAG, "低置信度帧留档失败", e)
         }
