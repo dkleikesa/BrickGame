@@ -1,6 +1,5 @@
 package com.qcmian.brickgame.vision
 
-import com.qcmian.brickgame.algorithm.BrickGameTipHelper
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -41,8 +40,31 @@ class HintEngineTest {
     }
 
     @Test
-    fun hintIsExecutableOnSyntheticBoard() {
-        // 只有 (0,0) 和 (2,1) 是砖块，且同款（类别 7）
+    fun sameLineWithEmptyPathIsPairable() {
+        // (0,0) 和 (0,3) 同款，中间 (0,1)(0,2) 空 → 往右滑过去撞上它，可消
+        val empty = BooleanArray(16) { true }
+        empty[0] = false
+        empty[3] = false
+        val scan = fakeScan(empty)
+
+        val labels = IntArray(16)
+        labels[0] = 7
+        labels[3] = 7
+        val state = BoardState.of(scan, labels)
+
+        val hint = HintEngine.nextHint(scan, state)
+        assertNotNull(hint, "同款两块砖在同一行且中间全空，应当能给出提示")
+        assertTrue(hint.from == CellPoint(0, 0) || hint.pair == CellPoint(0, 0))
+        assertTrue(hint.from == CellPoint(0, 3) || hint.pair == CellPoint(0, 3))
+
+        // 棋盘矩形要落在扫描给出的格子上
+        assertEquals(scan.rectOf(hint.from), hint.fromRect)
+        assertEquals(scan.rectOf(hint.pair), hint.pairRect)
+    }
+
+    @Test
+    fun bricksConnectedOnlyByBendAreNotPairable() {
+        // (0,0) 与 (2,1)：周围全是空格，但两者不在一条直线/斜线上 —— 滑行只走直线、不拐弯，移不到
         val empty = BooleanArray(16) { true }
         empty[0] = false
         empty[2 * 4 + 1] = false
@@ -53,25 +75,7 @@ class HintEngineTest {
         labels[2 * 4 + 1] = 7
         val state = BoardState.of(scan, labels)
 
-        val hint = HintEngine.nextHint(scan, state)
-        assertNotNull(hint, "同款两块砖应当能给出提示")
-        assertTrue(hint.from == CellPoint(0, 0) || hint.pair == CellPoint(0, 0))
-        assertTrue(hint.from == CellPoint(2, 1) || hint.pair == CellPoint(2, 1))
-        // 落点必须与 from 同行或同列
-        assertTrue(hint.to.row == hint.from.row || hint.to.col == hint.from.col)
-        // 提示必须真的能被执行
-        val grid = state.asGrid()
-        assertEquals(
-            BrickGameTipHelper.GAME_SUCCESS,
-            BrickGameTipHelper.actionStep(
-                grid,
-                intArrayOf(hint.from.row, hint.from.col, hint.to.row, hint.to.col, hint.pair.row, hint.pair.col),
-            ),
-        )
-
-        // 棋盘矩形要落在扫描给出的格子上
-        assertEquals(scan.rectOf(hint.from), hint.fromRect)
-        assertEquals(scan.rectOf(hint.to), hint.toRect)
+        assertNull(HintEngine.nextHint(scan, state), "靠拐弯才连上的两块砖在游戏里消不掉")
     }
 
     @Test

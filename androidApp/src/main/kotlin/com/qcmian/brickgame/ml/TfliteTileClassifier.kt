@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.TileClassifier
+import com.qcmian.brickgame.vision.UNKNOWN_LABEL_BASE
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -69,18 +70,24 @@ class TfliteTileClassifier private constructor(
             return labels
         }
 
+        val n = targets.size
+        val embeddings = FloatArray(n * dim)
+        val bestSimilarity = FloatArray(n)
+        val bestClass = IntArray(n)
+
         val side = cropper.cropSide(scan)
         val bgr = CellCropper.bitmapToBgr(frame)
+        var slot = 0
         try {
             for (chunk in targets.chunked(BATCH)) {
-                for ((slot, index) in chunk.withIndex()) {
-                    cropper.fill(bgr, scan, index, side, batchInput, slot * per)
+                for ((s, index) in chunk.withIndex()) {
+                    cropper.fill(bgr, scan, index, side, batchInput, s * per)
                 }
                 // 补满：直接复制最后一张的有效段，比重新裁一次便宜；多出来的结果反正要丢掉
                 if (chunk.size < BATCH) {
                     val src = (chunk.size - 1) * per
-                    for (slot in chunk.size until BATCH) {
-                        System.arraycopy(batchInput, src, batchInput, slot * per, per)
+                    for (s in chunk.size until BATCH) {
+                        System.arraycopy(batchInput, src, batchInput, s * per, per)
                     }
                 }
 
@@ -89,16 +96,103 @@ class TfliteTileClassifier private constructor(
                 inputBuffer.rewind()
                 interpreter.run(inputBuffer, output)
 
-                for ((k, index) in chunk.withIndex()) {
-                    labels[index] = nearestClass(output, k, similarity, index)
+                for (k in chunk.indices) {
+                    val vec = output[k]
+                    val base = slot * dim
+                    for (d in 0 until dim) embeddings[base + d] = vec[d]
+                    // 与原型做点积（两边都已 L2 归一化 → 点积即余弦相似度），取最大
+                    var best = 0
+                    var bestScore = Float.NEGATIVE_INFINITY
+                    for (c in 0 until nClass) {
+                        val protoBase = c * dim
+                        var dot = 0f
+                        for (d in 0 until dim) dot += vec[d] * prototypes[protoBase + d]
+                        if (dot > bestScore) {
+                            bestScore = dot
+                            best = c
+                        }
+                    }
+                    bestSimilarity[slot] = bestScore
+                    bestClass[slot] = meta.classIds[best]
+                    similarity[targets[slot]] = (bestScore * 100).roundToInt()
+                    slot++
                 }
             }
         } finally {
             bgr.release()
         }
+        writeLabels(labels, targets, embeddings, bestSimilarity, bestClass)
         lastSimilarity = similarity
         lastDims = scan.rows to scan.cols
         return labels
+    }
+
+    /**
+     * 把识别结果写回格子，并处理**模型没把握的格子**。
+     *
+     * 真机上踩过：同一款砖（篱笆）两块，(7,7) 相似度 96、给号 17；隔壁 (8,8) 只有 **44** ——
+     * 它是模型没见过的样子（同一款砖的另一个状态/贴图），于是两块同款被判成了两类，
+     * 配对算法再怎么改也配不出来。
+     *
+     * 所以这里做**帧内纠错**：没把握的格子先在本帧里找最像的格子（身份向量余弦最近），
+     * 够像就跟它同号；实在找不到才落到 [UNKNOWN_LABEL_BASE] 的"未知"（每格唯一号，永不配对）。
+     */
+    private fun writeLabels(
+        labels: IntArray,
+        targets: List<Int>,
+        embeddings: FloatArray,
+        bestSimilarity: FloatArray,
+        bestClass: IntArray,
+    ) {
+        val n = targets.size
+        val resolved = IntArray(n) { if (bestSimilarity[it] >= CONFIDENT_SIMILARITY) bestClass[it] else -1 }
+        var pending = (0 until n).filter { resolved[it] < 0 }
+        var pass = 0
+        while (pending.isNotEmpty() && pass < 2) {
+            val next = ArrayList<Int>()
+            for (i in pending) {
+                var bestJ = -1
+                var bestCos = -1f
+                for (j in 0 until n) {
+                    if (j == i || resolved[j] < 0) continue
+                    val cos = cosine(embeddings, i, j)
+                    if (cos > bestCos) {
+                        bestCos = cos
+                        bestJ = j
+                    }
+                }
+                if (bestJ >= 0 && bestCos >= RESCUE_COSINE) {
+                    resolved[i] = resolved[bestJ]
+                    Log.i(
+                        TAG,
+                        "格子 ${targets[i]} 没把握（sim=${bestSimilarity[i].roundToInt()}）→ " +
+                            "跟格子 ${targets[bestJ]} 同号 ${resolved[i]}（帧内余弦 ${(bestCos * 100).roundToInt()}）",
+                    )
+                } else {
+                    next += i
+                }
+            }
+            pending = next
+            pass++
+        }
+        for (i in 0 until n) {
+            labels[targets[i]] = if (resolved[i] >= 0) resolved[i] else UNKNOWN_LABEL_BASE + targets[i]
+        }
+        for (i in pending) {
+            Log.w(
+                TAG,
+                "格子 ${targets[i]} 没把握且帧内找不到同款（sim=${bestSimilarity[i].roundToInt()}）→ 判为未知，不参与配对",
+            )
+        }
+    }
+
+    /** 帧内两个格子的身份向量余弦（都已按维 L2 归一化 → 直接点积）。 */
+    private fun cosine(a: FloatArray, ia: Int, ib: Int): Float {
+        var dot = 0f
+        val baseA = ia * dim
+        val baseB = ib * dim
+        for (d in 0 until dim) dot += a[baseA + d] * a[baseB + d]
+        return dot
     }
 
     /**
@@ -128,24 +222,6 @@ class TfliteTileClassifier private constructor(
         return out
     }
 
-    /** 与原型做点积（两边都已 L2 归一化 → 点积即余弦相似度），取最大。 */
-    private fun nearestClass(embeddings: Array<FloatArray>, row: Int, similarity: IntArray, index: Int): Int {
-        val vec = embeddings[row]
-        var best = 0
-        var bestScore = Float.NEGATIVE_INFINITY
-        for (c in 0 until nClass) {
-            val protoBase = c * dim
-            var dot = 0f
-            for (k in 0 until dim) dot += vec[k] * prototypes[protoBase + k]
-            if (dot > bestScore) {
-                bestScore = dot
-                best = c
-            }
-        }
-        similarity[index] = (bestScore * 100).roundToInt()
-        return meta.classIds[best]
-    }
-
     override fun close() {
         cropper.release()
         interpreter.close()
@@ -166,6 +242,21 @@ class TfliteTileClassifier private constructor(
 
         /** 相似度（百分制）低于它就算"模型拿不准"：正常同款能到 90+ 甚至 99。 */
         private const val LOW_SIMILARITY = 70
+
+        /**
+         * 相似度（0~1）低于它就不再直接采信原型的类号，改为"帧内找最像的格子"纠错。
+         *
+         * 取值来自模型自带判据（`model_meta.json` 的 `thresholds.dist_wrong_p5 = 0.2182`：
+         * 相似度 ≤ 0.782 基本就是模型没见过的样子，真机上那块篱笆只有 0.44）。
+         */
+        private const val CONFIDENT_SIMILARITY = 0.78f
+
+        /**
+         * 帧内纠错的余弦门槛：没把握的格子与"最像的那格"至少要有这么像才敢跟它同号。
+         *
+         * 同一个物品的两种状态/贴图，余弦实测在 0.8~0.95；不同物品之间很难超过 0.6。
+         */
+        private const val RESCUE_COSINE = 0.80f
 
         /** 本机能不能用 GPU delegate（界面据此显示"GPU"还是"CPU 回退"）。 */
         fun gpuSupported(): Boolean = try {

@@ -13,7 +13,6 @@ import com.qcmian.brickgame.HintUiState
 import com.qcmian.brickgame.overlay.ControlBarView
 import com.qcmian.brickgame.overlay.HintOverlayView
 import com.qcmian.brickgame.overlay.OverlayController
-import com.qcmian.brickgame.vision.BoardDiagnostics
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
 import java.io.File
@@ -31,17 +30,17 @@ fun interface ScreenshotProvider {
  * 提示会话：**完全手动**的一帧一帧。
  *
  * 按"开始提示"跑一帧，之后只有点控制条上的「刷新」才再跑一帧 —— 不再自动续帧。
- * 为什么不做自动轮询：一帧要 1~2.5 秒（标定 + ONNX），自动跑就是一直占着 CPU、
- * 还容易在画面变化时给出过期提示；手动触发反而更可控。
+ * 为什么不做自动轮询：一帧要好几秒（标定 + 模型推理，真机实测 7~8s），自动跑就是一直占着
+ * CPU/GPU、还容易在画面变化时给出过期提示；手动触发反而更可控。
  *
  * 线程分工：
  *  - 主线程：发起截屏（API 要求）、渲染调试图、更新悬浮窗；
- *  - `brick-hint-worker`：OpenCV 标定 + ONNX 推理是纯 CPU 活，不能占主线程。
+ *  - `brick-hint-worker`：OpenCV 标定 + 模型推理是纯 CPU/GPU 活，不能占主线程。
  *
- * 两道兜底（都在真机上踩过）：
- *  - [CAPTURE_TIMEOUT_MS]：`takeScreenshot` 的回调有时永远不回来，不兜底就永久卡住；
- *  - [ANALYSIS_TIMEOUT_MS]：棋盘被识别歪时格子数会离谱（实测 199×89），
- *    下游 O(n²) 能把一帧拖到 25 秒以上，超时就丢弃该帧并重建 worker。
+ * 分析**不设超时**：一帧识别本来就要几秒（真机实测 7~8s），卡死上限反而把好帧丢掉，
+ * 结果屏幕上留着上一帧的旧提示，"看起来就是提示不对"。所以只保留截屏回调的兜底
+ * （[CAPTURE_TIMEOUT_MS]：`takeScreenshot` 的回调有时永远不回来，不兜底就永久卡住），
+ * 分析慢就等它慢，算完为止。
  */
 class HintSession(
     private val context: Context,
@@ -59,11 +58,11 @@ class HintSession(
     private val classifier: TileClassifier get() = classifierLazy.value
 
     private val main = Handler(Looper.getMainLooper())
-    private var workerThread = HandlerThread("brick-hint-worker").apply { start() }
-    private var worker = Handler(workerThread.looper)
+    private val workerThread = HandlerThread("brick-hint-worker").apply { start() }
+    private val worker = Handler(workerThread.looper)
 
     /**
-     * 帧代号。分析被判超时后，"还在跑"的那条旧线程算完还是会往主线程丢结果 ——
+     * 帧代号。会话被停掉时，"还在跑"的那条旧线程算完还是会往主线程丢结果 ——
      * 靠它把过期的结果丢掉，不然会把已经作废的一帧画上去。
      */
     private val generation = AtomicInteger(0)
@@ -86,19 +85,12 @@ class HintSession(
         }
     }
 
-    private val analysisTimeout = Runnable {
-        Log.w(TAG, "分析超过 ${ANALYSIS_TIMEOUT_MS}ms 还没回来 → 丢弃这一帧并重建 worker")
-        generation.incrementAndGet()
-        recreateWorker()
-        active.set(false)
-        if (capturing.compareAndSet(true, false)) {
-            updateBar("分析超时，已跳过这一帧", "", "点「刷新」重试")
-        }
-    }
-
     private val previewView = HintOverlayView(context)
 
     private var frames = 0
+
+    /** 已写出的类别数组文件序号（每成功一帧 +1）。 */
+    private var matrixFiles = 0
 
     init {
         overlay.onRefresh = { refreshNow() }
@@ -119,7 +111,6 @@ class HintSession(
         active.set(false)
         capturing.set(false)
         main.removeCallbacks(captureTimeout)
-        main.removeCallbacks(analysisTimeout)
         generation.incrementAndGet()          // 让还在跑的那一帧的结果失效
         overlay.hide()
         HintUiBus.state = HintUiBus.state.copy(running = false, hintText = "", cleared = false, stuck = false)
@@ -158,18 +149,11 @@ class HintSession(
         }
     }
 
-    private fun recreateWorker() {
-        workerThread.quitSafely()
-        workerThread = HandlerThread("brick-hint-worker").apply { start() }
-        worker = Handler(workerThread.looper)
-    }
-
     private fun captureFrame() {
         if (!active.get()) return
         if (!capturing.compareAndSet(false, true)) return
         val gen = generation.get()
         main.removeCallbacks(captureTimeout)
-        main.removeCallbacks(analysisTimeout)
         main.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
         // 截图前把提示层收掉：上一帧画在屏幕上的提示框会污染本次截图（强边缘带偏标定、
         // 50% 红色改变砖块颜色）。只藏提示层，控制条留着。
@@ -185,17 +169,15 @@ class HintSession(
                 finishFrame()
                 return@capture
             }
-            main.postDelayed(analysisTimeout, ANALYSIS_TIMEOUT_MS)
             worker.post {
                 val result = HintPipeline.analyze(bitmap, classifier)
                 main.post {
                     if (gen != generation.get()) {
-                        // 这一帧已经被判超时、算作废了：丢掉结果，别再往画面上画
+                        // 会话已经停了、这一帧算作废：丢掉结果，别再往画面上画
                         Log.w(TAG, "丢弃过期帧的结果（gen=$gen）")
                         bitmap.recycle()
                         return@post
                     }
-                    main.removeCallbacks(analysisTimeout)
                     // 预览要先把像素画进另一张位图，所以回收放到 handle 之后
                     handle(bitmap, result)
                     bitmap.recycle()
@@ -223,11 +205,16 @@ class HintSession(
         frames++
 
         val scan = result.scan
-        val hint = result.hint
+        val hints = result.hints
         val bricks = scan.empty.count { !it }
+        // 一行里能消的对可能有很多对，控制条放不下，只报总数 + 前两对
         val hintText = when {
             result.cleared -> "盘面已清空"
-            hint != null -> hint.describe()
+            hints.isNotEmpty() -> buildString {
+                append("共 ${hints.size} 对可消除：" )
+                append(hints.take(2).joinToString("，") { it.pairText() })
+                if (hints.size > 2) append(" …")
+            }
             else -> "没有可消除的一对（多半是识别把同类判成了不同类）"
         }
         HintUiBus.state = HintUiState(
@@ -246,7 +233,7 @@ class HintSession(
             background = null,
             scan = scan,
             state = result.state,
-            hint = hint,
+            hints = hints,
             showGrid = HintUiBus.showGrid,
             showLabels = HintUiBus.showLabels,
         )
@@ -258,14 +245,12 @@ class HintSession(
             Log.i(
                 TAG,
                 "第 $frames 帧：${scan.rows}x${scan.cols} 砖块 $bricks 空位 ${scan.cellCount - bricks} " +
-                    "${result.elapsedMs}ms 提示=${hint?.describe() ?: "无"}" +
+                    "${result.elapsedMs}ms 可消对=${hints.size}" +
                     (if (result.stuck) "（识别疑似有误：有砖块但无解）" else ""),
             )
         }
 
-        val diag = BoardDiagnostics.report(result.scan, result.state, result.hint) + classifier.diagnostics()
-        logDiagnostics(result, diag)
-        dumpDebugFrame(bitmap, result, frame, diag)
+        dumpMatrix(result)
 
         if (HintUiBus.previewEnabled) {
             HintUiBus.preview = renderPreview(frame, bitmap)
@@ -273,55 +258,38 @@ class HintSession(
     }
 
     /**
-     * 把这一帧的体检报告逐行打到 `BoardDiag` tag 上（标定几何 / 每格平坦度 / 类别 / 类别计数 / 相似度）。
+     * 每识别成功一帧，就把这一帧的**二维类别数组**单独存一个文件（`debug-frames/matrix/NNNN.txt`）。
      *
-     * 目的是从真机日志上区分"格线切歪了"和"砖块认错了"，见 [BoardDiagnostics] 的说明。
-     * `adb logcat -s BoardDiag` 就能捞出整帧。
+     * 0 = 空位；行优先，一行一格行。文件头带上格距/空位数/可消对，方便事后拿真实盘面回放算法。
      */
-    private fun logDiagnostics(result: HintPipeline.Result, lines: List<String>) {
-        Log.i(BoardDiagnostics.TAG, "frame=$frames elapsed=${result.elapsedMs}ms ${result.scan.rows}x${result.scan.cols}")
-        for (line in lines) {
-            Log.i(BoardDiagnostics.TAG, line)
-        }
-    }
-
-    /**
-     * 把调试图（截图 + 全部网格线 + 全部类别号）与报告写到 app 外部私有目录，方便 `adb pull` 核对。
-     *
-     * 文本日志能说清"数字是多少"，但"格线到底压在砖块上还是缝里"只有看图最快，
-     * 所以这里固定覆盖写 `latest.png` / `latest.txt`，不攒历史（一次只查最近一帧）。
-     */
-    private fun dumpDebugFrame(
-        background: Bitmap,
-        result: HintPipeline.Result,
-        frame: HintOverlayView.Frame,
-        diag: List<String>,
-    ) {
+    private fun dumpMatrix(result: HintPipeline.Result) {
         val dir = context.getExternalFilesDir(DUMP_DIR) ?: return
-        if (!dir.exists() && !dir.mkdirs()) return
-        val image = renderPreview(
-            frame.copy(background = background, showGrid = true, showLabels = true),
-            background,
-        )
+        val sub = File(dir, MATRIX_DIR)
+        if (!sub.exists() && !sub.mkdirs()) return
+        matrixFiles++
+        val scan = result.scan
+        val labels = result.state.labels
+        val file = File(sub, String.format("%04d.txt", matrixFiles))
         try {
-            val png = File(dir, "latest.png")
-            FileOutputStream(png).use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            File(dir, "latest.txt").writeText(
+            file.writeText(
                 buildString {
-                    appendLine("# 第 $frames 帧 ${result.scan.rows}行x${result.scan.cols}列 ${result.elapsedMs}ms")
-                    appendLine("hint ${result.hint?.describe() ?: "无"}")
-                    diag.forEach { appendLine(it) }
+                    appendLine("# ${scan.rows}x${scan.cols} pitch=${scan.pitchX}x${scan.pitchY} " +
+                        "空位=${scan.empty.count { it }}/${scan.cellCount} 可消对=${result.hints.size} " +
+                        "耗时=${result.elapsedMs}ms")
+                    appendLine("# " + result.hints.joinToString(" ") { it.pairText() })
+                    for (r in 0 until scan.rows) {
+                        val from = r * scan.cols
+                        appendLine((0 until scan.cols).joinToString(" ") { labels[from + it].toString() })
+                    }
                 },
             )
-            Log.i(TAG, "调试帧已写出：$png")
+            Log.i(TAG, "第 $matrixFiles 帧的类别数组已写出：$file")
         } catch (e: Throwable) {
-            Log.w(TAG, "调试帧写出失败", e)
-        } finally {
-            image.recycle()
+            Log.w(TAG, "类别数组写出失败", e)
         }
     }
 
-    /** 把同一套绘制逻辑渲成调试图（截图 → 网格 → 类别 → 提示箭头），供界面核对标定对不对。 */
+    /** 把同一套绘制逻辑渲成调试图（截图 → 网格 → 类别 → 提示框），供界面核对标定对不对。 */
     private fun renderPreview(frame: HintOverlayView.Frame, background: Bitmap): Bitmap {
         val w = (background.width * PREVIEW_SCALE).toInt().coerceAtLeast(1)
         val h = (background.height * PREVIEW_SCALE).toInt().coerceAtLeast(1)
@@ -349,14 +317,8 @@ class HintSession(
     private companion object {
         const val TAG = "HintSession"
 
-        /** 截屏回调迟迟不回来时的兜底时限。 */
+        /** 截屏回调迟迟不回来时的兜底时限（分析那一段不设限，见类注释）。 */
         const val CAPTURE_TIMEOUT_MS = 3000L
-
-        /**
-         * 一帧分析（标定 + 识别 + 求解）的时限。正常情况下真机 14×10 约 1.5~2.5s，
-         * 8s 已经远超合理范围 —— 再等下去就是白等。
-         */
-        const val ANALYSIS_TIMEOUT_MS = 8000L
 
         const val PREVIEW_SCALE = 0.5f
 
@@ -365,5 +327,8 @@ class HintSession(
          * 取出来核对：`adb pull /sdcard/Android/data/com.qcmian.brickgame/files/debug-frames/`。
          */
         const val DUMP_DIR = "debug-frames"
+
+        /** 每帧一个二维类别数组文件，存在 [DUMP_DIR] 下这个子目录里。 */
+        const val MATRIX_DIR = "matrix"
     }
 }

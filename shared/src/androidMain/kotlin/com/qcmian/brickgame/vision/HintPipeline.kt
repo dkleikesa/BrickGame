@@ -18,8 +18,8 @@ object HintPipeline {
         val scan: BoardScan,
         /** 识别结果：每格类别 id。 */
         val state: BoardState,
-        /** 下一条可操作提示；没有可消除对时为 null。 */
-        val hint: Hint?,
+        /** 当前盘面上全部可消除的对（一行可能同时存在好几对）。 */
+        val hints: List<Hint>,
         val elapsedMs: Long,
     ) {
         val cleared: Boolean get() = HintEngine.isCleared(state)
@@ -40,8 +40,8 @@ object HintPipeline {
             val scan = OpenCvBoardScanner.scan(frame, minPitch) ?: return null
             val labels = classifier.classify(frame, scan)
             val state = BoardState.of(scan, labels)
-            val hint = HintEngine.nextHint(scan, state)
-            Result(scan, state, hint,  (System.nanoTime() - start) / 1_000_000)
+            val hints = HintEngine.allHints(scan, state)
+            Result(scan, state, hints, (System.nanoTime() - start) / 1_000_000)
         } catch (e: Throwable) {
             Log.w(TAG, "分析失败", e)
             null
