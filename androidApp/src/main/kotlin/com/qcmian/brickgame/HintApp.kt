@@ -2,10 +2,8 @@ package com.qcmian.brickgame
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.provider.Settings
 import android.view.WindowManager
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,16 +16,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,11 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -53,7 +44,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 一条链路的操作台：授权 → 启停 → 看提示 → 看调试图（核对标定）。
+ * 一条链路的操作台：授权 → 启停，剩下的（提示、帧信息、调试开关）都在屏幕底部的悬浮条上。
  *
  * 真正的截屏/识别/绘制都在无障碍服务里跑，这里只是它的面板 ——
  * 所以界面退到后台、甚至被杀掉，悬浮窗提示都不受影响。
@@ -136,123 +127,13 @@ fun HintApp() {
                         scope.launch {
                             val started = startHintingWithRetry()
                             busy = false
-                            if (started) {
-                                HintUiBus.serviceMessage = null
-                            } else if (isAccessibilityServiceEnabled(context)) {
-                                // 系统里开着、进程里没连上：**不要**跳设置页，那是误导
-                                HintUiBus.serviceMessage =
-                                    "无障碍服务在系统里是开着的，但当前进程还没连上（App 刚被系统重启过）。" +
-                                        "稍等几秒再点一次；一直不行就在设置里把它关掉再打开一次。"
-                            } else {
+                            // 只有"系统里就没开过"才跳设置页；只是进程还没连上就把人扔过去是误导
+                            if (!started && !isAccessibilityServiceEnabled(context)) {
                                 context.startActivity(accessibilitySettingsIntent(context))
                             }
                         }
                     },
                 ) { Text(if (ui.running) "停止提示" else if (busy) "连接中…" else "开始提示") }
-            }
-
-            OutlinedButton(
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !busy,
-                onClick = {
-                    busy = true
-                    scope.launch {
-                        val ok = startHintingWithRetry()
-                        busy = false
-                        if (!ok) {
-                            HintUiBus.serviceMessage =
-                                if (isAccessibilityServiceEnabled(context)) {
-                                    "服务还没连上，稍后再试。"
-                                } else {
-                                    "还没开启无障碍服务。"
-                                }
-                        }
-                    }
-                },
-            ) { Text("验证一次（跑一帧看调试图）") }
-
-            HintUiBus.serviceMessage?.let { message ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-                    Text(
-                        message,
-                        modifier = Modifier.padding(14.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
-            }
-
-            if (HintUiBus.needsOverlayPermission) {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            "悬浮窗被系统拒了",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                        Text(
-                            "本机不吃无障碍专属的悬浮窗类型。允许「显示在其他应用上层」后会降级到普通应用悬浮窗，效果一样。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                        Button(
-                            onClick = {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
-                                        .setData(Uri.parse("package:${context.packageName}"))
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                )
-                            },
-                        ) { Text("去授权") }
-                    }
-                }
-            }
-
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("提示", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        ui.hintText.ifBlank { "还没有结果" },
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    if (ui.scanSummary.isNotBlank()) {
-                        Text(
-                            ui.scanSummary,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Switch(checked = HintUiBus.showGrid, onCheckedChange = { HintUiBus.showGrid = it })
-                Text("显示网格", Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.weight(1f))
-                Switch(checked = HintUiBus.showLabels, onCheckedChange = { HintUiBus.showLabels = it })
-                Text("显示类别号", Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyMedium)
-            }
-            Text(
-                "这两个是调试图层，默认关；打开后会标出所有格子（用来核对标定/识别准不准）。" +
-                    "平时屏幕上只有能消的那几格：绿框=要滑的、蓝框=落点、橙框=配对砖。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            ui.message?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
-            }
-
-            HintUiBus.preview?.let { bitmap ->
-                Text("调试图（绿框=要滑动的那块，蓝框=落点，橙框=配对砖）", style = MaterialTheme.typography.labelMedium)
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "调试图",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp)),
-                )
             }
 
             Box(Modifier.height(24.dp))

@@ -21,10 +21,9 @@ interface TileClassifier {
     fun classify(frame: Bitmap, scan: BoardScan): IntArray
 
     /**
-     * 上一帧的识别诊断（每格的置信度等），只给日志用；没有就返回空。
+     * 上一帧"模型没把握"的格子（行优先序号 → 相似度百分制）；没有就返回空。
      *
-     * 为什么要有：分数普遍低 = 裁出来的东西模型没见过（多半是格线切歪了），
-     * 分数很高但类别乱 = 模型/原型本身的问题 —— 这两条路的修法完全不同。
+     * 识别**不按它改判**（低分也照样给 top-1），这个列表只用来决定"这一帧要不要留档给以后重训"。
      */
-    fun diagnostics(): List<String> = emptyList()
+    fun lowConfidenceCells(): List<Pair<Int, Int>> = emptyList()
 }

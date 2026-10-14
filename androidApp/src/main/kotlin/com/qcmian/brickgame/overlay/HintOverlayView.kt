@@ -1,7 +1,6 @@
 package com.qcmian.brickgame.overlay
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -24,7 +23,7 @@ import kotlin.math.min
  *  - 一出现先闪 [FLASHES_PER_BURST] 下（每下 [FLASH_ON_MS]，间隔 [FLASH_GAP_MS]）再稳住常亮。
  *  - **不画箭头**：玩家只要知道哪两块可以消，滑哪边由游戏自己判定。
  *
- * 网格和类别号是**调试图层**，默认关（界面上「显示网格」「显示类别号」开关）；
+ * 网格和类别号是**调试图层**，默认关（悬浮条上的「网格」「类别号」开关，点了立刻重画）；
  * 只有那个开关打开时才会给所有砖块上色写字，用来核对标定/识别对不对。
  *
  * 坐标就是截图坐标（[BoardScan.rects] 用的也是它），窗口铺满全屏时 1:1 对齐，不需要缩放。
@@ -32,8 +31,6 @@ import kotlin.math.min
 class HintOverlayView(context: Context) : View(context) {
 
     data class Frame(
-        /** 调试图预览时带上截图；实时悬浮窗为 null（游戏画面本来就在下面）。 */
-        val background: Bitmap?,
         val scan: BoardScan,
         val state: BoardState,
         /** 当前盘面上全部可消除的对，一对画两个同色框。 */
@@ -118,7 +115,6 @@ class HintOverlayView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val f = frame ?: return
-        f.background?.let { canvas.drawBitmap(it, 0f, 0f, null) }
         if (f.scan.rows == 0 || f.scan.cols == 0) return
 
         // 只有调试图层打开时才给"所有格子"上色；默认屏幕上除了提示那几格没有别的涂色
@@ -164,7 +160,7 @@ class HintOverlayView(context: Context) : View(context) {
      * 靠序号认"哪两块是一对"。
      *
      * 只标 [Hint.fromRect] 与 [Hint.pairRect] 这两块砖（就是会被消掉的两块）；
-     * [Hint.toRect] 只是算法内部推出来的落点，不画，也不画箭头。
+     * 不画落点、也不画箭头（滑哪边由游戏自己判定）。
      */
     private fun drawHints(canvas: Canvas, hints: List<Hint>) {
         if (hints.isEmpty()) return

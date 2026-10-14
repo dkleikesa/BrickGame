@@ -17,6 +17,8 @@ import android.view.View
  *
  * 自己画而不是用 Button：无障碍服务的 Context 不是 Activity，拿不到 Activity 主题，
  * 用平台控件容易踩主题解析的坑；纯 onDraw + onTouchEvent 反倒更可控。
+ *
+ * 内容从左到右：提示文字（两行）→ 两个调试开关（网格 / 类别号，按状态显形的 toggle）→ 刷新 → 关闭。
  */
 class ControlBarView(context: Context) : View(context) {
 
@@ -38,6 +40,23 @@ class ControlBarView(context: Context) : View(context) {
     var onRefresh: (() -> Unit)? = null
     var onClose: (() -> Unit)? = null
 
+    /** 调试开关：网格 / 类别号。点一下立刻回调，由上层即时重画（不用等下一次刷新）。 */
+    var onToggleGrid: ((Boolean) -> Unit)? = null
+    var onToggleLabels: ((Boolean) -> Unit)? = null
+
+    /** 两个调试开关的显示状态（写进去就重绘）。 */
+    var showGrid: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var showLabels: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
 
@@ -49,7 +68,12 @@ class ControlBarView(context: Context) : View(context) {
     private val lineGap = dp(2f)
     private val buttonWidth = dp(50f)
     private val buttonHeight = dp(26f)
-    private val buttonGap = dp(6f)
+    private val buttonGap = dp(5f)
+
+    // 开关：一条小轨道 + 滑块 + 右边标签（自己画，见 drawToggle）
+    private val trackWidth = dp(26f)
+    private val trackHeight = dp(16f)
+    private val trackGap = dp(4f)
 
     private val background = Paint().apply { color = 0xE60E1216.toInt() }
 
@@ -77,11 +101,31 @@ class ControlBarView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
     }
 
+    /** 开关标签：轨道右边的小字，颜色跟着开/关变。 */
+    private val toggleText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF9AA4AE.toInt()
+        textSize = dp(11f)
+        textAlign = Paint.Align.LEFT
+    }
+
+    /** 开关轨道与滑块的填充（颜色每次绘制前按状态设）。 */
+    private val trackFill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val thumbFill = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /** 开关被按住时的底衬，点着有反馈。 */
+    private val togglePressed = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x1FFFFFFF }
+
     private val refreshRect = RectF()
     private val closeRect = RectF()
+    private val gridRect = RectF()
+    private val labelsRect = RectF()
     private val rect = RectF()
 
-    /** 当前按下的按钮：0=刷新，1=关闭，-1=没有。 */
+    /** 两个开关的宽度：轨道 + 标题文字按实际宽度算，窄屏上别把标签挤掉。 */
+    private var gridToggleWidth = 0f
+    private var labelsToggleWidth = 0f
+
+    /** 当前按下的控件：[REFRESH]/[CLOSE]/[GRID]/[LABELS]；-1 = 没有。 */
     private var pressed = -1
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -92,8 +136,13 @@ class ControlBarView(context: Context) : View(context) {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         val top = topPadding
-        closeRect.set(width - padding - buttonWidth, top, width - padding, top + buttonHeight)
-        refreshRect.set(closeRect.left - buttonGap - buttonWidth, top, closeRect.left - buttonGap, top + buttonHeight)
+        val bottom = top + buttonHeight
+        gridToggleWidth = trackWidth + trackGap + toggleText.measureText(GRID_LABEL)
+        labelsToggleWidth = trackWidth + trackGap + toggleText.measureText(LABELS_LABEL)
+        closeRect.set(width - padding - buttonWidth, top, width - padding, bottom)
+        refreshRect.set(closeRect.left - buttonGap - buttonWidth, top, closeRect.left - buttonGap, bottom)
+        labelsRect.set(refreshRect.left - buttonGap - labelsToggleWidth, top, refreshRect.left - buttonGap, bottom)
+        gridRect.set(labelsRect.left - buttonGap - gridToggleWidth, top, labelsRect.left - buttonGap, bottom)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -101,7 +150,7 @@ class ControlBarView(context: Context) : View(context) {
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), background)
         canvas.drawRect(0f, 0f, width.toFloat(), dp(1f), divider)
 
-        val textRight = refreshRect.left - buttonGap
+        val textRight = gridRect.left - buttonGap
         val textWidth = (textRight - padding).coerceAtLeast(dp(40f))
 
         val hint = state?.hintText.orEmpty()
@@ -112,17 +161,20 @@ class ControlBarView(context: Context) : View(context) {
             hintPaint,
         )
 
+        // 状态行也按提示行的宽度截断：按钮是画在后面的，写满整行会被按钮盖住半截
         val status = state?.message ?: state?.statusText.orEmpty()
         statusPaint.color = if (state?.message != null) 0xFFFF6B6B.toInt() else 0xFF9AA4AE.toInt()
         canvas.drawText(
-            TextUtils.ellipsize(status, statusPaint, width - 2 * padding, TextUtils.TruncateAt.END).toString(),
+            TextUtils.ellipsize(status, statusPaint, textWidth, TextUtils.TruncateAt.END).toString(),
             padding,
             topPadding + hintPaint.textSize + lineGap + statusPaint.textSize,
             statusPaint,
         )
 
-        drawButton(canvas, refreshRect, "刷新", pressed == 0, false)
-        drawButton(canvas, closeRect, "关闭", pressed == 1, true)
+        drawToggle(canvas, gridRect, GRID_LABEL, showGrid, pressed == GRID)
+        drawToggle(canvas, labelsRect, LABELS_LABEL, showLabels, pressed == LABELS)
+        drawButton(canvas, refreshRect, "刷新", pressed == REFRESH, false)
+        drawButton(canvas, closeRect, "关闭", pressed == CLOSE, true)
     }
 
     private fun drawButton(canvas: Canvas, bounds: RectF, label: String, isPressed: Boolean, isClose: Boolean) {
@@ -136,6 +188,41 @@ class ControlBarView(context: Context) : View(context) {
         canvas.drawRoundRect(rect, dp(8f), dp(8f), fill)
         val baseline = rect.centerY() - (buttonText.ascent() + buttonText.descent()) / 2f
         canvas.drawText(label, rect.centerX(), baseline, buttonText)
+    }
+
+    /**
+     * 开关（**不是按钮**，是按状态显形的 toggle）：左边一条轨道 + 滑块，右边标签。
+     * 亮蓝轨道 + 滑块靠右 = 开，深灰轨道 + 滑块靠左 = 关；按住时加一层浅底衬。
+     * 命中区是整块（含标签），点哪都算。
+     */
+    private fun drawToggle(canvas: Canvas, bounds: RectF, label: String, on: Boolean, isPressed: Boolean) {
+        if (isPressed) {
+            rect.set(bounds)
+            canvas.drawRoundRect(rect, dp(6f), dp(6f), togglePressed)
+        }
+
+        trackFill.color = when {
+            on && isPressed -> buttonFillPressed.color
+            on -> buttonFill.color
+            isPressed -> buttonFillClosePressed.color
+            else -> buttonFillClose.color
+        }
+        val trackTop = bounds.centerY() - trackHeight / 2f
+        rect.set(bounds.left, trackTop, bounds.left + trackWidth, trackTop + trackHeight)
+        canvas.drawRoundRect(rect, trackHeight / 2f, trackHeight / 2f, trackFill)
+
+        val radius = trackHeight / 2f - dp(2f)
+        val centerX = if (on) {
+            bounds.left + trackWidth - radius - dp(2f)
+        } else {
+            bounds.left + radius + dp(2f)
+        }
+        thumbFill.color = if (on) 0xFFFFFFFF.toInt() else 0xFF9AA4AE.toInt()
+        canvas.drawCircle(centerX, bounds.centerY(), radius, thumbFill)
+
+        toggleText.color = if (on) 0xFFFFFFFF.toInt() else 0xFF9AA4AE.toInt()
+        val baseline = bounds.centerY() - (toggleText.ascent() + toggleText.descent()) / 2f
+        canvas.drawText(label, bounds.left + trackWidth + trackGap, baseline, toggleText)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -160,7 +247,19 @@ class ControlBarView(context: Context) : View(context) {
                 pressed = -1
                 invalidate()
                 if (hit >= 0 && hit == was) {
-                    if (hit == 0) onRefresh?.invoke() else onClose?.invoke()
+                    when (hit) {
+                        REFRESH -> onRefresh?.invoke()
+                        CLOSE -> onClose?.invoke()
+                        // 立刻翻状态并回调：上层拿这个信号即时重画提示层，不等下一次刷新
+                        GRID -> {
+                            showGrid = !showGrid
+                            onToggleGrid?.invoke(showGrid)
+                        }
+                        LABELS -> {
+                            showLabels = !showLabels
+                            onToggleLabels?.invoke(showLabels)
+                        }
+                    }
                     performClick()
                 }
                 return true
@@ -178,8 +277,21 @@ class ControlBarView(context: Context) : View(context) {
     override fun performClick(): Boolean = super.performClick()
 
     private fun hitTest(x: Float, y: Float): Int = when {
-        refreshRect.contains(x, y) -> 0
-        closeRect.contains(x, y) -> 1
-        else -> -1
+        refreshRect.contains(x, y) -> REFRESH
+        closeRect.contains(x, y) -> CLOSE
+        gridRect.contains(x, y) -> GRID
+        labelsRect.contains(x, y) -> LABELS
+        else -> NONE
+    }
+
+    private companion object {
+        const val NONE = -1
+        const val REFRESH = 0
+        const val CLOSE = 1
+        const val GRID = 2
+        const val LABELS = 3
+
+        const val GRID_LABEL = "网格"
+        const val LABELS_LABEL = "类别号"
     }
 }

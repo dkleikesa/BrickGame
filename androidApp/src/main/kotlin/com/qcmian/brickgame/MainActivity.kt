@@ -41,17 +41,6 @@ class MainActivity : ComponentActivity() {
         if (attempt < 5) window.decorView.postDelayed({ startHintingWithRetry(attempt + 1) }, 500)
     }
 
-    override fun onStart() {
-        super.onStart()
-        // 界面可见时才渲染调试图：一帧 ARGB 位图不小，不值得在后台一直生成
-        HintUiBus.previewEnabled = true
-    }
-
-    override fun onStop() {
-        HintUiBus.previewEnabled = false
-        super.onStop()
-    }
-
     companion object {
         const val EXTRA_AUTOSTART = "autostart"
     }

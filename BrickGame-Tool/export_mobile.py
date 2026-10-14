@@ -9,10 +9,15 @@
                        里 class_ids[i]** —— 与输出向量做点积即是相似度（已归一化，点积=余弦）。
   model_meta.json      接口契约 + 类目表 + 阈值 + 训练配置/指标。Android 端加载原型做最近邻时读它。
 
-为什么走 ONNX 而不是 TorchScript：PyTorch Android 的 libtorch 版本远落后于训练用的 torch 2.8，
-跨版本加载 TorchScript 很容易直接失败；onnxruntime 只要和训练侧版本对齐就能稳加载
-（本仓库用 onnxruntime-android:1.19.2，与校验用的 python onnxruntime 1.19.2 同版）。
+为什么走 ONNX 而不是 TorchScript：训练侧 torch 迭代快，跨版本加载 TorchScript 很容易直接失败；
+ONNX 有版本对齐的运行时（onnxruntime）兜底，而且 `export_tflite.py` 拿它当 ONNX → TFLite 的转换源。
+它只是中间格式：Android 侧只加载 `brick_embedder.tflite`。
 `--torchscript` 可以额外导一份 .ptl 备用。
+
+**batch 固定**（`--batch`，默认 32，必须与 Android `TfliteTileClassifier.BATCH` 一致）：
+留成动态维时，`F.normalize` 的广播会被导成 `Shape(input) → Concat → Expand`，onnx2tf 搬进 TFLite
+后那个 `FILL` 的输出是"运行时才定形状"的动态张量，GPU delegate 拒收整图
+（真机报 `Error applying delegate`）。固定 batch 后形状在导出期就是常量，这条链直接消失。
 
 导出后会**用 onnxruntime 现场加载并和 PyTorch 对拍**，数值不一致就报错退出 —— 不把没验证过的
 模型塞进 APK。
@@ -62,6 +67,8 @@ def main() -> None:
     ap.add_argument("--metrics", default="", help="默认取 ckpt 同目录的 metrics.json")
     ap.add_argument("--out", default=os.path.join(_ROOT, "androidApp", "src", "main", "assets"))
     ap.add_argument("--opset", type=int, default=17)
+    ap.add_argument("--batch", type=int, default=32,
+                    help="固定 batch，必须与 Android 的 BATCH 一致（动态 batch 会带出动态张量，GPU delegate 挂不上）")
     ap.add_argument("--torchscript", action="store_true", help="额外导一份 .ptl（备用，APK 里用不到）")
     args = ap.parse_args()
 
@@ -76,17 +83,16 @@ def main() -> None:
     model = TC.make_model(backbone, dim, int(ck.get("width", 32)))
     model.load_state_dict(ck["model"])
     net = Wrapped(model).eval()
-    dummy = torch.rand(1, 3, img, img)
+    dummy = torch.rand(args.batch, 3, img, img)
     with torch.no_grad():
         ref = net(dummy).numpy()
     print(f"载入 {args.ckpt}：骨干 {backbone}，输入 {img}x{img}，身份向量 {dim} 维"
           f"（epoch {ck.get('epoch')}，数据 {ck.get('data', '?')}）")
 
-    # ---- 2) 导出 ONNX ----
+    # ---- 2) 导出 ONNX（形状全固定：不加 dynamic_axes，见文件头的 batch 说明）----
     onnx_path = os.path.join(args.out, "brick_embedder.onnx")
     torch.onnx.export(
         net, dummy, onnx_path, input_names=["input"], output_names=["embedding"],
-        dynamic_axes={"input": {0: "batch"}, "embedding": {0: "batch"}},
         opset_version=args.opset, do_constant_folding=True,
     )
 
@@ -133,9 +139,10 @@ def main() -> None:
         "exported_from": os.path.relpath(args.ckpt, _ROOT),
         "epoch": int(ck.get("epoch", 0)),
         "input": {"name": "input", "layout": "NCHW", "dtype": "float32",
-                  "size": [1, 3, img, img], "color": "RGB", "range": [0.0, 1.0],
-                  "note": "ImageNet 归一化已烘进模型，调用方不要再归一化；batch 维为动态"},
-        "output": {"name": "embedding", "dtype": "float32", "size": [1, dim],
+                  "size": [args.batch, 3, img, img], "color": "RGB", "range": [0.0, 1.0],
+                  "note": "ImageNet 归一化已烘进模型，调用方不要再归一化；batch 固定，"
+                          "必须与 Android 的 BATCH 一致（动态 batch 会带出动态张量，GPU delegate 挂不上）"},
+        "output": {"name": "embedding", "dtype": "float32", "size": [args.batch, dim],
                    "note": "已 L2 归一化；与 prototypes.bin 各行做点积即为余弦相似度"},
         "prototypes": {"file": "prototypes.bin", "shape": [len(class_ids), dim],
                        "dtype": "float32", "order": "row-major",
