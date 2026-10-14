@@ -1,5 +1,6 @@
 {
  "name": "brick_embedder",
+ "variant": "large",
  "exported_from": "BrickGame-Tool/out/clf_real/best.pt",
  "epoch": 10,
  "input": {
@@ -20,24 +21,15 @@
   "note": "ImageNet 归一化已烘进模型，调用方不要再归一化；batch 固定，必须与 Android 的 BATCH 一致（动态 batch 会带出动态张量，GPU delegate 挂不上）"
  },
  "output": {
-  "name": "embedding",
+  "name": "scores",
   "dtype": "float32",
   "size": [
    32,
-   256
+   2369
   ],
-  "note": "已 L2 归一化；与 prototypes.bin 各行做点积即为余弦相似度"
+  "note": "检索已并进模型：每行是 2369 类的余弦相似度，直接取 argmax 即可（×100 即百分制）；顺序与 class_ids 一致"
  },
- "prototypes": {
-  "file": "prototypes.bin",
-  "shape": [
-   2369,
-   256
-  ],
-  "dtype": "float32",
-  "order": "row-major",
-  "note": "第 i 行对应 class_ids[i]"
- },
+ "search_fused": true,
  "class_ids": [
   0,
   1,

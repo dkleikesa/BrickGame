@@ -15,7 +15,8 @@ ONNX 只留在这边当转换源和数值基准 —— 12.8MB 的 .onnx 不往 A
      `Interpreter` 构造抛 `Error applying delegate`（且只有真机才发现，所以本地先拦）。
 
 用法：
-  ~/.venvs/brick-tflite/bin/python export_tflite.py
+  ~/.venvs/brick-tflite/bin/python export_tflite.py                     # large → assets/brick_embedder.tflite
+  ~/.venvs/brick-tflite/bin/python export_tflite.py --variant small     # small → assets/brick_embedder_small.tflite
   ~/.venvs/brick-tflite/bin/python export_tflite.py --onnx out/brick_embedder.onnx
 """
 from __future__ import annotations
@@ -24,34 +25,41 @@ import argparse
 import glob
 import os
 import shutil
+import sys
 
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ASSETS = os.path.join(os.path.dirname(_HERE), "androidApp", "src", "main", "assets")
+sys.path.insert(0, _HERE)
+from variants import VARIANTS                       # noqa: E402 变体 → 资产文件名
 
-# ONNX 的两个可能位置：从 APK 目录挪出来的那份，或 export_mobile.py 的默认输出位置
-_ONNX_CANDIDATES = (
-    os.path.join(_HERE, "out", "brick_embedder.onnx"),
-    os.path.join(_ASSETS, "brick_embedder.onnx"),
-)
+_ASSETS = os.path.join(os.path.dirname(_HERE), "androidApp", "src", "main", "assets")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="ONNX → TFLite（Android 侧速度对照用）")
-    ap.add_argument(
-        "--onnx",
-        default=next((p for p in _ONNX_CANDIDATES if os.path.exists(p)), _ONNX_CANDIDATES[0]),
-    )
-    ap.add_argument("--out", default=os.path.join(_ASSETS, "brick_embedder.tflite"))
+    ap = argparse.ArgumentParser(description="ONNX → TFLite（Android 侧实际跑的模型）")
+    ap.add_argument("--variant", default="large", choices=sorted(VARIANTS),
+                    help="转换哪一个模型（决定输入 ONNX 与输出 tflite 的文件名）")
+    ap.add_argument("--onnx", default="", help="留空 = 按 --variant 自动找")
+    ap.add_argument("--out", default="", help="留空 = 按 --variant 写进 assets")
     ap.add_argument("--batch", type=int, default=0,
                     help="固定成这个 batch（只对还留着动态维的老 ONNX 有用）；0 = 按 ONNX 原样")
     ap.add_argument("--workdir", default=os.path.join(_HERE, "out", "tflite"))
     args = ap.parse_args()
 
+    stem = f"brick_embedder{VARIANTS[args.variant]}"
+    if not args.onnx:
+        # ONNX 的两个可能位置：export_mobile.py 的输出目录，或从 APK 目录挪出来的那份
+        cands = (os.path.join(_HERE, "out", f"{stem}.onnx"),
+                 os.path.join(_ASSETS, f"{stem}.onnx"))
+        args.onnx = next((p for p in cands if os.path.exists(p)), cands[0])
+    if not args.out:
+        args.out = os.path.join(_ASSETS, f"{stem}.tflite")
+
     if not os.path.exists(args.onnx):
         raise SystemExit(
-            f"找不到 {args.onnx}\n（先跑 export_mobile.py，或把它产出的 .onnx 放到 BrickGame-Tool/out/）"
+            f"找不到 {args.onnx}\n（先跑 export_mobile.py --variant {args.variant}，"
+            f"或把它产出的 .onnx 放到 BrickGame-Tool/out/）"
         )
 
     import onnx2tf
@@ -63,7 +71,7 @@ def main() -> None:
 
     src = args.onnx
     if args.batch > 0:
-        src = os.path.join(args.workdir, f"brick_embedder_b{args.batch}.onnx")
+        src = os.path.join(args.workdir, f"{stem}_b{args.batch}.onnx")
         fix_batch(args.onnx, src, args.batch)
 
     onnx2tf.convert(

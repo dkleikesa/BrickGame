@@ -23,6 +23,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -34,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -42,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.qcmian.brickgame.capture.BrickGameAccessibilityService
 import com.qcmian.brickgame.capture.LowConfStore
+import com.qcmian.brickgame.ml.ModelChoice
+import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.ml.TfliteTileClassifier
 import com.qcmian.brickgame.vision.OpenCvBoardScanner
 import kotlinx.coroutines.Dispatchers
@@ -71,8 +75,8 @@ fun HintApp() {
         // 放大看的哪张留档（null = 没开大图）
         var zoom by remember { mutableStateOf<File?>(null) }
         var openCvReady by remember { mutableStateOf<Boolean?>(null) }
-        // 识别只跑 GPU delegate；本机不支持时会退到 CPU，界面照实说明（见 TfliteTileClassifier）
-        val gpuReady = remember { TfliteTileClassifier.gpuSupported() }
+        // 实际跑在哪条后端上由 TfliteTileClassifier 决定（GPU delegate 对这个模型不划算，已关）
+        val backend = remember { TfliteTileClassifier.backendDescription() }
 
         LaunchedEffect(Unit) {
             while (true) {
@@ -87,6 +91,10 @@ fun HintApp() {
         // 已经有多少低置信度留档：列一次目录（之后服务每存/删一次自己刷新，见 LowConfStore）
         LaunchedEffect(Unit) {
             withContext(Dispatchers.IO) { LowConfStore.refresh(context) }
+        }
+        // 当前选用的模型：真来源是落盘那份（服务与界面共用），启动时同步到界面状态
+        LaunchedEffect(Unit) {
+            HintUiBus.variant = withContext(Dispatchers.IO) { ModelChoice.current(context) }
         }
 
         Column(
@@ -112,7 +120,7 @@ fun HintApp() {
                         },
                     )
                     StatusLine("OpenCV", when (openCvReady) { null -> "加载中…"; true -> "已加载"; false -> "加载失败" })
-                    StatusLine("识别实现", if (gpuReady) "TFLite（GPU）" else "TFLite（CPU 回退）")
+                    StatusLine("识别实现", "TFLite · $backend")
                     StatusLine("运行状态", if (ui.running) "提示中（第 ${ui.frames} 帧）" else "已停止")
                     StatusLine(
                         "悬浮窗",
@@ -125,6 +133,27 @@ fun HintApp() {
                     StatusLine(
                         "低置信度留档",
                         if (HintUiBus.lowConfCount == 0) "暂无" else "${HintUiBus.lowConfCount} 张",
+                    )
+                }
+            }
+
+            // 识别模型：两个都内置在 APK 里，切换 = 服务重建解释器（不用重装、不用重启）。
+            // 服务没连上时只落盘，下次服务起来读到的就是新模型。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("模型", style = MaterialTheme.typography.bodyMedium)
+                ModelVariant.entries.forEach { variant ->
+                    FilterChip(
+                        selected = HintUiBus.variant == variant,
+                        onClick = {
+                            if (HintUiBus.variant == variant) return@FilterChip
+                            HintUiBus.variant = variant
+                            BrickGameAccessibilityService.selectModel(variant)
+                        },
+                        label = { Text(variant.label) },
                     )
                 }
             }

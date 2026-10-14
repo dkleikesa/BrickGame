@@ -13,6 +13,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.ml.TfliteTileClassifier
 import com.qcmian.brickgame.overlay.OverlayController
 import com.qcmian.brickgame.vision.TileClassifier
@@ -67,7 +68,7 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
             Log.w(TAG, "悬浮窗挂不上：无障碍类型被拒且没有『显示在其他应用上层』授权")
         }
         overlay = controller
-        session = HintSession(this, this, controller) { buildClassifier() }
+        session = HintSession(this, this, controller) { variant -> buildClassifier(variant) }
         registerLockReceiver()
         active = this
         Log.i(TAG, "无障碍服务已连接")
@@ -165,11 +166,12 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
     }
 
     /**
-     * 加载 assets 里的身份模型。
+     * 加载 assets 里的身份模型（[variant] 决定哪一套）。
      *
-     * 只在 worker 线程第一次用到时才构造（见 [HintSession]），这里不挡主线程。
+     * 只在 worker 线程真正用到时才构造（见 [HintSession.acquireClassifier]），这里不挡主线程。
      */
-    private fun buildClassifier(): TileClassifier = TfliteTileClassifier.load(this)
+    private fun buildClassifier(variant: ModelVariant): TileClassifier =
+        TfliteTileClassifier.load(this, variant)
 
     companion object {
         private const val TAG = "BrickGameA11y"
@@ -189,6 +191,16 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
 
         fun stop() {
             active?.session?.stop()
+        }
+
+        /**
+         * 切换识别模型（主页上的选择器走这里）。
+         *
+         * 换模型要重建解释器，只有服务手里的会话做得到；服务没连上就什么也不做 ——
+         * 存档已经写好了（见 `ModelChoice`），下次服务起来读到的就是新模型。
+         */
+        fun selectModel(variant: ModelVariant) {
+            active?.session?.selectModel(variant)
         }
     }
 }

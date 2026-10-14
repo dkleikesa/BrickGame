@@ -22,3 +22,6 @@ node_modules/
 BrickGame-Tool/.venv/
 BrickGame-Tool/out/
 BrickGame-Tool/build-dataset/cache/
+
+# Python 字节码缓存（各目录下的 __pycache__）
+__pycache__/
