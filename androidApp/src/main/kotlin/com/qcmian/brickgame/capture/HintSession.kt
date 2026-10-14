@@ -2,12 +2,10 @@ package com.qcmian.brickgame.capture
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
-import android.view.View
 import com.qcmian.brickgame.HintUiBus
 import com.qcmian.brickgame.HintUiState
 import com.qcmian.brickgame.overlay.ControlBarView
@@ -17,6 +15,9 @@ import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -34,13 +35,16 @@ fun interface ScreenshotProvider {
  * CPU/GPU、还容易在画面变化时给出过期提示；手动触发反而更可控。
  *
  * 线程分工：
- *  - 主线程：发起截屏（API 要求）、渲染调试图、更新悬浮窗；
+ *  - 主线程：发起截屏（API 要求）、更新悬浮窗；
  *  - `brick-hint-worker`：OpenCV 标定 + 模型推理是纯 CPU/GPU 活，不能占主线程。
  *
- * 分析**不设超时**：一帧识别本来就要几秒（真机实测 7~8s），卡死上限反而把好帧丢掉，
- * 结果屏幕上留着上一帧的旧提示，"看起来就是提示不对"。所以只保留截屏回调的兜底
- * （[CAPTURE_TIMEOUT_MS]：`takeScreenshot` 的回调有时永远不回来，不兜底就永久卡住），
- * 分析慢就等它慢，算完为止。
+ * 分析**不设超时**：一帧识别本来就要几秒（真机实测 7~8s），卡死上限反而把好帧丢掉。
+ * 只保留截屏回调的兜底（[CAPTURE_TIMEOUT_MS]：`takeScreenshot` 的回调有时永远不回来，
+ * 不兜底就永久卡住），分析慢就等它慢，算完为止。
+ *
+ * 刷新期间**提示层整块藏起来**：从点「刷新」到算出新结果，屏幕上不画任何提示
+ * （截屏要干净、分析中的旧提示又容易看错），只在换好新结果那一刻放出来；中途失败就
+ * 保持空白 + 控制条上报错，绝不把上一帧的过期提示留在屏幕上（见 [captureFrame]）。
  */
 class HintSession(
     private val context: Context,
@@ -79,22 +83,35 @@ class HintSession(
     private val captureTimeout = Runnable {
         if (capturing.compareAndSet(true, false)) {
             active.set(false)
-            overlay.setHintLayerVisible(true)      // 截图没回来，别把提示层永久藏掉
             Log.w(TAG, "截屏回调超时：${CAPTURE_TIMEOUT_MS}ms 内既没成功也没失败")
             updateBar("截屏超时", "", "takeScreenshot 回调超时，点「刷新」重试")
         }
     }
-
-    private val previewView = HintOverlayView(context)
 
     private var frames = 0
 
     /** 已写出的类别数组文件序号（每成功一帧 +1）。 */
     private var matrixFiles = 0
 
+    /**
+     * 上一帧已经画出去的调试图层。
+     *
+     * 控制条上的两个调试开关（网格 / 类别号）是**即时生效**的：点一下直接拿这一帧重画，
+     * 不用再截屏分析一遍 —— 否则点了开关要等下一次刷新才变，看着就像没点。
+     */
+    private var lastFrame: HintOverlayView.Frame? = null
+
     init {
         overlay.onRefresh = { refreshNow() }
         overlay.onClose = { stop() }
+        overlay.onToggleGrid = { on ->
+            HintUiBus.showGrid = on
+            redrawHints()
+        }
+        overlay.onToggleLabels = { on ->
+            HintUiBus.showLabels = on
+            redrawHints()
+        }
     }
 
     /** 开始提示：挂悬浮窗 + 立刻跑一帧，之后等用户点「刷新」。 */
@@ -102,7 +119,9 @@ class HintSession(
         if (!running.compareAndSet(false, true)) return
         overlay.show()
         HintUiBus.overlayWindowType = overlay.activeType
-        HintUiBus.state = HintUiBus.state.copy(running = true, message = null)
+        HintUiBus.state = HintUiBus.state.copy(running = true)
+        // 控制条上的开关跟着 App 界面里的开关走（两处共用 HintUiBus 这一个状态）
+        overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         refreshNow()
     }
 
@@ -113,7 +132,8 @@ class HintSession(
         main.removeCallbacks(captureTimeout)
         generation.incrementAndGet()          // 让还在跑的那一帧的结果失效
         overlay.hide()
-        HintUiBus.state = HintUiBus.state.copy(running = false, hintText = "", cleared = false, stuck = false)
+        lastFrame = null
+        HintUiBus.state = HintUiBus.state.copy(running = false)
     }
 
     /**
@@ -132,15 +152,6 @@ class HintSession(
         captureFrame()
     }
 
-    /** 只跑一次（界面上的"验证一次"），不改运行状态，也不弹控制条。 */
-    fun once() {
-        if (running.get()) return
-        if (!active.compareAndSet(false, true)) return
-        overlay.showHint()
-        HintUiBus.overlayWindowType = overlay.activeType
-        captureFrame()
-    }
-
     fun release() {
         stop()
         workerThread.quitSafely()
@@ -155,22 +166,29 @@ class HintSession(
         val gen = generation.get()
         main.removeCallbacks(captureTimeout)
         main.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
-        // 截图前把提示层收掉：上一帧画在屏幕上的提示框会污染本次截图（强边缘带偏标定、
-        // 50% 红色改变砖块颜色）。只藏提示层，控制条留着。
+        // 刷新一开始就把提示层收掉，直到算出新结果才放回来：
+        //  1. 截图必须干净：上一帧画在屏幕上的提示框会污染本次截图（强边缘带偏标定、
+        //     50% 红色改变砖块颜色）；
+        //  2. 分析要好几秒，期间挂着的是**上一帧的旧提示**，玩家看着就是"提示不对"。
+        // 只藏提示层，控制条留着（用户要靠它点「刷新」）。
         overlay.setHintLayerVisible(false)
         screenshots.capture { bitmap, reason ->
-            overlay.setHintLayerVisible(true)
+            // 这里**不**恢复可见性：整帧（截屏 + 分析）都保持隐藏，见上面第 2 条。
+            // 失败分支也不恢复 —— 旧提示是过期信息，展示出来只会误导。
             main.removeCallbacks(captureTimeout)
             if (bitmap == null) {
                 val message = reason ?: "截屏失败"
                 Log.w(TAG, message)
-                report(message)
                 updateBar("截屏失败", "", "$message（点「刷新」重试）")
                 finishFrame()
                 return@capture
             }
             worker.post {
-                val result = HintPipeline.analyze(bitmap, classifier)
+                // analyze 自己会把异常吞成 null；这里兜的是**识别器初始化**（懒加载模型/GPU delegate）
+                // 抛出来的那类异常 —— 工作线程上没人接就是整个进程崩掉。失败不缓存，点「刷新」会重试。
+                val analysis = runCatching { HintPipeline.analyze(bitmap, classifier) }
+                // 模型没把握就趁原图还在手上留档（在 worker 线程写盘，别占主线程）
+                analysis.getOrNull()?.let { dumpLowConfidence(bitmap, it) }
                 main.post {
                     if (gen != generation.get()) {
                         // 会话已经停了、这一帧算作废：丢掉结果，别再往画面上画
@@ -178,8 +196,14 @@ class HintSession(
                         bitmap.recycle()
                         return@post
                     }
-                    // 预览要先把像素画进另一张位图，所以回收放到 handle 之后
-                    handle(bitmap, result)
+                    val failure = analysis.exceptionOrNull()
+                    if (failure != null) {
+                        val message = "识别器不可用：${failure.message ?: failure.javaClass.simpleName}"
+                        Log.w(TAG, message, failure)
+                        updateBar("识别器不可用", "", "$message（点「刷新」重试）")
+                    } else {
+                        handle(analysis.getOrNull())
+                    }
                     bitmap.recycle()
                     finishFrame()
                 }
@@ -187,18 +211,27 @@ class HintSession(
         }
     }
 
+    /**
+     * 按当前两个调试开关重画上一帧（控制条上点了开关就走这里）。
+     *
+     * 没有上一帧（刚开会话、还没算出结果）就什么也不做 —— 下一帧自然会带上新开关。
+     */
+    private fun redrawHints() {
+        val frame = lastFrame ?: return
+        overlay.updateHint(
+            frame.copy(showGrid = HintUiBus.showGrid, showLabels = HintUiBus.showLabels),
+        )
+    }
+
     /** 一帧结束。手动模式：**不排下一帧**，等用户点「刷新」。 */
     private fun finishFrame() {
         capturing.set(false)
         active.set(false)
-        // "验证一次"不是会话，跑完就把悬浮窗收掉；会话里则留着等刷新
-        if (!running.get()) overlay.hide()
     }
 
-    private fun handle(bitmap: Bitmap, result: HintPipeline.Result?) {
+    private fun handle(result: HintPipeline.Result?) {
         if (result == null) {
             val message = "定位失败：没找到成排的格子（确认目标游戏是全屏、截图没有黑边）"
-            report(message)
             updateBar("未识别到棋盘", "", message)
             return
         }
@@ -217,20 +250,9 @@ class HintSession(
             }
             else -> "没有可消除的一对（多半是识别把同类判成了不同类）"
         }
-        HintUiBus.state = HintUiState(
-            running = running.get(),
-            frames = frames,
-            scanSummary = "${scan.rows}行×${scan.cols}列，砖块 $bricks，空位 ${scan.cellCount - bricks}，" +
-                "格距 ${scan.pitchX}×${scan.pitchY}px，耗时 ${result.elapsedMs}ms（第 $frames 帧）",
-            hintText = hintText,
-            cleared = result.cleared,
-            stuck = result.stuck,
-            elapsedMs = result.elapsedMs,
-            message = null,
-        )
+        HintUiBus.state = HintUiState(running = running.get(), frames = frames)
 
         val frame = HintOverlayView.Frame(
-            background = null,
             scan = scan,
             state = result.state,
             hints = hints,
@@ -238,6 +260,11 @@ class HintSession(
             showLabels = HintUiBus.showLabels,
         )
         overlay.updateHint(frame)
+        lastFrame = frame
+        // 先换好新提示再放出来，避免"旧提示一闪 → 新提示"的中间态（见 captureFrame 的隐藏说明）
+        overlay.setHintLayerVisible(true)
+        // App 界面里也能改这两个开关，每帧顺手让控制条跟上，别让两边显示不一致
+        overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         updateBar(hintText, "第 $frames 帧 · ${result.elapsedMs}ms")
 
         // 只在前几帧和每 10 帧打一条：真机排查时靠它判断"链路走通没有"，又不至于刷屏
@@ -251,10 +278,6 @@ class HintSession(
         }
 
         dumpMatrix(result)
-
-        if (HintUiBus.previewEnabled) {
-            HintUiBus.preview = renderPreview(frame, bitmap)
-        }
     }
 
     /**
@@ -289,29 +312,56 @@ class HintSession(
         }
     }
 
-    /** 把同一套绘制逻辑渲成调试图（截图 → 网格 → 类别 → 提示框），供界面核对标定对不对。 */
-    private fun renderPreview(frame: HintOverlayView.Frame, background: Bitmap): Bitmap {
-        val w = (background.width * PREVIEW_SCALE).toInt().coerceAtLeast(1)
-        val h = (background.height * PREVIEW_SCALE).toInt().coerceAtLeast(1)
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
-        canvas.scale(PREVIEW_SCALE, PREVIEW_SCALE)
-        previewView.frame = frame.copy(background = background)
-        previewView.measure(
-            View.MeasureSpec.makeMeasureSpec(background.width, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(background.height, View.MeasureSpec.EXACTLY),
-        )
-        previewView.layout(0, 0, background.width, background.height)
-        previewView.draw(canvas)
-        return out
+    /**
+     * 低置信度帧留档：模型对某些格子没把握时，把这一帧**原图**连同识别结果写进
+     * `debug-frames/low-conf/`，事后拿去补标注重训。
+     *
+     * 为什么连原图一起存：模型优化要的是"当时屏幕上的样子"，只有矩阵文件没法补标注。
+     * 一对文件同名（`lowconf_MMdd-HHmmss.png/.txt`），txt 里写明可疑格子和它的相似度 + 整盘矩阵，
+     * 拿到就能直接对着图找那些格子。
+     */
+    private fun dumpLowConfidence(bitmap: Bitmap, result: HintPipeline.Result) {
+        if (result.lowConfidence.isEmpty()) return
+        val dir = context.getExternalFilesDir(DUMP_DIR)?.let { File(it, LOW_CONF_DIR) } ?: return
+        if (!dir.exists() && !dir.mkdirs()) return
+        val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
+        val scan = result.scan
+        try {
+            File(dir, "$stem.png").outputStream().use {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            File(dir, "$stem.txt").writeText(
+                buildString {
+                    appendLine("# ${scan.rows}x${scan.cols} pitch=${scan.pitchX}x${scan.pitchY} " +
+                        "空位=${scan.empty.count { it }}/${scan.cellCount} 耗时=${result.elapsedMs}ms")
+                    appendLine("# 没把握的格子（序号=相似度）：" + result.lowConfidence.joinToString(" ") {
+                        "(${it.first / scan.cols},${it.first % scan.cols})=${it.second}"
+                    })
+                    appendLine("# 可消对 " + result.hints.joinToString(" ") { it.pairText() })
+                    for (r in 0 until scan.rows) {
+                        val from = r * scan.cols
+                        appendLine((0 until scan.cols).joinToString(" ") { result.state.labels[from + it].toString() })
+                    }
+                },
+            )
+            trimLowConfidence(dir)
+            Log.i(TAG, "低置信度帧已留档：$stem.png（${result.lowConfidence.size} 个可疑格：${result.lowConfidence}）")
+        } catch (e: Throwable) {
+            Log.w(TAG, "低置信度帧留档失败", e)
+        }
+    }
+
+    /** 只留最近 [LOW_CONF_KEEP] 帧，别把手机存储攒满（手动刷新一次最多一张）。 */
+    private fun trimLowConfidence(dir: File) {
+        val pngs = dir.listFiles { f -> f.name.endsWith(".png") }?.sortedBy { it.name } ?: return
+        for (old in pngs.dropLast(LOW_CONF_KEEP)) {
+            runCatching { old.delete() }
+            runCatching { File(dir, old.name.removeSuffix(".png") + ".txt").delete() }
+        }
     }
 
     private fun updateBar(hintText: String, statusText: String, message: String? = null) {
         overlay.updateBar(ControlBarView.State(hintText = hintText, statusText = statusText, message = message))
-    }
-
-    private fun report(message: String) {
-        HintUiBus.state = HintUiBus.state.copy(message = message)
     }
 
     private companion object {
@@ -319,8 +369,6 @@ class HintSession(
 
         /** 截屏回调迟迟不回来时的兜底时限（分析那一段不设限，见类注释）。 */
         const val CAPTURE_TIMEOUT_MS = 3000L
-
-        const val PREVIEW_SCALE = 0.5f
 
         /**
          * 调试图与体检报告的落盘目录（app 外部私有目录下）。
@@ -330,5 +378,11 @@ class HintSession(
 
         /** 每帧一个二维类别数组文件，存在 [DUMP_DIR] 下这个子目录里。 */
         const val MATRIX_DIR = "matrix"
+
+        /** 模型没把握的那几帧：原图 + 说明，存在 [DUMP_DIR] 下这个子目录里（供补标注重训）。 */
+        const val LOW_CONF_DIR = "low-conf"
+
+        /** [LOW_CONF_DIR] 里最多留这么多帧。 */
+        const val LOW_CONF_KEEP = 200
     }
 }

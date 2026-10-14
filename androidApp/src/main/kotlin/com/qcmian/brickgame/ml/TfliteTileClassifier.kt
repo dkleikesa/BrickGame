@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.TileClassifier
-import com.qcmian.brickgame.vision.UNKNOWN_LABEL_BASE
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -19,13 +18,18 @@ import kotlin.math.roundToInt
  *
  * 真机实测（骁龙 865，批 32 张）GPU delegate 229ms 是最快的一条路（ONNX 371ms、XNNPACK 252ms），
  * 所以这里只走 GPU：**挂不上 GPU 才退回 CPU（XNNPACK）**，并在日志和名字里写明，
- * 免得在别的机型上"静默变慢"却查不出原因。
+ * 免得在别的机型上"静默变慢"却查不出原因。"挂不上"包括兼容列表说支持、但 `Interpreter`
+ * 构造时抛 `Error applying delegate` 的情况（设备支持 ≠ 这个模型能跑在它的 delegate 上）。
  *
  * 模型形状是硬约定：固定 batch=[BATCH]、输入 NHWC。GPU delegate 不支持动态 shape 的 resize，
  * 与其留一段"偷偷 resize 再退回 CPU"的代码，不如直接校验失败 —— 换 shape 就重导模型
  * （见 `BrickGame-Tool/export_tflite.py --batch`）。
  *
  * 空位格子直接给 0，不送模型（`class_ids[0]` 就是背景），省一批推理。
+ *
+ * **置信度只用来留档，不用来改判**：每格一律给 top-1 原型（相似度算出来只为诊断），
+ * 哪一帧有低于 [DUMP_SIMILARITY] 的格子由 [lowConfidenceCells] 报上去，上层把整帧截图存下来
+ * （见 `HintSession.dumpLowConfidence`），事后补标注重训。
  */
 class TfliteTileClassifier private constructor(
     private val interpreter: Interpreter,
@@ -56,23 +60,19 @@ class TfliteTileClassifier private constructor(
 
     private val output = Array(BATCH) { FloatArray(dim) }
 
-    /** 上一帧每格最高余弦相似度（百分制，空位记 0），只给日志用。 */
-    private var lastSimilarity: IntArray? = null
-    private var lastDims: Pair<Int, Int>? = null
+    /** 上一帧没把握的格子（序号 → 相似度），见 [lowConfidenceCells]。 */
+    private var lastLowConfidence: List<Pair<Int, Int>> = emptyList()
 
     override fun classify(frame: Bitmap, scan: BoardScan): IntArray {
         val labels = IntArray(scan.cellCount)
         val similarity = IntArray(scan.cellCount)
         val targets = (0 until scan.cellCount).filter { !scan.empty[it] }
         if (targets.isEmpty()) {
-            lastSimilarity = similarity
-            lastDims = scan.rows to scan.cols
+            lastLowConfidence = emptyList()
             return labels
         }
 
         val n = targets.size
-        val embeddings = FloatArray(n * dim)
-        val bestSimilarity = FloatArray(n)
         val bestClass = IntArray(n)
 
         val side = cropper.cropSide(scan)
@@ -98,8 +98,6 @@ class TfliteTileClassifier private constructor(
 
                 for (k in chunk.indices) {
                     val vec = output[k]
-                    val base = slot * dim
-                    for (d in 0 until dim) embeddings[base + d] = vec[d]
                     // 与原型做点积（两边都已 L2 归一化 → 点积即余弦相似度），取最大
                     var best = 0
                     var bestScore = Float.NEGATIVE_INFINITY
@@ -112,7 +110,6 @@ class TfliteTileClassifier private constructor(
                             best = c
                         }
                     }
-                    bestSimilarity[slot] = bestScore
                     bestClass[slot] = meta.classIds[best]
                     similarity[targets[slot]] = (bestScore * 100).roundToInt()
                     slot++
@@ -121,106 +118,29 @@ class TfliteTileClassifier private constructor(
         } finally {
             bgr.release()
         }
-        writeLabels(labels, targets, embeddings, bestSimilarity, bestClass)
-        lastSimilarity = similarity
-        lastDims = scan.rows to scan.cols
+        writeLabels(labels, targets, bestClass)
+        lastLowConfidence = targets.filter { similarity[it] < DUMP_SIMILARITY }.map { it to similarity[it] }
         return labels
     }
 
     /**
-     * 把识别结果写回格子，并处理**模型没把握的格子**。
+     * 把识别结果写回格子：**一律采信 top-1 原型**，运行时不做置信度判断。
      *
-     * 真机上踩过：同一款砖（篱笆）两块，(7,7) 相似度 96、给号 17；隔壁 (8,8) 只有 **44** ——
-     * 它是模型没见过的样子（同一款砖的另一个状态/贴图），于是两块同款被判成了两类，
-     * 配对算法再怎么改也配不出来。
-     *
-     * 所以这里做**帧内纠错**：没把握的格子先在本帧里找最像的格子（身份向量余弦最近），
-     * 够像就跟它同号；实在找不到才落到 [UNKNOWN_LABEL_BASE] 的"未知"（每格唯一号，永不配对）。
+     * 曾经对低分格子做过"帧内找最像的格子纠错 / 否则给唯一未知号"的处理，结果是把真结果藏了起来
+     * —— 低分格照样有 top-1，直接给出来更透明；哪一帧没把握由 [lowConfidenceCells] 报给上层，
+     * 由上层把整帧截图留档（事后补标注重训），而不是在运行时改判。
      */
-    private fun writeLabels(
-        labels: IntArray,
-        targets: List<Int>,
-        embeddings: FloatArray,
-        bestSimilarity: FloatArray,
-        bestClass: IntArray,
-    ) {
-        val n = targets.size
-        val resolved = IntArray(n) { if (bestSimilarity[it] >= CONFIDENT_SIMILARITY) bestClass[it] else -1 }
-        var pending = (0 until n).filter { resolved[it] < 0 }
-        var pass = 0
-        while (pending.isNotEmpty() && pass < 2) {
-            val next = ArrayList<Int>()
-            for (i in pending) {
-                var bestJ = -1
-                var bestCos = -1f
-                for (j in 0 until n) {
-                    if (j == i || resolved[j] < 0) continue
-                    val cos = cosine(embeddings, i, j)
-                    if (cos > bestCos) {
-                        bestCos = cos
-                        bestJ = j
-                    }
-                }
-                if (bestJ >= 0 && bestCos >= RESCUE_COSINE) {
-                    resolved[i] = resolved[bestJ]
-                    Log.i(
-                        TAG,
-                        "格子 ${targets[i]} 没把握（sim=${bestSimilarity[i].roundToInt()}）→ " +
-                            "跟格子 ${targets[bestJ]} 同号 ${resolved[i]}（帧内余弦 ${(bestCos * 100).roundToInt()}）",
-                    )
-                } else {
-                    next += i
-                }
-            }
-            pending = next
-            pass++
-        }
-        for (i in 0 until n) {
-            labels[targets[i]] = if (resolved[i] >= 0) resolved[i] else UNKNOWN_LABEL_BASE + targets[i]
-        }
-        for (i in pending) {
-            Log.w(
-                TAG,
-                "格子 ${targets[i]} 没把握且帧内找不到同款（sim=${bestSimilarity[i].roundToInt()}）→ 判为未知，不参与配对",
-            )
-        }
-    }
-
-    /** 帧内两个格子的身份向量余弦（都已按维 L2 归一化 → 直接点积）。 */
-    private fun cosine(a: FloatArray, ia: Int, ib: Int): Float {
-        var dot = 0f
-        val baseA = ia * dim
-        val baseB = ib * dim
-        for (d in 0 until dim) dot += a[baseA + d] * a[baseB + d]
-        return dot
+    private fun writeLabels(labels: IntArray, targets: List<Int>, bestClass: IntArray) {
+        for (i in targets.indices) labels[targets[i]] = bestClass[i]
     }
 
     /**
-     * 上一帧的相似度矩阵 + 汇总，用来区分"格线切歪"和"模型/原型有问题"：
-     * 分数普遍低 = 裁出来的是模型没见过的东西（几何错），分数高但类别乱 = 识别本身的问题。
+     * 上一帧"模型没把握"的格子（行优先序号 → 相似度百分制，只含送过模型的格子）。
+     *
+     * 阈值取 [DUMP_SIMILARITY]（85）：正常同款能到 90+，低于它的多半是模型没见过的样子。
+     * 运行时不改判，只用来决定"这一帧要不要留档"，见 `HintSession.dumpLowConfidence`。
      */
-    override fun diagnostics(): List<String> {
-        val sim = lastSimilarity ?: return emptyList()
-        val (rows, cols) = lastDims ?: return emptyList()
-        if (rows <= 0 || cols <= 0 || sim.size < rows * cols) return emptyList()
-        val out = ArrayList<String>(rows + 1)
-        var min = 100
-        var low = 0
-        var counted = 0
-        for (r in 0 until rows) {
-            val from = r * cols
-            out += "sim r${r.toString().padStart(2, '0')} " + (0 until cols).joinToString(" ") { sim[from + it].toString() }
-            for (c in 0 until cols) {
-                val v = sim[from + c]
-                if (v <= 0) continue      // 空位没送模型
-                counted++
-                if (v < min) min = v
-                if (v < LOW_SIMILARITY) low++
-            }
-        }
-        out += "sim 汇总 非空=$counted 最低=$min 低于 ${LOW_SIMILARITY} 的格子=$low"
-        return out
-    }
+    override fun lowConfidenceCells(): List<Pair<Int, Int>> = lastLowConfidence
 
     override fun close() {
         cropper.release()
@@ -240,23 +160,13 @@ class TfliteTileClassifier private constructor(
         /** 退回 CPU 时的线程数。 */
         private const val DEFAULT_THREADS = 4
 
-        /** 相似度（百分制）低于它就算"模型拿不准"：正常同款能到 90+ 甚至 99。 */
-        private const val LOW_SIMILARITY = 70
-
         /**
-         * 相似度（0~1）低于它就不再直接采信原型的类号，改为"帧内找最像的格子"纠错。
+         * 相似度（百分制）低于它就把**整帧截图留档**（补标注重训用）。
          *
-         * 取值来自模型自带判据（`model_meta.json` 的 `thresholds.dist_wrong_p5 = 0.2182`：
-         * 相似度 ≤ 0.782 基本就是模型没见过的样子，真机上那块篱笆只有 0.44）。
+         * 取值偏灵敏：正常同款实测 90+，85 以下就有可能是同一款砖的另一种样子，
+         * 宁可多留几张，也别漏掉要补标注的那种没见过的情况。
          */
-        private const val CONFIDENT_SIMILARITY = 0.78f
-
-        /**
-         * 帧内纠错的余弦门槛：没把握的格子与"最像的那格"至少要有这么像才敢跟它同号。
-         *
-         * 同一个物品的两种状态/贴图，余弦实测在 0.8~0.95；不同物品之间很难超过 0.6。
-         */
-        private const val RESCUE_COSINE = 0.80f
+        private const val DUMP_SIMILARITY = 85
 
         /** 本机能不能用 GPU delegate（界面据此显示"GPU"还是"CPU 回退"）。 */
         fun gpuSupported(): Boolean = try {
@@ -271,15 +181,21 @@ class TfliteTileClassifier private constructor(
             val prototypes = ModelAssets.readPrototypes(context, meta.nClass, meta.embedDim)
 
             val bytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
-            val modelBuffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
-            modelBuffer.put(bytes).rewind()
 
-            val gpu = createGpuDelegate()
-            val options = Interpreter.Options().apply {
-                setNumThreads(DEFAULT_THREADS)
-                gpu?.let { addDelegate(it) }
+            var gpu = createGpuDelegate()
+            val interpreter = try {
+                Interpreter(modelBufferOf(bytes), optionsFor(gpu))
+            } catch (t: Throwable) {
+                if (gpu == null) throw t
+                // "本机支持"只管设备，不管这个模型：真机上出现过兼容列表说支持、挂上去却
+                // 抛 IllegalArgumentException: Error applying delegate（驱动/算子不支持）。
+                // 这种情况必须退回 CPU，否则每帧都在识别器初始化上崩。
+                Log.w(TAG, "GPU delegate 挂载失败 → 退回 CPU $DEFAULT_THREADS 线程", t)
+                runCatching { gpu.close() }
+                gpu = null
+                // 缓冲要重新建：失败的 Interpreter 可能已经动过它
+                Interpreter(modelBufferOf(bytes), optionsFor(null))
             }
-            val interpreter = Interpreter(modelBuffer, options)
 
             try {
                 val shape = interpreter.getInputTensor(0).shape()
@@ -307,6 +223,18 @@ class TfliteTileClassifier private constructor(
                     (if (gpu != null) "GPU delegate" else "CPU $DEFAULT_THREADS 线程"),
             )
             return TfliteTileClassifier(interpreter, prototypes, meta, DEFAULT_THREADS, gpu)
+        }
+
+        /** 每次 `Interpreter` 构造都用一块新的直接缓冲：构造失败时旧缓冲可能已被 native 动过。 */
+        private fun modelBufferOf(bytes: ByteArray): ByteBuffer =
+            ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply {
+                put(bytes)
+                rewind()
+            }
+
+        private fun optionsFor(gpu: GpuDelegate?): Interpreter.Options = Interpreter.Options().apply {
+            setNumThreads(DEFAULT_THREADS)
+            gpu?.let { addDelegate(it) }
         }
 
         /** @return null = 本机不支持或创建失败，照 CPU 跑（这是唯一的兜底，别再往下退）。 */

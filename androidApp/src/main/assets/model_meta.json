@@ -7,7 +7,7 @@
   "layout": "NCHW",
   "dtype": "float32",
   "size": [
-   1,
+   32,
    3,
    160,
    160
@@ -17,13 +17,13 @@
    0.0,
    1.0
   ],
-  "note": "ImageNet 归一化已烘进模型，调用方不要再归一化；batch 维为动态"
+  "note": "ImageNet 归一化已烘进模型，调用方不要再归一化；batch 固定，必须与 Android 的 BATCH 一致（动态 batch 会带出动态张量，GPU delegate 挂不上）"
  },
  "output": {
   "name": "embedding",
   "dtype": "float32",
   "size": [
-   1,
+   32,
    256
   ],
   "note": "已 L2 归一化；与 prototypes.bin 各行做点积即为余弦相似度"

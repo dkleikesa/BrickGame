@@ -1,11 +1,26 @@
 package com.qcmian.brickgame.algorithm
 
 /**
+ * 一组可消除的同款砖。
+ *
+ * 字段就是 [BrickGameTipHelper.findMoves] 返回的 `[fromRow, fromCol, pairRow, pairCol]`：
+ * 前两个是待滑动的砖，后两个是它的配对砖。真正能执行的 6 元动作（含落点）由
+ * [BrickGameTipHelper.resolveAction] 补全。
+ */
+data class BrickMove(
+    val fromRow: Int,
+    val fromCol: Int,
+    val pairRow: Int,
+    val pairCol: Int,
+)
+
+/**
  * 方块消除游戏的提示与执行逻辑。
  *
  * 网格 grid[row][col]：BACKGROUND(0) 表示空位，其他值为方块类型。
  *
- * move（findMoves 返回）：[fromRow, fromCol, toRow, toCol]
+ * move（findMoves 返回）：[fromRow, fromCol, pairRow, pairCol] —— 前两个是待滑动的砖，
+ * 后两个是配对砖（识别层拿到的整盘二维数组直接喂进 [findMoves] 即可）。
  * action（actionStep 入参）：[fromRow, fromCol, toRow, toCol, pairedRow, pairedCol]
  */
 object BrickGameTipHelper {
@@ -55,6 +70,69 @@ object BrickGameTipHelper {
             moveUp(grid, col, moves)
         }
         return uniqueMove(moves)
+    }
+
+    /** [findMoves] 的强类型包装：全部可行走法（识别出来的整盘二维数组直接喂进来）。 */
+    fun hints(grid: Array<IntArray>): List<BrickMove> = findMoves(grid).map { move ->
+        BrickMove(
+            fromRow = move[0],
+            fromCol = move[1],
+            pairRow = move[2],
+            pairCol = move[3],
+        )
+    }
+
+    /** 第一条可行走法。 */
+    fun firstHint(grid: Array<IntArray>): BrickMove? = hints(grid).firstOrNull()
+
+    /**
+     * 把 [findMoves] 给出的候选补全为可直接喂给 [actionStep] 的 6 元动作。
+     *
+     * 落点只可能是候选砖与配对砖构成的矩形的另一个角：`(fromRow, pairCol)` 或 `(pairRow, fromCol)`；
+     * 当两砖本就同线相邻时落点等于起点（原地消除）。哪个角能落不靠几何硬猜，直接拿 [actionStep]
+     * 在副本上试一次。
+     *
+     * @return `[fromRow, fromCol, toRow, toCol, pairedRow, pairedCol]`，两个角都试不成返回 null。
+     */
+    fun resolveAction(grid: Array<IntArray>, move: IntArray): IntArray? {
+        val fromRow = move[0]
+        val fromCol = move[1]
+        val pairRow = move[2]
+        val pairCol = move[3]
+
+        val candidates = listOf(
+            intArrayOf(fromRow, pairCol),
+            intArrayOf(pairRow, fromCol),
+        )
+
+        for (to in candidates) {
+            if (to[0] == pairRow && to[1] == pairCol) continue
+            val isFrom = to[0] == fromRow && to[1] == fromCol
+            if (!isFrom && grid[to[0]][to[1]] != BACKGROUND) continue
+            if (to[0] != fromRow && to[1] != fromCol) continue
+
+            val action = intArrayOf(fromRow, fromCol, to[0], to[1], pairRow, pairCol)
+            val probe = Array(grid.size) { grid[it].copyOf() }
+            // GAME_FAIL 也算"这一步能动"：它表示这步消完盘面没救了（全局策略问题），
+            // 不是这一步不合法 —— 提示层要列全部可消对，不能因此把真能消的一对吞掉。
+            when (actionStep(probe, action)) {
+                ACTION_SUCCESS, GAME_SUCCESS, GAME_FAIL -> return action
+            }
+        }
+
+        return null
+    }
+
+    /**
+     * 自动提示 / 自动求解入口：从当前盘面挑出第一个可执行的 6 元动作。
+     *
+     * @return 可直接交给 [actionStep] 的动作；已无可消除对时返回 null（即游戏失败）。
+     */
+    fun autoHint(grid: Array<IntArray>): IntArray? {
+        for (move in findMoves(grid)) {
+            resolveAction(grid, move)?.let { return it }
+        }
+        return null
     }
 
     /** 去重：A->B 与 B->A 视为同一个 move。 */

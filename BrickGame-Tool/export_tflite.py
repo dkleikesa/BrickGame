@@ -8,15 +8,20 @@ ONNX 只留在这边当转换源和数值基准 —— 12.8MB 的 .onnx 不往 A
 为什么从 ONNX 转而不是从 `best.pt` 重导：模型包里已经有校验过的 ONNX，
 再装一套 torch 只会多一个版本漂移的来源。
 
+转换完有两道闸，都不过就别接 Android：
+  1. 数值：TFLite 与 ONNX 同一批输入，余弦 ≥ 0.999；
+  2. GPU delegate：用 LiteRT 的 GPU 加速器试编译一次。GPU delegate 只吃**静态形状**，
+     模型里只要有一个"运行时才定形状"的张量就挂不上，真机上表现为
+     `Interpreter` 构造抛 `Error applying delegate`（且只有真机才发现，所以本地先拦）。
+
 用法：
   ~/.venvs/brick-tflite/bin/python export_tflite.py
-  ~/.venvs/brick-tflite/bin/python export_tflite.py --batch 0     # 保留动态 batch
+  ~/.venvs/brick-tflite/bin/python export_tflite.py --onnx out/brick_embedder.onnx
 """
 from __future__ import annotations
 
 import argparse
 import glob
-import json
 import os
 import shutil
 
@@ -39,7 +44,8 @@ def main() -> None:
         default=next((p for p in _ONNX_CANDIDATES if os.path.exists(p)), _ONNX_CANDIDATES[0]),
     )
     ap.add_argument("--out", default=os.path.join(_ASSETS, "brick_embedder.tflite"))
-    ap.add_argument("--batch", type=int, default=32, help="固定成这个 batch；0 = 保留动态维")
+    ap.add_argument("--batch", type=int, default=0,
+                    help="固定成这个 batch（只对还留着动态维的老 ONNX 有用）；0 = 按 ONNX 原样")
     ap.add_argument("--workdir", default=os.path.join(_HERE, "out", "tflite"))
     args = ap.parse_args()
 
@@ -76,7 +82,7 @@ def main() -> None:
     shutil.copyfile(produced[0], args.out)
     print(f"写入 {args.out}（{os.path.getsize(args.out) / 1e6:.1f} MB，源 {os.path.basename(produced[0])}）")
 
-    verify(args.onnx, args.out, args.batch)
+    verify(args.onnx, args.out)
 
 
 def fix_batch(onnx_path: str, out_path: str, batch: int) -> None:
@@ -99,33 +105,29 @@ def fix_batch(onnx_path: str, out_path: str, batch: int) -> None:
     print(f"固定 batch={batch} → {os.path.basename(out_path)}")
 
 
-def verify(onnx_path: str, tflite_path: str, batch: int) -> None:
+def verify(onnx_path: str, tflite_path: str) -> None:
     """同一批随机输入跑两边，比余弦相似度 —— 不一致就别塞进 APK。"""
     import onnxruntime as ort
     from ai_edge_litert.interpreter import Interpreter
 
-    meta = json.load(open(os.path.join(_ASSETS, "model_meta.json"), encoding="utf-8"))
-    side = int(meta["input"]["size"][2])
-    dim = int(meta["output"]["size"][1])
+    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    in_dims = sess.get_inputs()[0].shape            # [batch, 3, side, side]
+    out_dims = sess.get_outputs()[0].shape          # [batch, dim]
+    if not isinstance(in_dims[0], int) or not isinstance(out_dims[0], int):
+        raise SystemExit(
+            "ONNX 的 batch 还是动态维：用 export_mobile.py 重导（默认 --batch 32 固定形状），"
+            "动态 batch 会在 TFLite 里留下运行时 shape 的张量，GPU delegate 挂不上"
+        )
+    n, side, dim = int(in_dims[0]), int(in_dims[2]), int(out_dims[1])
 
     rng = np.random.default_rng(0)
-    n = batch if batch > 0 else 8
     x = rng.random((n, 3, side, side), dtype=np.float32)
 
-    ref = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"]).run(
-        None, {"input": x}
-    )[0]
+    ref = sess.run(None, {"input": x})[0]
 
     interp = Interpreter(model_path=tflite_path, num_threads=4)
     in_shape = list(interp.get_input_details()[0]["shape"])
     print(f"TFLite 输入 shape: {in_shape}")
-    if in_shape[0] != n:
-        # 动态 batch 时按本次的 n 固定下来（Android 侧同样会 resize 到 BATCH）
-        for name in ("resize_tensor_input", "resize_input"):
-            fn = getattr(interp, name, None)
-            if fn is not None:
-                fn(0, [n, 3, side, side])
-                break
     interp.allocate_tensors()
     inp = interp.get_input_details()[0]
     out = interp.get_output_details()[0]
@@ -147,6 +149,28 @@ def verify(onnx_path: str, tflite_path: str, batch: int) -> None:
     )
     if cos.min() < 0.999:
         raise SystemExit("TFLite 与 ONNX 输出差太多，先别接 Android")
+    verify_gpu_delegate(tflite_path)
+
+
+def verify_gpu_delegate(tflite_path: str) -> None:
+    """本地用 LiteRT 的 GPU 加速器试编译一次：挂不上就直接退出。
+
+    复刻的就是真机上 `TfliteTileClassifier.load` 那一步 —— `Interpreter` 挂 delegate 失败时
+    抛 `Error applying delegate`。GPU delegate 只接受静态形状，模型里只要有一个"运行时才定形状"
+    的张量（典型来源：动态 batch 导出的 ONNX 里 `F.normalize` 的广播链 `Shape→Concat→Expand`），
+    整张图都会被拒，所以这道闸必须在出厂前跑。
+    """
+    from ai_edge_litert.compiled_model import CompiledModel
+    from ai_edge_litert.hardware_accelerator import HardwareAccelerator
+
+    try:
+        CompiledModel.from_file(tflite_path, hardware_accel=HardwareAccelerator.GPU | HardwareAccelerator.CPU)
+    except Exception as e:  # noqa: BLE001 —— 任何失败都不能放行
+        raise SystemExit(
+            f"GPU delegate 挂不上这个 tflite（真机上会崩在 Interpreter 构造）：{e}\n"
+            f"多半是模型里有运行时才定形状的张量，回去用 export_mobile.py 固定 batch 重导"
+        )
+    print("GPU delegate 校验: 可挂载（静态形状，真机不会报 Error applying delegate）")
 
 
 if __name__ == "__main__":

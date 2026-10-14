@@ -38,6 +38,13 @@ class OverlayController(context: Context) {
     private var hintAttached = false
     private var barAttached = false
 
+    /** 锁屏期间整体收起（见 [suspendForLock]）。 */
+    private var suspended = false
+
+    /** 锁屏前哪几层是挂着的，解锁后按这个挂回。 */
+    private var hintWasAttached = false
+    private var barWasAttached = false
+
     /** 实际生效的窗口类型；null = 没挂上。 */
     var activeType: Int? = null
         private set
@@ -57,9 +64,28 @@ class OverlayController(context: Context) {
             barView.onClose = value
         }
 
+    var onToggleGrid: ((Boolean) -> Unit)?
+        get() = barView.onToggleGrid
+        set(value) {
+            barView.onToggleGrid = value
+        }
+
+    var onToggleLabels: ((Boolean) -> Unit)?
+        get() = barView.onToggleLabels
+        set(value) {
+            barView.onToggleLabels = value
+        }
+
+    /** 把两个调试开关的当前状态同步到控制条（会话开始时对齐一次，之后由控制条自己翻）。 */
+    fun setBarToggles(grid: Boolean, labels: Boolean) {
+        barView.showGrid = grid
+        barView.showLabels = labels
+    }
+
     /** 提示层 + 控制条一起挂。@return 是否挂上。 */
     fun show(): Boolean {
         if (hintAttached && barAttached) return true
+        if (deferredWhileLocked()) return true
         for (type in candidates()) {
             if (attachHint(type) && attachBar(type)) {
                 activeType = type
@@ -72,25 +98,59 @@ class OverlayController(context: Context) {
         return false
     }
 
-    /** 只挂整屏提示层（"验证一次"用，不弹控制条）。 */
-    fun showHint(): Boolean {
-        if (hintAttached) return true
-        for (type in candidates()) {
-            if (attachHint(type)) {
-                activeType = type
-                return true
-            }
-        }
-        onOverlayUnavailable?.invoke()
-        return false
-    }
-
     /** 摘掉两个窗口。 */
     fun hide() {
         detachHint()
         detachBar()
         hintView.frame = null
         activeType = null
+        suspended = false
+        hintWasAttached = false
+        barWasAttached = false
+    }
+
+    /**
+     * 锁屏时把两个窗口都摘掉。
+     *
+     * 无障碍悬浮窗（以及降级用的应用上层悬浮窗）层级**在锁屏之上**：锁屏后提示框照样画在锁屏画面上，
+     * 控制条也还在、还能点到。所以锁屏就摘窗口，解锁后 [resumeAfterUnlock] 原样挂回 ——
+     * 只动窗口，不动会话、也不清 [HintOverlayView.frame]，解锁回来还是上一帧的结果。
+     */
+    fun suspendForLock() {
+        if (suspended) return
+        suspended = true
+        hintWasAttached = hintAttached
+        barWasAttached = barAttached
+        detachHint()
+        detachBar()
+    }
+
+    /** 解锁后按锁屏前的样子挂回（原来的类型挂不上就走降级链）。 */
+    fun resumeAfterUnlock() {
+        if (!suspended) return
+        suspended = false
+        if (hintWasAttached && !hintAttached) {
+            val type = reattach(::attachHint)
+            if (type == null) onOverlayUnavailable?.invoke() else activeType = type
+        }
+        if (barWasAttached && !barAttached) {
+            reattach(::attachBar)?.let { activeType = it }
+        }
+    }
+
+    /** 锁屏中：先只记下"这两层要在"，等解锁回来再挂（锁屏上不该出现任何东西）。 */
+    private fun deferredWhileLocked(): Boolean {
+        if (!suspended) return false
+        hintWasAttached = true
+        barWasAttached = true
+        return true
+    }
+
+    /** 先试锁屏前生效的那个类型，挂不上再走降级链。@return 挂上的类型，都没挂上返回 null。 */
+    private fun reattach(attach: (Int) -> Boolean): Int? {
+        activeType?.let { if (attach(it)) return it }
+        for (type in candidates()) if (attach(type)) return type
+        return null
     }
 
     fun updateHint(frame: HintOverlayView.Frame?) {
@@ -98,11 +158,15 @@ class OverlayController(context: Context) {
     }
 
     /**
-     * 截图期间把提示层藏起来（只改可见性，不摘窗口）。
+     * 刷新（截屏 + 分析）期间把提示层藏起来（只改可见性，不摘窗口）。
      *
      * 上一帧画在屏幕上的提示框会进本次截图：框边的强边缘会带偏标定，
      * 50% 的红色也会改变砖块颜色、影响识别。控制条**不藏** —— 它在棋盘外面，
      * 而且用户要靠它点「刷新」。
+     *
+     * 可见性由调用方管：刷新一开始就是 `false`，算出新结果才 `true`
+     * （见 `HintSession.captureFrame` / `handle`）—— 分析那几秒屏幕上什么都不画，
+     * 免得把上一帧的过期提示当成新结果看。
      */
     fun setHintLayerVisible(visible: Boolean) {
         hintView.visibility = if (visible) View.VISIBLE else View.GONE

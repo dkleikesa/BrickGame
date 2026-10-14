@@ -20,6 +20,8 @@ object HintPipeline {
         val state: BoardState,
         /** 当前盘面上全部可消除的对（一行可能同时存在好几对）。 */
         val hints: List<Hint>,
+        /** 这一帧模型没把握的格子（序号 → 相似度百分制）；非空就该把截图留档，见 [analyze]。 */
+        val lowConfidence: List<Pair<Int, Int>>,
         val elapsedMs: Long,
     ) {
         val cleared: Boolean get() = HintEngine.isCleared(state)
@@ -40,8 +42,14 @@ object HintPipeline {
             val scan = OpenCvBoardScanner.scan(frame, minPitch) ?: return null
             val labels = classifier.classify(frame, scan)
             val state = BoardState.of(scan, labels)
-            val hints = HintEngine.allHints(scan, state)
-            Result(scan, state, hints, (System.nanoTime() - start) / 1_000_000)
+            val hints = HintEngine.hints(scan, state)
+            Result(
+                scan = scan,
+                state = state,
+                hints = hints,
+                lowConfidence = classifier.lowConfidenceCells(),
+                elapsedMs = (System.nanoTime() - start) / 1_000_000,
+            )
         } catch (e: Throwable) {
             Log.w(TAG, "分析失败", e)
             null

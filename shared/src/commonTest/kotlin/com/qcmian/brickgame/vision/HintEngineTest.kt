@@ -1,16 +1,16 @@
 package com.qcmian.brickgame.vision
 
+import com.qcmian.brickgame.algorithm.BrickGameTipHelper
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
  * "识别结果 → 可操作提示"这一环的验证。
  *
  * 这里不需要截图和模型：手工造一个 [BoardScan]（几何 + 判空）+ 标签，看 [HintEngine] 给出的
- * 提示能不能真的被 `BrickGameTipHelper.actionStep` 执行掉。
+ * 提示是不是 [BrickGameTipHelper.findMoves] 的全量结果。
  */
 class HintEngineTest {
 
@@ -52,7 +52,7 @@ class HintEngineTest {
         labels[3] = 7
         val state = BoardState.of(scan, labels)
 
-        val hint = HintEngine.nextHint(scan, state)
+        val hint = HintEngine.hints(scan, state).firstOrNull()
         assertNotNull(hint, "同款两块砖在同一行且中间全空，应当能给出提示")
         assertTrue(hint.from == CellPoint(0, 0) || hint.pair == CellPoint(0, 0))
         assertTrue(hint.from == CellPoint(0, 3) || hint.pair == CellPoint(0, 3))
@@ -63,8 +63,9 @@ class HintEngineTest {
     }
 
     @Test
-    fun bricksConnectedOnlyByBendAreNotPairable() {
-        // (0,0) 与 (2,1)：周围全是空格，但两者不在一条直线/斜线上 —— 滑行只走直线、不拐弯，移不到
+    fun pairIsFoundBySlidingIntoAlignment() {
+        // (0,0) 与 (2,1) 同款：把 (0,0) 沿本行向右滑到 (0,1)，就与正下方的 (2,1) 对齐成对。
+        // 提示只报"哪两块"，落点由游戏自己判定（不走 resolveAction）。
         val empty = BooleanArray(16) { true }
         empty[0] = false
         empty[2 * 4 + 1] = false
@@ -75,7 +76,45 @@ class HintEngineTest {
         labels[2 * 4 + 1] = 7
         val state = BoardState.of(scan, labels)
 
-        assertNull(HintEngine.nextHint(scan, state), "靠拐弯才连上的两块砖在游戏里消不掉")
+        val hint = HintEngine.hints(scan, state).firstOrNull()
+        assertNotNull(hint, "滑到对齐位就能消：两块同款砖在算法枚举出的走法里")
+        assertEquals(CellPoint(0, 0), hint.from, "该滑的是 (0,0) 那块")
+        assertEquals(CellPoint(2, 1), hint.pair, "配对砖是 (2,1)")
+    }
+
+    /** 提示必须与 [BrickGameTipHelper.findMoves] 一一对应：不做任何过滤。 */
+    @Test
+    fun hintsMatchFindMovesExactly() {
+        val boards = listOf(
+            intArrayOf(
+                0, 0, 7, 0,
+                7, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+            ),
+            intArrayOf(
+                5, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 5, 0, 0,
+                0, 0, 0, 0,
+            ),
+            intArrayOf(
+                1, 1, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+            ),
+        )
+        for (labels in boards) {
+            val empty = BooleanArray(16) { labels[it] == 0 }
+            val scan = fakeScan(empty)
+            val state = BoardState.of(scan, labels)
+            assertEquals(
+                BrickGameTipHelper.findMoves(state.asGrid()).size,
+                HintEngine.hints(scan, state).size,
+                "提示条数应等于 findMoves 的候选数：${labels.toList()}",
+            )
+        }
     }
 
     @Test
@@ -86,7 +125,6 @@ class HintEngineTest {
 
         assertTrue(state.labels.all { it == 0 }, "判空为空的格子必须被强制归零")
         assertTrue(HintEngine.isCleared(state))
-        assertNull(HintEngine.nextHint(scan, state))
         assertTrue(HintEngine.hints(scan, state).isEmpty())
     }
 
@@ -102,6 +140,6 @@ class HintEngineTest {
         val state = BoardState.of(scan, labels)
 
         assertTrue(HintEngine.isStuck(state), "剩下砖块却无解应当判为 stuck（识别有误的信号）")
-        assertNull(HintEngine.nextHint(scan, state))
+        assertTrue(HintEngine.hints(scan, state).isEmpty(), "无解时一条提示都不给")
     }
 }
