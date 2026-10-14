@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  分享低置信度留档时只暴露**打好的 ZIP**（cache 里的临时目录），
+  留档原图（external-files/debug-frames）不外露。
+-->
+<paths>
+    <cache-path
+        name="lowconf-share"
+        path="lowconf-share/" />
+</paths>
