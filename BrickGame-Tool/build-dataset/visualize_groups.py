@@ -6,9 +6,12 @@
   第 1 列 待标注的图   ：这一组的所有截图格并排，每张下面写它自己当前的 class_id
   第 2 列 自动识别的类别：组内多数 class_id + 对应参考图 + 一致性（3/4 一致 = 有一张识别得不一样）
   第 3 列 近似图      ：组代表（组内特征均值）的 12 个最近邻候选，**点一下整组指派**
-点第 1 列的单张图 → 右侧面板：这一张的候选 / 搜索全量 class_id / 保持 / 标未知（单张粒度）。
+点第 1 列的单张图 → 右侧面板：这一张的候选 / 搜索全量 class_id / 保持 / 标空位 / 标未知（单张粒度）。
+"标空位"（class_id=0，已消除格）与"标未知"（认不出，训练时忽略）是两件事，不要混用。
 
-标注存浏览器 localStorage；"导出标注 JSON"下载后由 apply_corrections.py 写回 index.csv。
+标注存浏览器 localStorage。**写回两条路**：
+  · `annotate_server.py` 起本地服务后打开 → 点「标完并写回」直接落 index.csv / frames.csv（推荐）；
+  · 直接双击打开（file://）→ 浏览器写不了文件，只能"导出标注 JSON"再跑 apply_corrections.py。
 
 **增量**：默认只铺出 frames.csv 里 status != done 的帧（没有台账则退回全量）。
 所以每批新帧标完、apply_corrections 写了台账后，下次界面里就只剩新帧 —— 不用在旧格子里翻。
@@ -162,6 +165,7 @@ tr.split td{background:#fffaf0}
 .cid{font-weight:600;font-variant-numeric:tabular-nums}
 .cid.aut{color:#8250df}.cid.man{color:#1a7f37}.cid.non{color:#b54708}.cid.emp{color:#6b7280}
 .tag{font-size:9px;color:#8b8f96;line-height:1.35;min-height:12px}
+.unknote{color:#b54708;font-weight:600}
 .cellimg{width:58px;height:58px;image-rendering:pixelated;border-radius:5px;background:#eee;display:block;border:1px solid #e4e7ea}
 .cand{display:inline-block;text-align:center;margin-right:4px;cursor:pointer;padding:2px;border-radius:6px;border:2px solid transparent}
 .cand:hover{border-color:#1f6feb;background:#f4f7ff}
@@ -183,9 +187,12 @@ tr.split td{background:#fffaf0}
   <select id="fs"></select>
   <button id="low">只看低置信</button>
   <button id="man">只看已改</button>
+  <button id="unkf">只看未识别</button>
   <input id="thr" type="number" step="0.05" value="__THR__" style="width:62px" title="低置信阈值(距离)">
   <span class="stat" id="stat"></span>
+  <span class="stat" id="sav"></span>
   <span class="spacer"></span>
+  <button id="saveall" class="on" hidden>写回 index.csv</button>
   <button id="exp">导出标注 JSON</button>
   <button id="clr" class="danger">清空标注</button>
 </header>
@@ -198,10 +205,16 @@ tr.split td{background:#fffaf0}
 const DATA = __DATA__;
 const KEY = 'bgcls:' + DATA.dataset;
 const LS = (() => { try { localStorage.setItem('_t','1'); localStorage.removeItem('_t'); return localStorage; } catch(e) { return null; } })();
+// 写回方式：用 annotate_server.py 打开（http://127.0.0.1:8770/…）时，点「本帧标完」
+// 直接把这一帧的改动 POST 给服务端落库；直接双击打开（file://）时浏览器写不了文件，
+// 只能走"导出标注 JSON → apply_corrections.py"那条老路（按钮照旧可用）。
+const SERVER = location.protocol === 'http:';
 // S.done = 本轮"本帧标完"的帧；S.edits = 逐格改动。两者都会写进导出的 JSON。
+// S.saved = 已经写回服务端的帧（服务器模式下用它显示"已写回"，语义与 S.done 不同）。
 let S = (LS && JSON.parse(LS.getItem(KEY) || 'null')) || {edits: {}};
 if (!S.edits) S.edits = {};
 if (!S.done) S.done = {};
+if (!S.saved) S.saved = {};
 let THR = parseFloat(document.getElementById('thr').value) || 0.3;
 let SEL = null, SCOPE = 'one';   // 抽屉里的改动范围：one = 当前这张，g = 整组
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -236,10 +249,55 @@ function copyText(text, btn) {
   } else fallback();
 }
 
+// 顶栏右侧的一行反馈：写回成功/失败都要有回音，否则点完"本帧标完"不知道发生了什么。
+function flash(msg, bad) {
+  const el = document.getElementById('sav');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = bad ? '#b42318' : '#1a7f37';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.textContent = ''; }, 5000);
+}
+
+// 这一帧要写回什么：该帧全部格子里"改过的"，加上"本帧标完"的声明。
+// 没有改动的帧也要发 —— 标完本身要记进 frames.csv（否则它会一直冒出来）。
+function framePayload(fr) {
+  const f = DATA.frames.find(x => x.frame === fr);
+  const paths = [];
+  if (f) for (const g of f.groups) for (const m of g.members) paths.push(m.path);
+  const corrections = paths.filter(p => S.edits[p]).map(p => {
+    const e = S.edits[p];
+    return e.unknown ? {path: p, unknown: true} : {path: p, class_id: e.class_id};
+  });
+  return {frames: [fr], corrections: corrections};
+}
+
+// 直接落库（annotate_server 模式）。失败就把服务端的报错原文顶到顶栏，别装作成功。
+function saveFrame(fr) {
+  if (!SERVER) {
+    flash('当前是 file:// 打开：浏览器写不了本地文件 —— 请用 annotate_server.py 起服务，'
+      + '或点右上角「导出标注 JSON」再跑 apply_corrections.py', true);
+    return Promise.resolve(false);
+  }
+  return fetch('api/corrections', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(framePayload(fr)),
+  }).then(r => r.json().then(j => ({ok: r.ok, j}))).then(({ok, j}) => {
+    if (!ok || !j.ok) { flash('写回失败：' + (j.error || '未知错误'), true); return false; }
+    flash(`已写回 ${fr}：指派 ${j.n_set} 格 / 标未知 ${j.n_unk} / 无变化 ${j.n_same}`
+      + (j.n_missing ? ` / 无效 ${j.n_missing}` : ''));
+    return true;
+  }).catch(e => { flash('写回失败：' + e, true); return false; });
+}
+
 function mview(m) {                                  // 单张图最终显示什么
   const e = S.edits[m.path];
   if (e && e.unknown) return {cid: '未知', kind: 'non', cls: 'unk', src: ''};
   if (e) return {cid: String(e.class_id), kind: 'man', cls: 'man', src: refSrc(e.class_id)};
+  // index.csv 里 cls_src=unknown 的格子（导入时判"没把握"，class_id 只是 top-1 起点）：
+  // 一律显示"未识别"。以前这里把它当普通标签显示，人工看到"背景 0"就以为已经标好了 ——
+  // 于是一帧点完"标完并写回"、帧变 done，这格却从没被改过，也没机会再出现。
+  if (m.unk) return {cid: '未识别', kind: 'non', cls: 'unk', src: '', d: m.d};
   if (m.emp || m.cid === 0) return {cid: '背景 0', kind: 'non', cls: 'emp', src: refSrc(0), d: m.d};
   if (!m.cid) return {cid: '未识别', kind: 'non', cls: '', src: ''};
   return {cid: String(m.cid), kind: 'aut', cls: '', src: refSrc(m.cid), d: m.d};
@@ -249,14 +307,17 @@ function gview(g) {                                  // 这一组：多数 class
   // 否则整组背景会因为"背景 0"不匹配 /^\d+$/ 而落到下面的"未识别"分支：
   // 第 2 列恒显示"未识别"、参考图空白（成员明明写着"背景 0"）。
   const cidOf = v => v.cid === '背景 0' ? '0' : v.cid;
+  // 未识别的成员不进 cid 统计（它们没有可采信的编号），但必须在第 2 列里点名 ——
+  // 否则"未识别 + 已识别"混在一组时，第 2 列看着像整组都识别成功了。
+  const unkN = g.members.filter(m => mview(m).cid === '未识别').length;
   const cids = g.members.map(m => cidOf(mview(m))).filter(v => /^\d+$/.test(v));
-  if (!cids.length) return {cid: '未识别', kind: 'non', same: 0, n: 0, src: ''};
+  if (!cids.length) return {cid: '未识别', kind: 'non', same: 0, n: g.members.length, src: '', unk: unkN};
   const cnt = {}; cids.forEach(c => cnt[c] = (cnt[c] || 0) + 1);
   const best = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || a - b)[0];
   const isBg = best === '0' || g.members.every(m => m.emp);
   // 背景组用灰色(non)显示，别混进"自动识别(aut)"的紫色，一眼看出这不是要认的物品
   const kind = isBg ? 'non' : (S.edits[g.members[0].path] ? 'man' : 'aut');
-  return {cid: isBg ? '背景 0' : best, kind,
+  return {cid: isBg ? '背景 0' : best, kind, unk: unkN,
           same: cnt[best], n: g.members.length, src: refSrc(best),
           split: cids.length === g.members.length && cnt[best] !== g.members.length};
 }
@@ -284,6 +345,7 @@ function rowsHtml() {
   const sel = document.getElementById('fs').value;
   const onlyLow = document.getElementById('low').classList.contains('on');
   const onlyMan = document.getElementById('man').classList.contains('on');
+  const onlyUnk = document.getElementById('unkf').classList.contains('on');
   // 整页只有一个 table：表头只粘一次，帧标题作为表内一行 —— 之前每帧一个 table，
   // 各自的 sticky 表头滚动时会互相叠加，把第一行盖住
   let body = '';
@@ -292,24 +354,27 @@ function rowsHtml() {
     const groups = f.groups.filter(g => {
       const anyEdit = g.members.some(m => S.edits[m.path]);
       if (onlyMan && !anyEdit) return false;
+      // cls_src=unknown 且本次还没改的格子 = 真正待人工过一遍的（改过就不再算）
+      if (onlyUnk && !anyEdit && !g.members.some(m => m.unk)) return false;
       // 背景格不算低置信（没有距离可比），否则"只看低置信"会把整页背景全捞出来
       if (onlyLow) return anyEdit || g.members.some(m =>
         !(m.emp || m.cid === 0) && (!m.cid || (m.d || 0) > THR));
       return true;
     });
     if (!groups.length) continue;
-    const done = !!S.done[f.frame];
+    // 服务器模式看"已写回"（服务端真值），file:// 模式看本地的"本帧标完"（等导出 JSON）
+    const done = SERVER ? !!S.saved[f.frame] : !!S.done[f.frame];
     body += `<tr class="frow${done ? ' done' : ''}"><td colspan="3">`
       + `<button class="fdone${done ? ' on' : ''}" data-frame="${esc(f.frame)}">`
-      + `${done ? '已标完 ✓' : '本帧标完'}</button>`
+      + `${done ? (SERVER ? '已写回 ✓' : '已标完 ✓') : (SERVER ? '标完并写回' : '本帧标完')}</button>`
       + `${esc(f.frame)}<span> 棋盘 ${f.rows}x${f.cols}，${f.cells} 格 / ${f.groups.length} 组，显示 ${groups.length} 组</span></td></tr>`
       + groups.map(g => {
         const v = gview(g);
-        return `<tr data-key="${esc(g.key)}" class="${v.split ? 'split' : ''}${SEL && SEL.key === g.key ? ' sel' : ''}">
+        return `<tr data-key="${esc(g.key)}" class="${v.split || v.unk ? 'split' : ''}${SEL && SEL.key === g.key ? ' sel' : ''}">
           <td class="c1"><div class="memwrap">${g.members.map(memberHtml).join('')}</div></td>
           <td class="c2"><div class="mem" style="margin:0" data-path="${g.members[0].path}">
               <img class="cellimg" src="${v.src}" loading="lazy">
-              <div class="tag"><span class="cid ${v.kind}">${v.cid}</span><br>${v.same} 张同号</div>
+              <div class="tag"><span class="cid ${v.kind}">${v.cid}</span><br>${v.same}/${v.n} 张同号${v.unk ? `<br><span class="unknote">含 ${v.unk} 张未识别</span>` : ''}</div>
             </div></td>
           <td class="c3"><div class="candwrap">${g.cands.map(([cid, d]) => candHtml(cid, d, v.cid)).join('')}</div></td>
         </tr>`;
@@ -338,9 +403,16 @@ const HELP = '<div class="sec">怎么看 / 怎么标</div>'
   + '② <b>自动类别</b>：我识别出的 class_id + 图鉴参考图，x/y 一致 = 这组里有几张被识别成同一个<br>'
   + '③ <b>近似图</b>：与这组最像的 12 个图鉴物品，<b>点一下 = 整组指派</b><br><br>'
   + '点第 1 列的单张图 → 抽屉里选"改动范围"（这一张 / 整组），再点图鉴条目即可指派<br>'
+  + '已消除的空位（只剩底板）= 正式类别 <b>class 0</b>，用抽屉里的<b>标为空位</b>；'
+  + '认不出是什么物品才用<b>标为未知</b>（训练时会被忽略，两者不要混）<br>'
   + '顶栏：<b>只看低置信</b>（d &gt; 阈值）、<b>只看已改</b>、阈值可调<br>'
-  + '一帧看完点它标题行右侧的<b>本帧标完</b>；标完点右上角<b>导出标注 JSON</b>，'
-  + '再跑 apply_corrections.py 写回（写回的帧下次不再出现，界面只剩新帧）'
+  + '一帧看完点它标题行右侧的<b>本帧标完</b>：<b>用 annotate_server.py 打开时直接写回</b>'
+  + ' index.csv / frames.csv（按钮显示"标完并写回"）；'
+  + '直接双击打开（file://）时浏览器写不了文件，按钮只在页面上记账，'
+  + '要再点右上角<b>导出标注 JSON</b> 并跑 apply_corrections.py —— 所以标注请统一走 annotate_server.py。'
+  + '<br>写回的帧下次刷新就不再出现，界面只剩新帧<br>'
+  + '顶栏右上角还有一键<b>写回 index.csv</b>：把页面上所有还没写回的改动一次落库'
+  + '（不用逐帧点，标完一遍按它即可）'
   + '</div>';
 
 const openPanel = () => {
@@ -369,6 +441,7 @@ function renderPanel() {
     </div>
     <div class="acts" style="margin-top:6px">
       <button id="keep">保持判定</button>
+      <button id="bgs" title="这一格是已消除的空位（class_id=0，见图鉴 bg01/bg02），不是物品">标为空位</button>
       <button id="unk">标为未知</button>
       <button id="cp" title="复制这张图的绝对路径：${esc(absPath(m.path))}">复制图片路径</button>
     </div>
@@ -387,6 +460,9 @@ function renderPanel() {
   p.querySelector('#unk').onclick = () => {
     targets().forEach(x => S.edits[x.path] = {unknown: true}); save(); closePanel();
   };
+  // 空位虽然是正式类别（class_id=0），但在图鉴里排在 2368 个物品之后 —— 那条懒加载网格
+  // 翻到底都找不到，所以单独给一个按钮；和"标未知"的区别是它会被当成背景类的训练样本收下
+  p.querySelector('#bgs').onclick = () => one(0);
   // 复制路径：不关抽屉、不改标注，只把这张图的绝对路径写进剪贴板
   p.querySelector('#cp').onclick = ev => copyText(absPath(m.path), ev.currentTarget);
   const q = p.querySelector('#q'), box = p.querySelector('#all');
@@ -399,13 +475,18 @@ function renderPanel() {
   paint(DATA.refs);
   q.oninput = () => {
     const s = q.value.trim().toLowerCase();
-    paint(s ? DATA.refs.filter(([cid, entry]) =>
-      String(cid).includes(s) || entry.toLowerCase().includes(s)) : DATA.refs);
+    if (!s) { paint(DATA.refs); return; }
+    const hit = DATA.refs.filter(([cid, entry]) =>
+      String(cid).includes(s) || entry.toLowerCase().includes(s));
+    // 编号**精确等于**查询的排最前：输 "0" 会命中 10/20/100… 一大片，
+    // 不这么做的话背景类（cid=0）还是被挤到看不见
+    hit.sort((a, b) => (String(b[0]) === s) - (String(a[0]) === s));
+    paint(hit);
   };
 }
 
 function stats() {
-  let man = 0, unk = 0, low = 0, total = 0;
+  let man = 0, unk = 0, low = 0, total = 0, draft = 0;
   for (const f of DATA.frames) for (const g of f.groups) for (const m of g.members) {
     total++;
     const e = S.edits[m.path];
@@ -413,17 +494,23 @@ function stats() {
     // 背景格（class_id=0 / cls_src=empty）不算"低置信"：它们本来就没有距离，
     // 算进去会让"低置信"虚高一份背景（202 格），真正要看的疑难格子被淹掉
     else if (!(m.emp || m.cid === 0) && (!m.cid || (m.d || 0) > THR)) low++;
+    if (!e && m.unk) draft++;      // 导入时判"没把握"、还没人工过一遍的
   }
-  const doneN = DATA.frames.filter(f => S.done[f.frame]).length;
+  const doneN = DATA.frames.filter(f => SERVER ? S.saved[f.frame] : S.done[f.frame]).length;
   document.getElementById('stat').textContent =
-    `已改 ${man} / 未知 ${unk} / 低置信 ${low} / 共 ${total} 张 · 本帧标完 ${doneN}/${DATA.frames.length} 帧`;
+    `已改 ${man} / 未知 ${unk} / 低置信 ${low} / 待人工(导入未定) ${draft} / 共 ${total} 张 · `
+    + `${SERVER ? '已写回' : '本帧标完'} ${doneN}/${DATA.frames.length} 帧`;
 }
 
 document.getElementById('list').addEventListener('click', ev => {
   const fd = ev.target.closest('.fdone');
-  if (fd) {                                     // 帧标题行：标记本帧标完（再点撤销）
+  if (fd) {                                     // 帧标题行
     const fr = fd.dataset.frame;
-    if (S.done[fr]) delete S.done[fr]; else S.done[fr] = 1;
+    if (SERVER) {                               // 直接写回：再点=把这一帧再存一次（幂等）
+      saveFrame(fr).then(ok => { if (ok) { S.saved[fr] = 1; save(); } });
+      return;
+    }
+    if (S.done[fr]) delete S.done[fr]; else S.done[fr] = 1;   // file://：只记本地，等导出 JSON
     save(); return;
   }
   const cand = ev.target.closest('.cand');
@@ -443,11 +530,11 @@ document.getElementById('fs').onchange = render;
 document.getElementById('pclose').onclick = closePanel;
 document.getElementById('mask').onclick = closePanel;
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
-['low', 'man'].forEach(id => document.getElementById(id).onclick = e => { e.target.classList.toggle('on'); render(); });
+['low', 'man', 'unkf'].forEach(id => document.getElementById(id).onclick = e => { e.target.classList.toggle('on'); render(); });
 document.getElementById('thr').onchange = e => { THR = parseFloat(e.target.value) || 0.3; render(); stats(); };
 document.getElementById('clr').onclick = () => {
-  if (!confirm('清空所有标注？（已导出的 JSON 不受影响）')) return;
-  S = {edits: {}, done: {}}; save();
+  if (!confirm('清空页面上的标注？（已经写回 index.csv / 导出过 JSON 的不受影响）')) return;
+  S = {edits: {}, done: {}, saved: {}}; save();
 };
 document.getElementById('exp').onclick = () => {
   const out = {dataset: DATA.dataset, created: new Date().toISOString(),
@@ -473,6 +560,48 @@ function setHdr() {
   document.documentElement.style.setProperty(
     '--hdr', document.querySelector('header').offsetHeight + 'px');
 }
+// ---- 顶栏一键写回：页面上所有还没写回的改动，一次发给服务端（不用逐帧点）----
+const P2F = {};
+DATA.frames.forEach(f => f.groups.forEach(g => g.members.forEach(m => P2F[m.path] = f.frame)));
+function allPayload() {
+  const corrections = Object.entries(S.edits).map(([p, e]) => e.unknown
+    ? {path: p, unknown: true} : {path: p, class_id: e.class_id});
+  // 有改动的帧一并声明"标完"（与逐帧按钮同一个入口，落库规则也一致）
+  const frames = [...new Set(corrections.map(c => P2F[c.path]).filter(Boolean))];
+  return {frames, corrections};
+}
+document.getElementById('saveall').onclick = () => {
+  if (!SERVER) {
+    flash('当前是 file:// 打开：浏览器写不了本地文件 —— 请用 annotate_server.py 的地址打开', true);
+    return;
+  }
+  const payload = allPayload();
+  if (!payload.corrections.length) {
+    flash('页面上没有还没写回的改动（要么已经写回，要么还没开始标）', true);
+    return;
+  }
+  if (!confirm(`把页面上 ${payload.corrections.length} 条改动写回 index.csv？\n`
+    + `涉及的 ${payload.frames.length} 帧会一并记为"已标完"，之后不再出现。`)) return;
+  fetch('api/corrections', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+  }).then(r => r.json().then(j => ({ok: r.ok, j}))).then(({ok, j}) => {
+    if (!ok || !j.ok) { flash('写回失败：' + (j.error || '未知错误'), true); return; }
+    // 写回了就别在页面上挂着：不然再点一次会把同样的改动又发一遍
+    payload.corrections.forEach(c => delete S.edits[c.path]);
+    payload.frames.forEach(f => S.saved[f] = 1);
+    save();
+    flash(`已写回：指派 ${j.n_set} / 标未知 ${j.n_unk} / 无变化 ${j.n_same}`
+      + (j.n_missing ? ` / 无效 ${j.n_missing}` : '') + ' · 正在刷新…');
+    setTimeout(() => location.reload(), 900);      // 服务端已重出页面，刷新即最新
+  }).catch(e => flash('写回失败：' + e, true));
+};
+if (SERVER) {
+  document.getElementById('saveall').hidden = false;
+} else {
+  document.getElementById('sav').textContent =
+    'file:// 打开：浏览器写不了文件，请用 annotate_server.py 的地址打开';
+}
+
 render(); stats(); setHdr();
 window.addEventListener('resize', setHdr);
 window.addEventListener('load', setHdr);
@@ -529,7 +658,16 @@ def build_html(dataset: str = "dataset", catalog: str = "catalog", samples: str 
                 print(f"  只显示待标注帧：{n_all} → {len(rows)} 格"
                       f"（{len(pend)} 帧未标完；要全量加 --all）")
     frame_rows = rows
-    refs = load_rows(os.path.join(catalog, "index.csv"))
+    # 图鉴按 class_id 排序 + 同一个 class_id 只留一条：
+    #  · 排序：背景类（0，bg01/bg02）在 index.csv 里是**追加在最后**的，而抽屉里的图鉴网格
+    #    是懒加载的 —— 不排序它就被 2368 个物品埋在最底下，搜"0"也排在一堆编号带 0 的物品后面。
+    #  · 去重：背景类按底板颜色存了两张同 class_id 的参考图（不同关卡皮肤），指派 class_id 时
+    #    两张完全等价，网格里出现两个"0"只会让人犹豫点哪个。这里按显示去重，只留第一张；
+    #    模型侧（原型库）不受影响 —— 那是 prototypes.npz 里的 2370 行，与 DATA.refs 无关。
+    refs = {}
+    for r in sorted(load_rows(os.path.join(catalog, "index.csv")), key=lambda r: int(r["class_id"])):
+        refs.setdefault(int(r["class_id"]), r)
+    refs = list(refs.values())
     base = os.path.dirname(os.path.abspath(html))
     rel = lambda p: os.path.relpath(os.path.abspath(p), base).replace(os.sep, "/")  # noqa: E731
 
@@ -581,6 +719,9 @@ def build_html(dataset: str = "dataset", catalog: str = "catalog", samples: str 
                     "col": int(os.path.basename(ms[i]["path"])[4:6]), "raw": raw,
                     "cid": int(ms[i]["class_id"]) if ms[i].get("class_id") else 0,
                     "emp": 1 if ms[i].get("cls_src") == "empty" else 0,
+                    # unk：导入时判"没把握"的格子（cls_src=unknown），页面上必须显示成
+                    # "未识别"并让"只看未识别"捞得到 —— 它的 class_id 只是 top-1 提示，不是标签
+                    "unk": 1 if ms[i].get("cls_src") == "unknown" else 0,
                     "d": float(ms[i]["cls_dist"]) if ms[i].get("cls_dist") else 0.0,
                 } for i in idx],
             })
