@@ -4773,11 +4773,11 @@
   "p037_b3_r1_c7"
  ],
  "thresholds": {
-  "dist_hit_p95": 0.0394,
-  "dist_wrong_p5": 0.1886,
-  "top1": 0.9866,
-  "top1_macro": 0.9583,
-  "n_query": 224,
+  "dist_hit_p95": 0.1357,
+  "dist_wrong_p5": 0.2453,
+  "top1": 1.0,
+  "top1_macro": 1.0,
+  "n_query": 213,
   "distance_def": "余弦距离 = 1 - 点积",
   "hint": "距离 > dist_hit_p95 → 低置信；> dist_wrong_p5 → 基本可判为未知物品"
  },

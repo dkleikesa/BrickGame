@@ -6,7 +6,9 @@
   ① 图鉴 build-catalog/catalog/tiles/*.png：每类 1 张，原样
   ② 截图 build-dataset/dataset/images/frame/**：所有格子原样收进来（含空位 = class 0）
 正样本对 = 同类（图鉴图 ↔ 该类的真实格），跨域对齐就是域适配的全部信号。
-按**帧**留出验证集（同帧格子近重复，按格划分会虚高）。
+验证集分两把尺子（按格随机划分必虚高：同帧内同款砖块出现十几次）：
+  **整类留出**（`--holdout-cls-ratio`）= 新物品/换皮肤，该类图鉴图与真实格都不进训练；
+  **整帧留出**（`--val-frames`）= 同类换一张截图的稳定性。
 
 **骨干**：默认从 ImageNet 预训练的 mobilenet_v3_large 微调（与自动识别用的骨干同一个，
 见 auto_classify.DEFAULT_BACKBONE）；`--backbone scratch` 回到"从零训小 CNN"的老行为。
@@ -499,7 +501,9 @@ def config_dict(args) -> dict:
     return {"data": args.data, "backbone": args.backbone,
             "freeze_backbone": args.freeze_backbone, "img": IMG, "crop": CROP,
             "embed_dim": args.embed_dim, "epochs": args.epochs, "lr": args.lr,
-            "backbone_lr_scale": args.backbone_lr_scale, "seed": args.seed, "aug": args.aug}
+            "backbone_lr_scale": args.backbone_lr_scale, "seed": args.seed, "aug": args.aug,
+            "val_frames": args.val_frames, "val_cls_ratio": args.val_cls_ratio,
+            "holdout_cls_ratio": args.holdout_cls_ratio}
 
 
 # ---------------------------------------------------------------- 真实数据（零合成）
@@ -536,11 +540,23 @@ class Real:
     再拿自动识别的距离过滤一遍，等于按"模型当时有多自信"扔掉真实样本（实测扔过半）。
     唯一还会丢的是 unknown（人工判为"认不出"）和不在图鉴里的 class_id —— 后者没有原型可用。
 
-    训练/验证**按帧**划分：同一帧里同一物品会出现十几次、底色与缩放完全一致，按格随机划分
-    会让验证集里全是训练集的近重复 —— 指标虚高。留出整帧才等于"换一张新截图来测"。
+    评测集有三种留出口径，可叠加（同一 seed，同参数结果可复现；哪种都不留 = 没有评测）：
+
+    1. **每类按比例留出**（[val_cls_ratio]，`--val-cls-ratio`，默认 0.15，格级随机）：每个类
+       随机抽 15% 的格进评测，**最少 1 张**（比例小于 1，所以不会把多张的类留光；只有 1 张
+       样本的类会被整类留出 —— 它本来也没有第二个同款可训）。默认口径，保证每个类都有评测
+       样本；**代价是同帧近重复会虚高**：同一帧里同款砖块的底色/缩放/压缩完全一致，留出的
+       那 1 格几乎就是训练集里那几格的复制品。
+    2. **整类留出**（[holdout_classes]，`--holdout-cls-ratio`，默认关）：整个类的图鉴图与
+       真实格都不进训练，测"只给一张图鉴图的新物品 / 换皮肤"。该类**图鉴图也不作负样本**
+       （见 real_batch），否则模型表征仍见过它、指标照样偏乐观。
+    3. **整帧留出**（[val_frames]，`--val-frames`，默认关）：整帧不训练，测"同类换一张截图"。
+
+    三种都留时，eval_real 按"该类在训练集里有没有格"自动拆成 seen / unseen 两块报。
     """
 
-    def __init__(self, dataset: str, cat: "Catalog", val_frames: int, seed: int):
+    def __init__(self, dataset: str, cat: "Catalog", val_frames: int, seed: int,
+                 holdout_cls_ratio: float = 0.0, val_cls_ratio: float = 0.0):
         rows = list(csv.DictReader(open(os.path.join(dataset, "index.csv"))))
         kept, drop = [], {"未知": 0, "不在图鉴": 0}
         for r in rows:
@@ -554,10 +570,35 @@ class Real:
                 continue
             kept.append((cat.index[c], r["path"], r["frame"]))
 
-        frames = sorted({k[2] for k in kept})
         rng = np.random.default_rng(seed)
-        n_val = min(val_frames, max(0, len(frames) - 1))
-        val = set(rng.choice(frames, n_val, replace=False).tolist()) if n_val else set()
+
+        # ① 整类留出（默认关）：该类**全部**真实格进验证集，且不进 by_class —— 因此不融合进
+        #    原型、也不进 real_batch 的负样本池。至少留 1 类，但必须给训练留下至少 1 类。
+        all_cls = np.array(sorted({c for c, _, _ in kept}), np.int64)
+        n_hold = max(1, int(round(all_cls.size * holdout_cls_ratio))) if holdout_cls_ratio > 0 else 0
+        n_hold = min(n_hold, max(0, all_cls.size - 1))
+        self.holdout_classes = set(rng.choice(all_cls, n_hold, replace=False).tolist()) if n_hold else set()
+
+        # ② 每类按比例留出（默认口径）：每类抽 val_cls_ratio，最少 1 张、最多留到给训练剩 1 张
+        #    —— 只有 1 张样本的类不留，否则它就没有训练格了。
+        per_cls_val: set[str] = set()
+        if val_cls_ratio > 0:
+            by_cls: dict[int, list[str]] = {}
+            for ci, p, _ in kept:
+                if ci not in self.holdout_classes:
+                    by_cls.setdefault(ci, []).append(p)
+            for ps in by_cls.values():
+                # 最少 1 张；ratio<1 时抽不满，唯一会"留光"的是全类只有 1 张样本的类。
+                n = min(max(1, int(round(len(ps) * val_cls_ratio))), len(ps))
+                for k in rng.choice(len(ps), n, replace=False):
+                    per_cls_val.add(ps[int(k)])
+
+        # ③ 整帧留出（默认关）：候选帧只从"没被上面挑走"的格里数，别和格级留出重叠
+        rest_frames = sorted({fr for ci, p, fr in kept
+                              if ci not in self.holdout_classes and p not in per_cls_val})
+        n_val = min(val_frames, max(0, len(rest_frames) - 1))
+        val = set(rng.choice(rest_frames, n_val, replace=False).tolist()) if n_val else set()
+
         self.cache: dict[str, np.ndarray] = {}
         self.train: list[tuple[int, str]] = []
         self.val: list[tuple[int, str]] = []
@@ -566,15 +607,20 @@ class Real:
             if img is None:
                 continue
             self.cache[p] = img
-            (self.val if fr in val else self.train).append((ci, p))
+            to_val = ci in self.holdout_classes or fr in val or p in per_cls_val
+            (self.val if to_val else self.train).append((ci, p))
         self.val_frames = sorted(val)
         self.by_class: dict[int, list[str]] = {}
         for ci, p in self.train:
             self.by_class.setdefault(ci, []).append(p)
         self.train_classes = sorted(self.by_class)
+        self.val_holdout = sum(1 for c, _ in self.val if c in self.holdout_classes)
+        self.val_per_class = len(per_cls_val)
         dropped = "、".join(f"{k} {v}" for k, v in drop.items() if v) or "无"
         print(f"真实格: 收 {len(kept)}/{len(rows)}（丢弃 {dropped}）→ "
-              f"训练 {len(self.train)} 格 / 验证 {len(self.val)} 格（留出帧 {self.val_frames or '无'}）")
+              f"训练 {len(self.train)} 格 / 验证 {len(self.val)} 格"
+              f"（每类抽样 {self.val_per_class} 格；留出帧 {self.val_frames or '无'}；"
+              f"留出类 {len(self.holdout_classes)} 个 / {self.val_holdout} 格查询）")
         print(f"  涉及 {len({c for c, _ in self.train + self.val})} 类；其中 {len(self.train_classes)} 类"
               f"有训练格（占 {len(self.train_classes) / cat.n:.1%}），其余类只当负样本")
 
@@ -618,8 +664,12 @@ def real_batch(cat: "Catalog", real: "Real", rng, n_class: int, views: int, aug:
     n_real = min(len(real.train_classes), max(1, int(n_class * real_ratio)))
     cls = [int(c) for c in rng.choice(real.train_classes, n_real, replace=False)] if n_real else []
     if len(cls) < n_class:
-        rest = np.setdiff1d(np.arange(cat.n), np.array(cls, np.int64))
-        cls += [int(c) for c in rng.choice(rest, min(n_class - len(cls), rest.size), replace=False)]
+        # 留出类一个都不许进 batch —— 连图鉴图也不行：让模型在训练期完全没见过它，
+        # 评测里"只给一张图鉴图"才是真的新物品场景（见 Real 的注释）。
+        banned = set(cls) | real.holdout_classes
+        rest = np.array([c for c in range(cat.n) if c not in banned], np.int64)
+        if rest.size:
+            cls += [int(c) for c in rng.choice(rest, min(n_class - len(cls), rest.size), replace=False)]
     imgs: list[np.ndarray] = []
     labs: list[int] = []
     for c in cls:
@@ -694,7 +744,7 @@ def run_real(args, dev: str) -> None:
     """只用真实图（图鉴 + 截图）训练，零合成。"""
     rng = np.random.default_rng(args.seed)
     cat = Catalog(args.catalog, CROP)
-    real = Real(args.real, cat, args.val_frames, args.seed)
+    real = Real(args.real, cat, args.val_frames, args.seed, args.holdout_cls_ratio, args.val_cls_ratio)
     if not real.train:
         raise SystemExit("没有可用的真实训练格：检查 dataset/index.csv 的 cls_src / class_id")
 
@@ -794,8 +844,16 @@ def parse_args() -> argparse.Namespace:
                     help="--data real 用的截图数据集目录（含 index.csv 与 images/）")
     ap.add_argument("--real-ratio", type=float, default=0.6,
                     help="每个 batch 从\"有真实格的类\"里抽的比例，其余从全类抽（只当负样本）")
-    ap.add_argument("--val-frames", type=int, default=3,
-                    help="留出多少帧做真实域验证：这些帧的格子完全不参与训练")
+    ap.add_argument("--val-frames", type=int, default=0,
+                    help="--data real 用：整帧留出做验证，这些帧的格子完全不参与训练（默认 0=关）。"
+                         "与 --val-cls-ratio 叠加时，评测集是两者的并集")
+    ap.add_argument("--val-cls-ratio", type=float, default=0.15,
+                    help="--data real 用：每类随机抽这个比例的格进评测，**最少 1 张**"
+                         "（默认 0.15，保证每类都有评测样本）。同帧近重复会让指标偏高，"
+                         "要干净的\"新物品\"口径就改用 --holdout-cls-ratio")
+    ap.add_argument("--holdout-cls-ratio", type=float, default=0.0,
+                    help="--data real 用：按比例**整类**留出 —— 该类的真实格只当查询、图鉴图也不作"
+                         "负样本，测\"只给一张图鉴图的新物品 / 换皮肤\"（默认 0=关）")
     ap.add_argument("--aug", default="none", choices=["none", "light"],
                     help="none（默认）=原图直接喂，零增广；light=真实图上做平移/亮度/JPEG")
     ap.add_argument("--fuse-proto", action=argparse.BooleanOptionalAction, default=True,
