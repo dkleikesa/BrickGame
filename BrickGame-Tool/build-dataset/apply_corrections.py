@@ -16,6 +16,9 @@ status=done 的帧不再铺出来 —— 界面里只剩还没标完的帧（新
 
 默认只预览，加 --inplace 才写文件。（index.csv 可随时由 build_dataset.py 重建，
 人工标注的原始记录请留好导出的 corrections.json。）
+
+`apply()` 也被 `annotate_server.py` 复用 —— 标注页起了本地服务后，点「本帧标完」直接走这里
+落库，不再需要导出 JSON。两条路径必须是同一份实现，否则"点按钮"与"跑脚本"的结果会漂。
 用法：
   python apply_corrections.py --corrections corrections.json            # 预览
   python apply_corrections.py --corrections corrections.json --inplace  # 落地
@@ -62,16 +65,14 @@ def apply_to_ledger(ledger_path: str, done_frames: set[str]) -> list[str]:
     return hit
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="标注 JSON → dataset/index.csv + frames.csv")
-    ap.add_argument("--dataset", default=os.path.join(_HERE, "dataset"))
-    ap.add_argument("--corrections", default="corrections.json")
-    ap.add_argument("--inplace", action="store_true", help="写回文件（默认只预览）")
-    args = ap.parse_args()
+def apply(dataset: str, corr: dict, inplace: bool = False) -> dict:
+    """corrections 字典 → dataset/index.csv + frames.csv。
 
-    with open(args.corrections) as f:
-        corr = json.load(f)
-    index_path = os.path.join(args.dataset, "index.csv")
+    @param corr {"corrections": [{path, class_id} | {path, unknown}], "frames": [帧名]}
+    @param inplace False 时只算不写（预览 / 自检用）。
+    @return 统计：改动条数、标完的帧、无效条目（annotate_server 直接把这份回给页面）。
+    """
+    index_path = os.path.join(dataset, "index.csv")
     with open(index_path) as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
@@ -84,12 +85,13 @@ def main() -> None:
     by_path = {r["path"]: r for r in rows}
 
     n_set = n_unk = n_same = n_missing = 0
+    missing: list[str] = []
     touched: set[str] = set()                     # 本次改动涉及的帧（"改了=看过"）
     for c in corr.get("corrections", []):
-        r = by_path.get(c["path"])
+        r = by_path.get(c.get("path", ""))
         if r is None:
             n_missing += 1
-            print(f"  跳过（index.csv 里没有这条）：{c['path']}")
+            missing.append(str(c.get("path", "")))
             continue
         if c.get("unknown"):
             if r.get("cls_src") == "unknown":
@@ -109,35 +111,52 @@ def main() -> None:
 
     # 标完的帧 = 导出时显式声明的 frames ∪ 改了东西的帧
     done_frames = {f for f in (corr.get("frames") or []) if f} | {f for f in touched if f}
-    n_done = len(done_frames) if os.path.exists(os.path.join(args.dataset, LEDGER)) else 0
+    out = {"n_set": n_set, "n_unk": n_unk, "n_same": n_same, "n_missing": n_missing,
+           "missing": missing, "frames": sorted(done_frames), "done": [],
+           "has_ledger": os.path.exists(os.path.join(dataset, LEDGER)), "wrote": False}
+    if not inplace:
+        return out
 
-    print(f"标注文件: {args.corrections}（{len(corr.get('corrections', []))} 条改动 / "
-          f"{len(corr.get('frames') or [])} 帧声明标完）")
-    print(f"将应用: 指派 {n_set} 条 / 标未知 {n_unk} 条 / 无变化 {n_same} 条 / 无效 {n_missing} 条")
-    if n_done:
-        print(f"将标完: {n_done} 帧（frames.csv 的 status=done，之后不再出现在标注界面）")
-    elif done_frames:
-        print("（没有 frames.csv 台账，跳过标完；老数据集重跑 build_dataset.py 会补建台账）")
-    if not args.inplace:
-        print("\n预览模式：没有写文件。加 --inplace 落地。")
-        return
-
-    wrote = False
     if n_set or n_unk:
         with open(index_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(rows)
-        print(f"\n已写回 {index_path}")
-        wrote = True
+        out["wrote"] = True
+    hit = apply_to_ledger(os.path.join(dataset, LEDGER), done_frames)
+    out["done"] = hit
+    out["wrote"] = out["wrote"] or bool(hit)
+    return out
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="标注 JSON → dataset/index.csv + frames.csv")
+    ap.add_argument("--dataset", default=os.path.join(_HERE, "dataset"))
+    ap.add_argument("--corrections", default="corrections.json")
+    ap.add_argument("--inplace", action="store_true", help="写回文件（默认只预览）")
+    args = ap.parse_args()
+
+    with open(args.corrections) as f:
+        corr = json.load(f)
+    res = apply(args.dataset, corr, inplace=args.inplace)
+    for p in res["missing"]:
+        print(f"  跳过（index.csv 里没有这条）：{p}")
+    print(f"标注文件: {args.corrections}（{len(corr.get('corrections', []))} 条改动 / "
+          f"{len(corr.get('frames') or [])} 帧声明标完）")
+    print(f"将应用: 指派 {res['n_set']} 条 / 标未知 {res['n_unk']} 条 / "
+          f"无变化 {res['n_same']} 条 / 无效 {res['n_missing']} 条")
+    if res["done"]:
+        print(f"将标完: {len(res['done'])} 帧（frames.csv 的 status=done，之后不再出现在标注界面）")
+    elif res["frames"]:
+        print("（没有 frames.csv 台账，跳过标完；老数据集重跑 build_dataset.py 会补建台账）")
+    if not args.inplace:
+        print("\n预览模式：没有写文件。加 --inplace 落地。")
+        return
+    if res["wrote"]:
+        print(f"\n已写回 {args.dataset}/index.csv"
+              + (f" + {LEDGER}（{len(res['done'])} 帧标完）" if res["done"] else ""))
     else:
-        print("\nindex.csv 没有任何改动，不写。")
-    hit = apply_to_ledger(os.path.join(args.dataset, LEDGER), done_frames)
-    if hit:
-        print(f"已标完 {len(hit)} 帧 → {os.path.join(args.dataset, LEDGER)}")
-        wrote = True
-    if not wrote:
-        print("没有任何改动，未写文件。")
+        print("\n没有任何改动，未写文件。")
 
 
 if __name__ == "__main__":

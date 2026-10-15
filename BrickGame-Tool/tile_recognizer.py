@@ -33,6 +33,11 @@ CELL = 32          # 每格归一化后的边长
 INSET = 0.14       # 裁切时向内收缩的比例（去掉格子边框/圆角）
 FLAT_THR = 5.0     # 内部边缘能量低于它 = 平坦 = 已消除的空位（实测砖块最低 31、空位最高 0.8）
 
+# 棋盘列数的合理范围（与 Android 侧 OpenCvBoardScanner.MIN_COLS/MAX_COLS 一致）：
+# 低置信度留档里列数恒为 10，留余量覆盖不同关卡。谐波修正后必须落在这一档才算数。
+MIN_COLS = 8
+MAX_COLS = 16
+
 
 # ---------------------------------------------------------------- 图像与投影
 def load_image(path: str) -> np.ndarray:
@@ -78,6 +83,24 @@ def fundamental_pitch(sig: np.ndarray, min_pitch: int, max_pitch: int) -> tuple[
     while lag >= 2 * lo and ac[lag // 2] >= 0.6 * ac[lag]:
         lag //= 2
     return lag, ac
+
+
+def reconcile_pitches(px: int, py: int, tolerance: float = 0.15,
+                      max_divisor: int = 4) -> tuple[int, int]:
+    """按"砖块是正方形"的先验把 x/y 格距对齐：大周期除回基波，除不动就原样返回。
+
+    自相关很容易取到 2/3 倍谐波（实测行周期 307 = 3×102）：x/y 差几倍时棋盘会被切成
+    左上角一小簇（5×10 而不是 15×10），裁出来的格子全是半块砖。与 Android 侧
+    `LatticeMath.reconcilePitches` 同一套规则 —— 两条管线必须给出同一个网格。
+    """
+    small, big = min(px, py), max(px, py)
+    if small <= 0 or big <= 1.35 * small:
+        return px, py
+    for k in range(2, max_divisor + 1):
+        if abs(big / k - small) <= tolerance * small:
+            fixed = big // k
+            return (px, fixed) if px < py else (fixed, py)
+    return px, py
 
 
 def lattice_phase(prof: np.ndarray, pitch: int) -> int:
@@ -343,14 +366,24 @@ def detect_grid(img: np.ndarray, min_pitch: int, inset: float = INSET,
     pitch_y, ac_y = fundamental_pitch(row_prof, min_pitch, int(h * 0.25))
     pitch_x, ac_x = fundamental_pitch(col_prof, min_pitch, int(w * 0.25))
 
+    # 砖块是正方形的 → x/y 周期必然接近。差得远说明自相关取歪了，两种都实测过：
+    #  - 取到 2/3 倍谐波：行周期 307 = 3×102，棋盘被切成左上角 5×10（低置信度留档 14 帧里 12 帧）
+    #  - 被"空棋盘 + 天空/马路/UI 边缘"带偏：残局截图给 x23/y94（真值 110/110），砖块切成半块
+    # 先按方形先验把谐波除回基波（除回后列数必须合理，否则留给反推），不行再用棋盘底色反推。
+    fallback = None
+    fx, fy = reconcile_pitches(pitch_x, pitch_y)
+    if (fx, fy) != (pitch_x, pitch_y) and MIN_COLS <= w // fx <= MAX_COLS:
+        if verbose:
+            print(f"x/y 周期不一致（{pitch_x}/{pitch_y}）→ 按方形砖块先验做谐波修正 {fx}/{fy}")
+        pitch_x, pitch_y = fx, fy
+        harmonic = True
+    else:
+        harmonic = False
+
     ylines = refine_lines(row_prof, np.arange(lattice_phase(row_prof, pitch_y), h, pitch_y), pitch_y)
     xlines = refine_lines(col_prof, np.arange(lattice_phase(col_prof, pitch_x), w, pitch_x), pitch_x)
 
-    # 砖块是正方形的 → x/y 周期必然接近。差得远就说明自相关被"空棋盘 + 天空/马路/UI 边缘"
-    # 带偏了（实测残局截图给的是 x23/y94，真值 110/110），这种网格会把砖块切成半块。
-    # 改用棋盘底色 + 残余砖块间距反推 —— 只在这一步兜底，可信的棋盘不受影响。
-    fallback = None
-    if max(pitch_x, pitch_y) > 1.35 * max(1, min(pitch_x, pitch_y)):
+    if not harmonic and max(pitch_x, pitch_y) > 1.35 * max(1, min(pitch_x, pitch_y)):
         lat = estimate_lattice_from_blobs(img)
         if lat is not None:
             if verbose:
