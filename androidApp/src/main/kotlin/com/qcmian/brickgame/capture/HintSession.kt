@@ -421,8 +421,13 @@ class HintSession(
                             .onFailure { Log.w(TAG, "留档失败", it) }
                         if (!bitmap.isRecycled) bitmap.recycle()
                     }
-                } else if (!bitmap.isRecycled) {
-                    bitmap.recycle()
+                } else {
+                    // 定位失败也留档：失败帧以前磁盘上一张都没有，标定挂了只能盲调（见 saveScanFail）
+                    dumpExecutor.execute {
+                        runCatching { LowConfStore.saveScanFail(context, bitmap) }
+                            .onFailure { Log.w(TAG, "失败帧留档失败", it) }
+                        if (!bitmap.isRecycled) bitmap.recycle()
+                    }
                 }
             }
         }

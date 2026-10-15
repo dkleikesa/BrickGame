@@ -29,6 +29,9 @@ object LowConfStore {
     private const val DUMP_DIR = "debug-frames"
     private const val LOW_CONF_DIR = "low-conf"
 
+    /** "没定位到棋盘"的帧留在这里：`debug-frames/scan-fail/`。 */
+    private const val SCAN_FAIL_DIR = "scan-fail"
+
     /** 最多留这么多帧，别把手机存储攒满（手动刷新一次最多一张）。 */
     private const val KEEP = 200
 
@@ -74,6 +77,28 @@ object LowConfStore {
             )
         } catch (e: Throwable) {
             Log.w(TAG, "低置信度帧留档失败", e)
+        }
+    }
+
+    /**
+     * 存一帧"没定位到棋盘"的原图（`debug-frames/scan-fail/`）。
+     *
+     * 为什么要单独留这一份：识别失败以前在磁盘上是**完全看不见**的 —— 只有界面上一句
+     * "未识别到棋盘"，调标定只能靠猜。成功帧有低置信度留档，失败帧一张不落，于是每次
+     * 都是"用户说 50% 失败、手上没有一张失败图"。文件名前缀同 lowconf_ + 时间戳，
+     * 与同刻的 logcat（OpenCvBoardScanner 那条 标定/丢弃 诊断）按时间对上即可定位原因。
+     */
+    fun saveScanFail(context: Context, bitmap: Bitmap) {
+        val dir = ensureDir(context, SCAN_FAIL_DIR) ?: return
+        val stem = "scanfail_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
+        try {
+            File(dir, "$stem.png").outputStream().use {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            trim(dir)
+            Log.i(TAG, "定位失败帧已留档：$stem.png（${dir.absolutePath}）")
+        } catch (e: Throwable) {
+            Log.w(TAG, "定位失败帧留档失败", e)
         }
     }
 
@@ -147,8 +172,8 @@ object LowConfStore {
         return if (dir.isDirectory) dir else null
     }
 
-    private fun ensureDir(context: Context): File? {
-        val dir = File(context.getExternalFilesDir(DUMP_DIR) ?: return null, LOW_CONF_DIR)
+    private fun ensureDir(context: Context, sub: String = LOW_CONF_DIR): File? {
+        val dir = File(context.getExternalFilesDir(DUMP_DIR) ?: return null, sub)
         if (!dir.exists() && !dir.mkdirs()) return null
         return dir
     }
