@@ -123,6 +123,14 @@ fun HintApp() {
                     StatusLine("识别实现", "TFLite · $backend")
                     StatusLine("运行状态", if (ui.running) "提示中（第 ${ui.frames} 帧）" else "已停止")
                     StatusLine(
+                        "自动通关",
+                        when {
+                            ui.auto -> "运行中 · 已消 ${ui.autoSteps} 对"
+                            ui.autoSteps > 0 -> "已停止 · 共消 ${ui.autoSteps} 对"
+                            else -> "未启用"
+                        },
+                    )
+                    StatusLine(
                         "悬浮窗",
                         when (HintUiBus.overlayWindowType) {
                             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY -> "无障碍内置（免授权）"
@@ -183,6 +191,39 @@ fun HintApp() {
                         }
                     },
                 ) { Text(if (ui.running) "停止提示" else if (busy) "连接中…" else "开始提示") }
+            }
+
+            // 自动通关：进游戏前点它，之后由无障碍服务在游戏画面上自己滑。
+            // 停下来只有三条路 —— 通关 / 无解（要洗牌）/ 手势没生效，都会写进下面的报错行。
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                onClick = {
+                    if (ui.auto) {
+                        BrickGameAccessibilityService.stopAuto()
+                        return@Button
+                    }
+                    busy = true
+                    scope.launch {
+                        val started = startAutoWithRetry()
+                        busy = false
+                        // 同"开始提示"：只有系统里就没开过才跳设置页
+                        if (!started && !isAccessibilityServiceEnabled(context)) {
+                            context.startActivity(accessibilitySettingsIntent(context))
+                        }
+                    }
+                },
+            ) { Text(if (ui.auto) "停止自动" else if (busy) "连接中…" else "自动通关") }
+
+            ui.autoMessage?.let { message ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Text(
+                        message,
+                        modifier = Modifier.padding(14.dp),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -290,6 +331,20 @@ private fun shareZip(context: Context, zip: File, frames: Int) {
 private suspend fun startHintingWithRetry(): Boolean {
     for (attempt in 0 until START_TRIES) {
         if (BrickGameAccessibilityService.start()) return true
+        delay(START_RETRY_MS)
+    }
+    return false
+}
+
+/**
+ * 点"自动通关"后的等待。
+ *
+ * 与"开始提示"同一套重试逻辑（服务可能正被系统重新绑定，见 [startHintingWithRetry]）；
+ * 区别是这里走 `startAuto`，它会顺带把会话也开起来。
+ */
+private suspend fun startAutoWithRetry(): Boolean {
+    for (attempt in 0 until START_TRIES) {
+        if (BrickGameAccessibilityService.startAuto()) return true
         delay(START_RETRY_MS)
     }
     return false

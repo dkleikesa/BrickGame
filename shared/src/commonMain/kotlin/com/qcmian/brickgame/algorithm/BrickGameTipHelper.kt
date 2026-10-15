@@ -28,6 +28,16 @@ object BrickGameTipHelper {
     @JvmField
     var BACKGROUND = 0
 
+    /**
+     * 是否打印每一步的消除日志（默认关）。
+     *
+     * [AutoSolver] 一次求解要跑几万到几十万个节点，每个节点都会试落点、每次成功试落点都会走到
+     * [logRemove] —— 一直打就是几十万行 stdout，真机上既刷屏又把求解拖慢一个量级。
+     * 移植自原 Java 版的那行格式没动，只是加了开关（要对照原实现的输出时把它打开）。
+     */
+    @JvmField
+    var logRemovals = false
+
     /** 游戏胜利：网格已清空 */
     const val GAME_SUCCESS = 2
 
@@ -675,8 +685,9 @@ object BrickGameTipHelper {
     private fun isGameSuccess(grid: Array<IntArray>): Boolean =
         grid.all { row -> row.all { it == BACKGROUND } }
 
-    /** 保持与原实现一致的日志输出（from 坐标出现两次）。 */
+    /** 保持与原实现一致的日志输出（from 坐标出现两次）；默认关，见 [logRemovals]。 */
     private fun logRemove(fromRow: Int, fromCol: Int, pairedRow: Int, pairedCol: Int) {
+        if (!logRemovals) return
         println("remove brick:$fromRow,$fromCol->$fromRow,$fromCol->$pairedRow,$pairedCol")
     }
 }

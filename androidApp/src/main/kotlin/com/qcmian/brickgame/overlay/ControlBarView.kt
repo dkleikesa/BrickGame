@@ -18,7 +18,12 @@ import android.view.View
  * 自己画而不是用 Button：无障碍服务的 Context 不是 Activity，拿不到 Activity 主题，
  * 用平台控件容易踩主题解析的坑；纯 onDraw + onTouchEvent 反倒更可控。
  *
- * 内容从左到右：提示文字（两行）→ 两个调试开关（网格 / 类别号，按状态显形的 toggle）→ 刷新 → 关闭。
+ * 布局分两行：
+ *  - 上行：提示文字 + 状态小字（占满整宽，不再被按钮挤）；
+ *  - 下行：自动通关开关 → 两个调试开关（网格 / 类别号）→ 刷新 → 关闭。
+ *
+ * 为什么拆成两行：加上「自动」以后这一排控件在窄屏（360dp 甚至 320dp）上会把提示文字
+ * 挤到只剩几十 dp。控件单独一行之后，文字与按钮互不抢占。
  */
 class ControlBarView(context: Context) : View(context) {
 
@@ -44,6 +49,9 @@ class ControlBarView(context: Context) : View(context) {
     var onToggleGrid: ((Boolean) -> Unit)? = null
     var onToggleLabels: ((Boolean) -> Unit)? = null
 
+    /** 自动通关开关：点一下把期望的新状态回调出去（true = 开始自动）。 */
+    var onToggleAuto: ((Boolean) -> Unit)? = null
+
     /** 两个调试开关的显示状态（写进去就重绘）。 */
     var showGrid: Boolean = false
         set(value) {
@@ -57,18 +65,35 @@ class ControlBarView(context: Context) : View(context) {
             invalidate()
         }
 
+    /**
+     * "自动"的显示状态。
+     *
+     * **由会话回写**，不是"点了就翻"：自动可能自己停下来（通关 / 无解 / 手势没生效），
+     * 只看按钮的本地状态会跟真实运行对不上。
+     */
+    var autoOn: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
 
-    // 高度取原来的一半（72dp → 38dp）：栏里的两行字与按钮都按新高度重排过，
-    // 8 + 13 + 2 + 10 + 8 ≈ 41 的账算下来 38dp 装得下，别只改高度不改字号。
-    private val heightPx = dp(38f).toInt()
+    // 两行布局：6（上留白）+ 13（提示行）+ 2 + 10（状态行）+ 4 + 26（控件行）+ 6（下留白）≈ 67。
+    // 只改高度不改字号的话，控件行会被切掉一半。
+    private val heightPx = dp(68f).toInt()
     private val padding = dp(8f)
     private val topPadding = dp(6f)
     private val lineGap = dp(2f)
+    private val rowGap = dp(4f)
     private val buttonWidth = dp(50f)
     private val buttonHeight = dp(26f)
     private val buttonGap = dp(5f)
+
+    /** 控件行的上沿（与 onSizeChanged / onDraw 共用同一套算式，改一处就得改两处）。 */
+    private val controlsTop: Float
+        get() = topPadding + hintPaint.textSize + lineGap + statusPaint.textSize + rowGap
 
     // 开关：一条小轨道 + 滑块 + 右边标签（自己画，见 drawToggle）
     private val trackWidth = dp(26f)
@@ -119,13 +144,15 @@ class ControlBarView(context: Context) : View(context) {
     private val closeRect = RectF()
     private val gridRect = RectF()
     private val labelsRect = RectF()
+    private val autoRect = RectF()
     private val rect = RectF()
 
-    /** 两个开关的宽度：轨道 + 标题文字按实际宽度算，窄屏上别把标签挤掉。 */
+    /** 三个开关的宽度：轨道 + 标题文字按实际宽度算，窄屏上别把标签挤掉。 */
     private var gridToggleWidth = 0f
     private var labelsToggleWidth = 0f
+    private var autoToggleWidth = 0f
 
-    /** 当前按下的控件：[REFRESH]/[CLOSE]/[GRID]/[LABELS]；-1 = 没有。 */
+    /** 当前按下的控件：[REFRESH]/[CLOSE]/[GRID]/[LABELS]/[AUTO]；-1 = 没有。 */
     private var pressed = -1
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -135,14 +162,31 @@ class ControlBarView(context: Context) : View(context) {
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        val top = topPadding
+        val top = controlsTop
         val bottom = top + buttonHeight
         gridToggleWidth = trackWidth + trackGap + toggleText.measureText(GRID_LABEL)
         labelsToggleWidth = trackWidth + trackGap + toggleText.measureText(LABELS_LABEL)
-        closeRect.set(width - padding - buttonWidth, top, width - padding, bottom)
-        refreshRect.set(closeRect.left - buttonGap - buttonWidth, top, closeRect.left - buttonGap, bottom)
-        labelsRect.set(refreshRect.left - buttonGap - labelsToggleWidth, top, refreshRect.left - buttonGap, bottom)
-        gridRect.set(labelsRect.left - buttonGap - gridToggleWidth, top, labelsRect.left - buttonGap, bottom)
+        autoToggleWidth = trackWidth + trackGap + toggleText.measureText(AUTO_LABEL)
+
+        // 从右往左排：关闭 ← 刷新 ← 自动 ← 类别号 ← 网格
+        val fixed = buttonWidth * 2 + autoToggleWidth + labelsToggleWidth + gridToggleWidth
+        val available = w - padding * 2
+        val gap = if (fixed + buttonGap * 4 <= available) {
+            buttonGap
+        } else {
+            // 窄屏（320dp）兜底：压缩间距也要把这排塞下，不能叠在一起
+            ((available - fixed) / 4f).coerceIn(dp(2f), buttonGap)
+        }
+        var right = w - padding
+        closeRect.set(right - buttonWidth, top, right, bottom)
+        right -= buttonWidth + gap
+        refreshRect.set(right - buttonWidth, top, right, bottom)
+        right -= buttonWidth + gap
+        autoRect.set(right - autoToggleWidth, top, right, bottom)
+        right -= autoToggleWidth + gap
+        labelsRect.set(right - labelsToggleWidth, top, right, bottom)
+        right -= labelsToggleWidth + gap
+        gridRect.set(right - gridToggleWidth, top, right, bottom)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -150,8 +194,8 @@ class ControlBarView(context: Context) : View(context) {
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), background)
         canvas.drawRect(0f, 0f, width.toFloat(), dp(1f), divider)
 
-        val textRight = gridRect.left - buttonGap
-        val textWidth = (textRight - padding).coerceAtLeast(dp(40f))
+        // 控件独占下行之后，两行文字可以吃满整宽（不会再被按钮盖住半截）
+        val textWidth = (width - padding * 2).coerceAtLeast(dp(40f))
 
         val hint = state?.hintText.orEmpty()
         canvas.drawText(
@@ -161,7 +205,6 @@ class ControlBarView(context: Context) : View(context) {
             hintPaint,
         )
 
-        // 状态行也按提示行的宽度截断：按钮是画在后面的，写满整行会被按钮盖住半截
         val status = state?.message ?: state?.statusText.orEmpty()
         statusPaint.color = if (state?.message != null) 0xFFFF6B6B.toInt() else 0xFF9AA4AE.toInt()
         canvas.drawText(
@@ -171,6 +214,7 @@ class ControlBarView(context: Context) : View(context) {
             statusPaint,
         )
 
+        drawToggle(canvas, autoRect, AUTO_LABEL, autoOn, pressed == AUTO)
         drawToggle(canvas, gridRect, GRID_LABEL, showGrid, pressed == GRID)
         drawToggle(canvas, labelsRect, LABELS_LABEL, showLabels, pressed == LABELS)
         drawButton(canvas, refreshRect, "刷新", pressed == REFRESH, false)
@@ -250,7 +294,10 @@ class ControlBarView(context: Context) : View(context) {
                     when (hit) {
                         REFRESH -> onRefresh?.invoke()
                         CLOSE -> onClose?.invoke()
-                        // 立刻翻状态并回调：上层拿这个信号即时重画提示层，不等下一次刷新
+                        // 自动**不在这里翻本地状态**：它会自己停下（通关/无解/手势没生效），
+                        // 本地翻完就没机会被纠正了。只报"期望的新状态"，由会话回写 autoOn。
+                        AUTO -> onToggleAuto?.invoke(!autoOn)
+                        // 这两个是纯显示开关，立刻翻 + 回调，上层拿信号即时重画提示层
                         GRID -> {
                             showGrid = !showGrid
                             onToggleGrid?.invoke(showGrid)
@@ -279,6 +326,7 @@ class ControlBarView(context: Context) : View(context) {
     private fun hitTest(x: Float, y: Float): Int = when {
         refreshRect.contains(x, y) -> REFRESH
         closeRect.contains(x, y) -> CLOSE
+        autoRect.contains(x, y) -> AUTO
         gridRect.contains(x, y) -> GRID
         labelsRect.contains(x, y) -> LABELS
         else -> NONE
@@ -290,8 +338,10 @@ class ControlBarView(context: Context) : View(context) {
         const val CLOSE = 1
         const val GRID = 2
         const val LABELS = 3
+        const val AUTO = 4
 
         const val GRID_LABEL = "网格"
         const val LABELS_LABEL = "类别号"
+        const val AUTO_LABEL = "自动"
     }
 }

@@ -1,12 +1,14 @@
 package com.qcmian.brickgame.capture
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.graphics.Path
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -29,12 +31,15 @@ import java.util.concurrent.Executor
  *
  * 悬浮窗层级在锁屏之上，所以这里还盯着亮灭屏：[onScreenOff] 收窗口、解锁再挂回来。
  */
-class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider {
+class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider, GestureExecutor {
 
     private var overlay: OverlayController? = null
     private var session: HintSession? = null
 
     private val mainExecutorRef = Executor { runnable -> Handler(Looper.getMainLooper()).post(runnable) }
+
+    /** `dispatchGesture` 只收 Handler（`takeScreenshot` 收的是 Executor），单独留一个主线程 Handler。 */
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
      * 锁屏期间把悬浮窗收掉。
@@ -68,7 +73,7 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
             Log.w(TAG, "悬浮窗挂不上：无障碍类型被拒且没有『显示在其他应用上层』授权")
         }
         overlay = controller
-        session = HintSession(this, this, controller) { variant -> buildClassifier(variant) }
+        session = HintSession(this, this, this, controller) { variant -> buildClassifier(variant) }
         registerLockReceiver()
         active = this
         Log.i(TAG, "无障碍服务已连接")
@@ -166,6 +171,83 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
     }
 
     /**
+     * 直消：在**同一条手势**里先后点两块砖。
+     *
+     * 为什么必须点两次：一块砖可能同时和左右（或上下）两块同款砖同线且中间无砖，
+     * 只点它一下游戏不知道要消哪一对。第一下选中、第二下指定，才没有歧义。
+     * 唯一配对时也照样点两下 —— 第二下落在已经是空位的那格上，没有副作用。
+     */
+    override fun tapPair(
+        x1: Float, y1: Float, x2: Float, y2: Float,
+        tapMs: Long, gapMs: Long, onDone: (Boolean) -> Unit,
+    ) {
+        val first = Path().apply { moveTo(x1, y1) }
+        val second = Path().apply { moveTo(x2, y2) }
+        val hold = tapMs.coerceAtLeast(1L)
+        val gesture = GestureDescription.Builder()
+            // 一条手势里的两段互不重叠的 stroke：第二段的起点落在第一段结束 + 间隔之后。
+            // 分成两次 dispatch 也行，但那样回调要串两层、看门狗也要两份，没必要。
+            .addStroke(GestureDescription.StrokeDescription(first, 0L, hold))
+            .addStroke(GestureDescription.StrokeDescription(second, hold + gapMs.coerceAtLeast(1L), hold))
+            .build()
+        dispatch(gesture, "点击($x1,$y1)+($x2,$y2)", onDone)
+    }
+
+    /**
+     * 自动运行的手势出口：`dispatchGesture` 合成一次滑动。
+     *
+     * 用于"两块没有对齐"的情况：把一块砖滑到落点，靠游戏自己判定对齐后消除。
+     */
+    override fun swipe(
+        x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long, onDone: (Boolean) -> Unit,
+    ) {
+        val path = Path().apply {
+            moveTo(x1, y1)
+            lineTo(x2, y2)
+        }
+        val gesture = GestureDescription.Builder()
+            // willContinue=false：一次独立的手势，后面还要接着发下一次，别被合成一条长滑
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(1L)))
+            .build()
+        dispatch(gesture, "滑动($x1,$y1 → $x2,$y2)", onDone)
+    }
+
+    /**
+     * 一次独立手势的公共出口。
+     *
+     * 几个必须踩对的点：
+     *  - 需要无障碍配置里声明 `android:canPerformGestures="true"`（见 res/xml/brickgame_accessibility.xml），
+     *    没声明的话 [dispatchGesture] 直接返回 false；
+     *  - 坐标必须是**屏幕绝对坐标**，调用方给的就是截图坐标（全屏截图，1:1 对齐）；
+     *  - 回调走 [mainHandler]：`dispatchGesture` 的回调线程不定，而回调会去改悬浮窗，
+     *    统一挪回主线程。回调**可能永远不来**（游戏抢焦点、系统手势冲突），
+     *    所以自动运行的循环另挂了一道看门狗，别只指望这个回调（见 `HintSession.playAction`）。
+     */
+    private fun dispatch(gesture: GestureDescription, what: String, onDone: (Boolean) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            onDone(false)
+            return
+        }
+        val delivered = try {
+            dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(description: GestureDescription?) = onDone(true)
+                    override fun onCancelled(description: GestureDescription?) = onDone(false)
+                },
+                mainHandler,
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "手势派发异常", t)
+            false
+        }
+        if (!delivered) {
+            Log.w(TAG, "手势派发被拒：$what")
+            onDone(false)
+        }
+    }
+
+    /**
      * 加载 assets 里的身份模型（[variant] 决定哪一套）。
      *
      * 只在 worker 线程真正用到时才构造（见 [HintSession.acquireClassifier]），这里不挡主线程。
@@ -191,6 +273,26 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
 
         fun stop() {
             active?.session?.stop()
+        }
+
+        /**
+         * 开始自动通关。
+         *
+         * @return 服务没连上时返回 false（界面据此提示去设置里开启）。
+         */
+        fun startAuto(): Boolean {
+            val service = active ?: return false
+            service.session?.startAuto()
+            return true
+        }
+
+        /**
+         * 停止自动通关，回到手动提示。
+         *
+         * 只停"自动"这一层：会话与悬浮窗留着，用户还能继续手动点「刷新」。
+         */
+        fun stopAuto() {
+            active?.session?.stopAuto()
         }
 
         /**

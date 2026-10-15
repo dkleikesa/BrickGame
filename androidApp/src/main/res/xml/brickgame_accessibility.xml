@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  只需要"截屏"这一项能力：
+  需要两项能力：
   - canTakeScreenshot（API 30+）：AccessibilityService#takeScreenshot 的开关；
+  - canPerformGestures（API 24+）：AccessibilityService#dispatchGesture 的开关 ——
+    自动通关要靠它把"滑动某两块砖"合成手势发出去；**没声明的话 dispatchGesture 直接返回 false**。
   - canRetrieveWindowContent=false：不读窗口节点树，权限面尽量小；
   - 事件类型只订阅窗口状态变化：够触发一次重新分析，又不会因为每帧事件把 CPU 拉满。
 -->
@@ -9,6 +11,7 @@
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
     android:canRetrieveWindowContent="false"
     android:canTakeScreenshot="true"
     android:description="@string/accessibility_service_description"

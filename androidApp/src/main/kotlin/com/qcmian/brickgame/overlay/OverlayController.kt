@@ -76,10 +76,27 @@ class OverlayController(context: Context) {
             barView.onToggleLabels = value
         }
 
+    /** 自动通关开关：点一下回调期望的新状态（true = 开始自动）。 */
+    var onToggleAuto: ((Boolean) -> Unit)?
+        get() = barView.onToggleAuto
+        set(value) {
+            barView.onToggleAuto = value
+        }
+
     /** 把两个调试开关的当前状态同步到控制条（会话开始时对齐一次，之后由控制条自己翻）。 */
     fun setBarToggles(grid: Boolean, labels: Boolean) {
         barView.showGrid = grid
         barView.showLabels = labels
+    }
+
+    /**
+     * 把"自动"开关同步到控制条。
+     *
+     * 必须由会话回写：自动可能**自己停下来**（通关 / 无解 / 手势没生效），
+     * 光靠用户点按钮的状态会跟真实运行状态对不上。
+     */
+    fun setBarAuto(on: Boolean) {
+        barView.autoOn = on
     }
 
     /** 提示层 + 控制条一起挂。@return 是否挂上。 */
@@ -167,6 +184,9 @@ class OverlayController(context: Context) {
      * 可见性由调用方管：刷新一开始就是 `false`，算出新结果才 `true`
      * （见 `HintSession.captureFrame` / `handle`）—— 分析那几秒屏幕上什么都不画，
      * 免得把上一帧的过期提示当成新结果看。
+     *
+     * **注意这是异步生效的**：`setVisibility(GONE)` 只是排了一次重绘，当帧屏幕上还留着提示框。
+     * 调用方必须等一两帧再截屏，否则会把提示框一起截进去（见 `HintSession.HINT_HIDE_SETTLE_MS`）。
      */
     fun setHintLayerVisible(visible: Boolean) {
         hintView.visibility = if (visible) View.VISIBLE else View.GONE
@@ -257,7 +277,10 @@ class OverlayController(context: Context) {
      *
      * 两个关键点，少一个都会把"上滑回桌面/多任务"吃掉（真机踩过）：
      *  1. 不加 `FLAG_LAYOUT_NO_LIMITS`，并且视图高度只算内容；
-     *  2. 用 [navBarHeight] 把窗口整体上移，正好停在导航栏/手势条上沿。
+     *  2. 用 [navBarHeight] 把窗口整体上移，停在导航栏/手势条上沿。
+     *
+     * [BAR_DOWN_OFFSET_DP] 是让控制条比"上沿"再**往下压**一点（视觉上更贴底），
+     * 会略侵入导航栏区域；数值别调太大，否则会压到手势条、影响上滑。
      */
     private fun barParams(type: Int): WindowManager.LayoutParams =
         WindowManager.LayoutParams(
@@ -268,7 +291,8 @@ class OverlayController(context: Context) {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.START
-            y = navBarHeight          // Gravity.BOTTOM 下 y 是"离底边多远"
+            // Gravity.BOTTOM 下 y 是"离底边多远"：越小越靠下，减掉偏移即整体下移
+            y = (navBarHeight - barDownOffset).coerceAtLeast(0)
         }
 
     private val navBarHeight: Int by lazy {
@@ -276,7 +300,15 @@ class OverlayController(context: Context) {
         if (id > 0) context.resources.getDimensionPixelSize(id) else 0
     }
 
+    /** 控制条自导航栏上沿额外下移的距离（px）。 */
+    private val barDownOffset: Int by lazy {
+        (BAR_DOWN_OFFSET_DP * context.resources.displayMetrics.density).toInt()
+    }
+
     private companion object {
         const val TAG = "OverlayController"
+
+        /** 控制条自导航栏上沿再往下压的距离（dp）。 */
+        const val BAR_DOWN_OFFSET_DP = 10f
     }
 }

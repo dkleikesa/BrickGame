@@ -10,11 +10,17 @@ import java.io.File
  * 运行状态快照。
  *
  * 一帧的提示本体、帧信息、报错都只显示在**悬浮条**上（见 `overlay/ControlBarView`），
- * 界面这边只留"跑没跑、第几帧"。
+ * 界面这边只留"跑没跑、第几帧、自动跑到哪一步"。
  */
 data class HintUiState(
     val running: Boolean = false,
     val frames: Int = 0,
+    /** 自动通关是否开着。 */
+    val auto: Boolean = false,
+    /** 自动运行已经成功消掉的**对**数（一步一对）。 */
+    val autoSteps: Int = 0,
+    /** 自动运行停了的原因（通关 / 无解 / 卡住 / 手势没生效）；非空 = 已停。 */
+    val autoMessage: String? = null,
 )
 
 /**
