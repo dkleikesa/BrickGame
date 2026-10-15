@@ -9,11 +9,15 @@ import android.os.SystemClock
 import android.util.Log
 import com.qcmian.brickgame.HintUiBus
 import com.qcmian.brickgame.HintUiState
+import com.qcmian.brickgame.algorithm.AutoSolver
+import com.qcmian.brickgame.algorithm.BrickGameTipHelper
 import com.qcmian.brickgame.ml.ModelChoice
 import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.overlay.ControlBarView
 import com.qcmian.brickgame.overlay.HintOverlayView
 import com.qcmian.brickgame.overlay.OverlayController
+import com.qcmian.brickgame.vision.CellPoint
+import com.qcmian.brickgame.vision.HintEngine
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.concurrent.ExecutorService
@@ -28,11 +32,23 @@ fun interface ScreenshotProvider {
 }
 
 /**
- * 提示会话：**完全手动**的一帧一帧。
+ * 提示会话：默认**手动**的一帧一帧，可切到**自动通关**闭环。
  *
- * 按"开始提示"跑一帧，之后只有点控制条上的「刷新」才再跑一帧 —— 不再自动续帧。
- * 为什么不做自动轮询：一帧要好几秒（标定 + 模型推理，真机实测 7~8s），自动跑就是一直占着
- * CPU/GPU、还容易在画面变化时给出过期提示；手动触发反而更可控。
+ * 手动模式：按"开始提示"跑一帧，之后只有点控制条上的「刷新」才再跑一帧 —— 不自动续帧。
+ * 为什么不做自动轮询：一帧要好几秒（标定 + 模型推理，真机实测 7~8s），一直跑就是占着
+ * CPU/GPU、还容易在画面变化时给出过期提示。
+ *
+ * 自动模式（[startAuto]）：**先整盘算一次，再一步一步点**，不是每帧重算。
+ *
+ * 每帧的 [handle] 结尾交给 [autoAdvance]：先用判空复检上一步该消的两格有没有真的消掉，
+ * 没消掉就把计划作废重算；有计划就直接走下一步（不搜索）；计划走完才重新求一次整盘。
+ * 逐格复检用的是"空没空"，比图标分类可靠得多，所以识别抖一帧不会把整局带崩。
+ *
+ * 四种终止都有明确报错，不会静默死循环：
+ *  - 盘面清空 → "已通关"；
+ *  - 穷举证明无解 → "本关无解，要洗牌"；
+ *  - 连续 [BAD_CHECK_LIMIT] 次复检不符 → "滑动没生效"；
+ *  - 重新求解超过 [PLAN_ROUND_LIMIT] 次 → "盘面一直对不上"。
  *
  * 线程分工：
  *  - 主线程：发起截屏（API 要求）、更新悬浮窗；
@@ -49,6 +65,8 @@ fun interface ScreenshotProvider {
 class HintSession(
     private val context: Context,
     private val screenshots: ScreenshotProvider,
+    /** 自动运行"出手"用的手势通道（无障碍服务实现）。 */
+    private val gestures: GestureExecutor,
     private val overlay: OverlayController,
     /** 按变体造一份识别器。**只在 worker 线程调用**（见 [acquireClassifier]）。 */
     private val classifierProvider: (ModelVariant) -> TileClassifier,
@@ -115,6 +133,58 @@ class HintSession(
     private var frames = 0
 
     /**
+     * 自动通关开关。
+     *
+     * 自动与手动共用同一条"截图 → 识别 → 展示"链路，差别只在 [handle] 结尾交给 [autoAdvance]。
+     */
+    private val auto = AtomicBoolean(false)
+
+    /** 自动运行已确认消掉的**对数**（一步一对）。 */
+    private var autoSteps = 0
+
+    /**
+     * **整盘计划**：一次 [AutoSolver.solve] 算出来的完整解，之后逐步执行，不再每步重算。
+     *
+     * 为什么必须"一次算完再逐步点"（第一版是每帧重算，实测很快就失败）：
+     *  - 每帧重算要连着成功 70 次，识别只要抖一帧（同类判成不同类）就会得到"无解"，
+     *    整局就此中断 —— 失败概率随步数线性叠加；
+     *  - 每帧重算真机上就是 70 次搜索，又慢又费电。
+     * 于是改成"算一次、执行一整条"，只在**观察到盘面跟计划对不上**时才重新求解。
+     */
+    private var plan: List<AutoSolver.Step> = emptyList()
+
+    /** 当前执行到 [plan] 的第几步。 */
+    private var planIndex = 0
+
+    /**
+     * 上一步**配对砖所在的格子**，下一帧拿它复检这一步有没有真的落地。
+     *
+     * 只看这一格的空没空，理由：
+     *  - 判空（格子平坦度）远比图标分类可靠，整盘逐格比对会被识别噪声打爆；
+     *  - 这一格在滑动前**必定是占着的**，它变空只可能是"这对砖被消掉了" ——
+     *    既不会误判成成功，也不会因为落点位置跟模型有偏差而误判成失败。
+     */
+    private var pendingPair: CellPoint? = null
+
+    /** 连续几次复检不符（上一步没落地）。 */
+    private var badChecks = 0
+
+    /** 一共重新求了几次解。它一直涨说明盘面/识别在飘，得停下来报错。 */
+    private var planRounds = 0
+
+    /** 自动模式下连续几帧"根本没定位到棋盘"。 */
+    private var missStreak = 0
+
+    /**
+     * 上一次手势是否还没收到回调。
+     *
+     * `dispatchGesture` 的回调**可能永远不来**（游戏抢焦点、系统手势冲突），
+     * 只等回调的话闭环会永久停住。所以派发的同时挂一个看门狗：回调先到就按回调走，
+     * 看门狗先到就按"没收到"继续往下走 —— 用 CAS 保证两条路只走一条。
+     */
+    private val gesturePending = AtomicBoolean(false)
+
+    /**
      * 上一帧已经画出去的调试图层。
      *
      * 控制条上的两个调试开关（网格 / 类别号）是**即时生效**的：点一下直接拿这一帧重画，
@@ -125,6 +195,7 @@ class HintSession(
     init {
         overlay.onRefresh = { refreshNow() }
         overlay.onClose = { stop() }
+        overlay.onToggleAuto = { on -> if (on) startAuto() else stopAuto() }
         overlay.onToggleGrid = { on ->
             HintUiBus.showGrid = on
             redrawHints()
@@ -135,26 +206,66 @@ class HintSession(
         }
     }
 
-    /** 开始提示：挂悬浮窗 + 立刻跑一帧，之后等用户点「刷新」。 */
+    /** 开始提示：挂悬浮窗 + 立刻跑一帧。手动模式下之后等用户点「刷新」。 */
     fun start() {
         if (!running.compareAndSet(false, true)) return
         overlay.show()
         HintUiBus.overlayWindowType = overlay.activeType
-        HintUiBus.state = HintUiBus.state.copy(running = true)
+        // 顺手把上一次自动留下的报错清掉：重新开一次会话不该还挂着旧错误
+        HintUiBus.state = HintUiBus.state.copy(running = true, autoMessage = null)
         // 控制条上的开关跟着 App 界面里的开关走（两处共用 HintUiBus 这一个状态）
         overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
+        overlay.setBarAuto(auto.get())
         refreshNow()
     }
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
+        auto.set(false)
         active.set(false)
         capturing.set(false)
         main.removeCallbacks(captureTimeout)
+        main.removeCallbacks(autoTick)
         generation.incrementAndGet()          // 让还在跑的那一帧的结果失效
         overlay.hide()
+        overlay.setBarAuto(false)
         lastFrame = null
-        HintUiBus.state = HintUiBus.state.copy(running = false)
+        HintUiBus.state = HintUiBus.state.copy(running = false, auto = false)
+    }
+
+    /**
+     * 开始自动通关：清空进度，跑第一帧，之后由 [handle] → [autoAdvance] → 手势 → 下一帧闭环推进。
+     *
+     * 注意 [auto] **必须在 [start] 之前置位**：`start()` 会立刻跑一帧，那一帧的 [handle]
+     * 结尾要看到 auto=true 才会往下走，反过来的话第一帧就白跑了。
+     */
+    fun startAuto() {
+        if (!auto.getAndSet(true)) {
+            autoSteps = 0
+            plan = emptyList()
+            planIndex = 0
+            pendingPair = null
+            badChecks = 0
+            planRounds = 0
+            missStreak = 0
+            HintUiBus.state = HintUiBus.state.copy(auto = true, autoSteps = 0, autoMessage = null)
+            overlay.setBarAuto(true)
+        }
+        if (!running.get()) {
+            start()
+        } else if (!capturing.get()) {
+            refreshNow()
+        }
+        updateBar("自动：正在识别盘面…", "等待第一帧")
+    }
+
+    /** 停止自动，回到手动提示（会话与悬浮窗都留着）。 */
+    fun stopAuto() {
+        if (!auto.getAndSet(false)) return
+        main.removeCallbacks(autoTick)
+        overlay.setBarAuto(false)
+        HintUiBus.state = HintUiBus.state.copy(auto = false)
+        updateBar("已停止自动", "已消 $autoSteps 对 · 点「刷新」继续手动")
     }
 
     /**
@@ -169,7 +280,12 @@ class HintSession(
             active.set(false)
             return
         }
-        updateBar("正在分析…", "")
+        // 一帧要好几秒（标定 + 推理），这段时间用户只能看这条状态行，自动模式下要说清在干什么
+        if (auto.get()) {
+            updateBar("自动：正在识别盘面…", "已消 $autoSteps 对")
+        } else {
+            updateBar("正在分析…", "")
+        }
         captureFrame()
     }
 
@@ -233,14 +349,27 @@ class HintSession(
         if (!active.get()) return
         if (!capturing.compareAndSet(false, true)) return
         val gen = generation.get()
-        main.removeCallbacks(captureTimeout)
-        main.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
         // 刷新一开始就把提示层收掉，直到算出新结果才放回来：
         //  1. 截图必须干净：上一帧画在屏幕上的提示框会污染本次截图（强边缘带偏标定、
-        //     50% 红色改变砖块颜色）；
+        //     50% 红色改变砖块颜色），**而且低置信度留档存的就是这张图** —— 红框烤进去，
+        //     事后拿它补标注就把提示框一起训进去了；
         //  2. 分析要好几秒，期间挂着的是**上一帧的旧提示**，玩家看着就是"提示不对"。
         // 只藏提示层，控制条留着（用户要靠它点「刷新」）。
         overlay.setHintLayerVisible(false)
+        // 关键时序：改可见性只是**排了一次重绘**，当帧的显示内容里还留着上一帧画上去的提示框。
+        // 所以必须等它真的从画面上消失再截 —— 否则截到的就是"带着红框的那一帧"。
+        main.postDelayed({ beginCapture(gen) }, HINT_HIDE_SETTLE_MS)
+    }
+
+    /** 提示层已经藏好之后才真正发起截屏（时序原因见 [captureFrame]）。 */
+    private fun beginCapture(gen: Int) {
+        // 等待期间会话被停掉/被新一代取代：这张图不要了，把在飞标记放掉
+        if (!active.get() || gen != generation.get()) {
+            capturing.set(false)
+            return
+        }
+        main.removeCallbacks(captureTimeout)
+        main.postDelayed(captureTimeout, CAPTURE_TIMEOUT_MS)
         frameStartMs = SystemClock.elapsedRealtime()
         screenshots.capture { bitmap, reason ->
             captureMs = SystemClock.elapsedRealtime() - frameStartMs
@@ -321,8 +450,19 @@ class HintSession(
         if (result == null) {
             val message = "定位失败：没找到成排的格子（确认目标游戏是全屏、截图没有黑边）"
             updateBar("未识别到棋盘", "", message)
+            // 自动模式下这一帧不算数：连续几次都定位不到（多半是切走了应用/游戏不在前台）就停，
+            // 否则会一直空转。定位到之后下面会把计数清零。
+            if (auto.get()) {
+                missStreak++
+                if (missStreak >= MISS_LIMIT) {
+                    finishAuto("连续 $MISS_LIMIT 帧没识别到棋盘：$message")
+                } else {
+                    main.postDelayed(autoTick, STEP_SETTLE_MS)
+                }
+            }
             return
         }
+        missStreak = 0
         frames++
 
         val scan = result.scan
@@ -338,7 +478,9 @@ class HintSession(
             }
             else -> "没有可消除的一对（多半是识别把同类判成了不同类）"
         }
-        HintUiBus.state = HintUiState(running = running.get(), frames = frames)
+        // copy 而不是新建：自动那三个字段（auto/autoSteps/autoMessage）也要跟着走，
+        // 每帧 `HintUiState(...)` 会把它们冲回默认值，界面上"自动通关"就永远显示未启用。
+        HintUiBus.state = HintUiBus.state.copy(running = running.get(), frames = frames)
 
         val frame = HintOverlayView.Frame(
             scan = scan,
@@ -356,10 +498,14 @@ class HintSession(
         // 状态栏报**端到端**（点刷新 → 看到提示，含截屏），那才是用户感知的那个数；
         // 括号里补上识别段，换模型时看它。
         val totalMs = SystemClock.elapsedRealtime() - frameStartMs
-        updateBar(
-            hintText,
-            "${result.modelLabel} · 第 $frames 帧 · 端到端 ${totalMs}ms（识别 ${result.classifyMs}）",
-        )
+        // 自动模式下这两行归 [autoAdvance] 管（识别中 / 求解中 / 第 k/N 步），
+        // 这里再写一遍只会被同帧的下一刻覆盖，干脆不写；帧信息照旧进日志。
+        if (!auto.get()) {
+            updateBar(
+                hintText,
+                "${result.modelLabel} · 第 $frames 帧 · 端到端 ${totalMs}ms（识别 ${result.classifyMs}）",
+            )
+        }
 
         // 每帧一条：刷新是用户手动点的，一帧最多一行，不会刷屏。
         // 分段耗时写在里面 —— 线上"一帧十秒"这类问题只能靠这一行定位（见 Result.timingText）。
@@ -373,7 +519,230 @@ class HintSession(
                 " | 截屏 ${captureMs}ms " + result.timingText() + " | 端到端 ${totalMs}ms",
         )
 
+        // 展示做完了，自动模式接着走计划：复检上一步 →（有计划就）点下一步 →（没计划才）求解
+        if (auto.get()) autoAdvance(result)
     }
+
+    // ------------------------------------------------------------------
+    // 自动通关闭环
+    // ------------------------------------------------------------------
+
+    /**
+     * 一帧的自动决策：**先复检上一步，再按计划走下一步；只有没计划时才搜索。**
+     *
+     * 一盘只算一次，之后每帧只有一次"截图 + 识别"的开销，不再有搜索：
+     *  1. 盘面清空 → 通关收工；
+     *  2. 复检上一步的**配对砖那一格**是否真的空了 —— 空了就把计划向后推一格，
+     *     没空说明手势没生效，作废计划重算（连着几次都不符就报错停）；
+     *  3. 计划里还有步子 → 直接走下一步（不搜索）；
+     *  4. 计划走完 / 被作废 → 才求一次整盘。
+     */
+    private fun autoAdvance(result: HintPipeline.Result) {
+        val state = result.state
+
+        if (HintEngine.isCleared(state)) {
+            finishAuto("已通关：盘面清空")
+            return
+        }
+
+        // 1) 复检上一步：配对砖那一格空了吗
+        pendingPair?.let { pair ->
+            pendingPair = null
+            if (state.labels[pair.row * state.cols + pair.col] == 0) {
+                badChecks = 0
+                autoSteps++
+                planIndex++
+                HintUiBus.state = HintUiBus.state.copy(autoSteps = autoSteps)
+            } else {
+                // 这一步没落地：整条计划作废，重算（连续几次都不行就报错停）
+                badChecks++
+                plan = emptyList()
+                planIndex = 0
+                if (badChecks >= BAD_CHECK_LIMIT) {
+                    finishAuto("连续 $BAD_CHECK_LIMIT 次复检不符：滑动没生效（手势被吞，或落点不对）")
+                    return
+                }
+            }
+        }
+
+        // 2) 有计划就照着走，不搜索
+        if (planIndex < plan.size) {
+            playStep(result, plan[planIndex])
+            return
+        }
+
+        // 3) 没计划（首次 / 走完 / 被作废）→ 求一次整盘
+        if (planRounds >= PLAN_ROUND_LIMIT) {
+            finishAuto("重新求解 $PLAN_ROUND_LIMIT 次仍没走完：盘面或识别一直对不上")
+            return
+        }
+        planRounds++
+        solveAndPlan(result)
+    }
+
+    /** 求一次整盘，成功就把它当成后续要执行的计划；无解/超预算各有明确出场。 */
+    private fun solveAndPlan(result: HintPipeline.Result) {
+        val grid = result.state.asGrid()
+        val gen = generation.get()
+        updateBar("自动：求解中…（这一步可能几秒）", "已消 $autoSteps 对 · 剩 ${countBricks(result.state)} 块")
+
+        worker.post {
+            // 节点预算拦不住"单次尝试就是慢"的病态盘，再压一道挂钟上限
+            val deadline = SystemClock.elapsedRealtime() + SOLVE_TIME_BUDGET_MS
+            val outcome = AutoSolver.solve(grid, SOLVE_CONFIG) {
+                SystemClock.elapsedRealtime() > deadline
+            }
+            main.post {
+                if (gen != generation.get() || !auto.get()) return@post
+                when (outcome) {
+                    is AutoSolver.Outcome.Solved -> {
+                        if (outcome.steps.isEmpty()) {
+                            finishAuto("已通关：盘面清空")
+                            return@post
+                        }
+                        plan = outcome.steps
+                        planIndex = 0
+                        Log.i(TAG, "自动计划就绪：${plan.size} 步（第 $planRounds 次求解）")
+                        // 先把"一共多少步"亮出来再动手：不给这一下停顿的话，
+                        // 紧接着的 [playStep] 会把它覆盖成"第 1/N 步"，用户根本看不到总数。
+                        updateBar(
+                            "自动：求解完成，共 ${plan.size} 步",
+                            "已消 $autoSteps 对 · 剩 ${countBricks(result.state)} 块",
+                        )
+                        main.postDelayed({
+                            if (gen == generation.get() && auto.get() && planIndex < plan.size) {
+                                playStep(result, plan[planIndex])
+                            }
+                        }, PLAN_ANNOUNCE_MS)
+                    }
+
+                    AutoSolver.Outcome.Unsolvable ->
+                        finishAuto("本关无解（已穷举证明），要用游戏里的洗牌/道具才能继续")
+
+                    is AutoSolver.Outcome.Unknown -> {
+                        // 预算烧完还没结论：不算失败，先贪心走一步，下一帧重新求解
+                        val action = BrickGameTipHelper.autoHint(grid)
+                        if (action == null) {
+                            finishAuto("无解：一步都走不了")
+                        } else {
+                            playAction(result, action, "自动：求解超预算，先贪心一步")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 走计划里的下一步。
+     *
+     * 第一行报"第几步 / 一共几步"。总数 = **已确认消掉的对数 + 计划里还剩的步数**，
+     * 中途重新求解过（计划变短）也不会跳号，用户看到的始终是"整盘的第几步"。
+     */
+    private fun playStep(result: HintPipeline.Result, step: AutoSolver.Step, note: String? = null) {
+        val remaining = (plan.size - planIndex).coerceAtLeast(1)
+        val total = autoSteps + remaining
+        val current = autoSteps + 1
+        playAction(result, step.toAction(), note ?: "自动：第 $current/$total 步")
+    }
+
+    /**
+     * 把一步 6 元动作翻成屏幕上的滑动。
+     *
+     * - `to != from`：滑块从 `from` 格滑到落点格（落点是空的；游戏靠"两块对齐"判定消除）；
+     * - `to == from`：两块同款砖**已经同线且中间没有别的砖** —— 游戏里点一下直消，不用滑动。
+     *   但**必须点两下**：一块砖可能同时和左右（或上下）两块同款砖同线，只点它一下游戏
+     *   不知道要消哪一对，得再点一下指定配对砖（见 [GestureExecutor.tapPair]）；
+     * - 其余情况：把 `from` 那块滑到落点格（落点是空的），靠"两块对齐"来消。
+     */
+    private fun playAction(result: HintPipeline.Result, action: IntArray, note: String? = null) {
+        val scan = result.scan
+        val fr = action[0]
+        val fc = action[1]
+        val tr = action[2]
+        val tc = action[3]
+        val pr = action[4]
+        val pc = action[5]
+        if (fr !in 0 until scan.rows || fc !in 0 until scan.cols ||
+            tr !in 0 until scan.rows || tc !in 0 until scan.cols ||
+            pr !in 0 until scan.rows || pc !in 0 until scan.cols
+        ) {
+            finishAuto("解出的坐标越界：识别网格与盘面对不上")
+            return
+        }
+
+        val inPlace = fr == tr && fc == tc
+        val from = scan.rectOf(CellPoint(fr, fc))
+        // 直消：第一下点起点那块砖、第二下点配对砖（两块都点，消掉"一块砖可配两块"的歧义）；
+        // 滑动：起点滑到落点格中心。
+        val target = if (inPlace) scan.rectOf(CellPoint(pr, pc)) else scan.rectOf(CellPoint(tr, tc))
+        val x1 = from.centerX.toFloat()
+        val y1 = from.centerY.toFloat()
+        val x2 = target.centerX.toFloat()
+        val y2 = target.centerY.toFloat()
+        val gestureMs = if (inPlace) TAP_MS * 2 + TAP_GAP_MS else SWIPE_MS
+
+        val gen = generation.get()
+        // 记下配对砖那一格：下一帧 [autoAdvance] 拿它复检这一步有没有真的落地
+        pendingPair = CellPoint(pr, pc)
+        // 第一行报"第几步"（[playStep] 传进来的 note），这一手具体点哪儿/滑到哪儿放第二行
+        val what = if (inPlace) {
+            "点 ($fr,$fc) 消 ($pr,$pc)"
+        } else {
+            "滑 ($fr,$fc)→($tr,$tc) 消 ($pr,$pc)"
+        }
+        updateBar(
+            note ?: "自动：执行中",
+            "$what · 已消 $autoSteps 对 · 剩 ${countBricks(result.state)} 块",
+        )
+
+        // 手势发出去之后要排下一帧。步数不在这里记 —— 要等下一帧复检确认真的消掉了才算
+        // （见 [autoAdvance]），否则"没生效的手势"也会被算成战果。
+        val advance = {
+            if (gen == generation.get() && auto.get()) {
+                // 等游戏把消除动画播完再截下一帧，否则会截到"半消"的中间态
+                main.postDelayed(autoTick, STEP_SETTLE_MS)
+            }
+        }
+        val settle: (Boolean, String) -> Unit = { done, why ->
+            if (gesturePending.compareAndSet(true, false)) {
+                if (!done) Log.w(TAG, "手势未正常完成（$why）：($x1,$y1)→($x2,$y2)")
+                advance()
+            }
+        }
+
+        gesturePending.set(true)
+        if (inPlace) {
+            gestures.tapPair(x1, y1, x2, y2, TAP_MS, TAP_GAP_MS) { ok ->
+                settle(ok, if (ok) "已点击" else "点击被取消/派发失败")
+            }
+        } else {
+            gestures.swipe(x1, y1, x2, y2, SWIPE_MS) { ok ->
+                settle(ok, if (ok) "已滑动" else "滑动被取消/派发失败")
+            }
+        }
+        // 看门狗：回调迟迟不来也别把闭环停死（复检不符的兜底会拦住"反复空推"）
+        main.postDelayed({ settle(false, "回调超时") }, gestureMs + GESTURE_TIMEOUT_MS)
+    }
+
+    /** 自动运行的心跳：一步走完了再来一帧。 */
+    private val autoTick = Runnable {
+        if (!auto.get() || !running.get()) return@Runnable
+        refreshNow()
+    }
+
+    /** 自动收尾：关开关 + 把原因写在控制条上（红字），并说明已消多少对。 */
+    private fun finishAuto(message: String) {
+        auto.set(false)
+        main.removeCallbacks(autoTick)
+        overlay.setBarAuto(false)
+        HintUiBus.state = HintUiBus.state.copy(auto = false, autoMessage = message, autoSteps = autoSteps)
+        updateBar(message, "自动已停 · 共消 $autoSteps 对", message)
+        Log.i(TAG, "自动结束：$message（已消 $autoSteps 对）")
+    }
+
+    private fun countBricks(state: com.qcmian.brickgame.vision.BoardState): Int =
+        state.labels.count { it != 0 }
 
     private fun updateBar(hintText: String, statusText: String, message: String? = null) {
         overlay.updateBar(ControlBarView.State(hintText = hintText, statusText = statusText, message = message))
@@ -384,5 +753,63 @@ class HintSession(
 
         /** 截屏回调迟迟不回来时的兜底时限（分析那一段不设限，见类注释）。 */
         const val CAPTURE_TIMEOUT_MS = 3000L
+
+        /**
+         * 藏掉提示层之后、真正发起截屏之前要等的时长。
+         *
+         * 必须**至少跨一两帧**：`View.setVisibility(GONE)` 只是排了一次重绘，
+         * 当帧的显示内容里还留着上一帧画上去的提示框，立刻截就会把红框截进图里
+         * （低置信度留档存的就是这张图）。一帧 16ms，这里留足 150ms。
+         */
+        const val HINT_HIDE_SETTLE_MS = 150L
+
+        /** 求解参数：一盘只算一次，所以给得比"每帧都算"时宽松。 */
+        val SOLVE_CONFIG = AutoSolver.Config(nodesPerAttempt = 40_000, maxAttempts = 8)
+
+        /**
+         * 单次求解的挂钟上限。
+         *
+         * [AutoSolver] 自己用的是节点预算，但"单次尝试就是慢"的病态盘（实测有盘单次烧到
+         * 5 秒以上）节点预算拦不住，所以这里再压一道真实时间。超时不会误判无解 ——
+         * 求解器会返回 `Unknown`，退化成贪心走一步、下一帧重算。
+         *
+         * 因为整盘只算一次（不是每步都算），这里可以给得宽一些；要调小的话优先动它。
+         */
+        const val SOLVE_TIME_BUDGET_MS = 8_000L
+
+        /** 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。 */
+        const val SWIPE_MS = 220L
+
+        /** 直消时每次"点一下"的按住时长。 */
+        const val TAP_MS = 60L
+
+        /**
+         * 直消两次点击之间的间隔。
+         *
+         * 太短会被游戏当成一次双击/连点，"选中 → 消掉"就来不及走完；太长则拖慢每一步。
+         */
+        const val TAP_GAP_MS = 140L
+
+        /** 消掉一对之后等游戏把动画播完再截下一帧。 */
+        const val STEP_SETTLE_MS = 700L
+
+        /**
+         * 求解完成后，把"一共多少步"亮一会儿再开始动手的时长。
+         *
+         * 不给这一下停顿的话，紧接着的下一步会立刻把提示覆盖掉，用户看不到总步数。
+         */
+        const val PLAN_ANNOUNCE_MS = 600L
+
+        /** 复检连续这么多次不符（计划里的格子没被消掉），就停下报错。 */
+        const val BAD_CHECK_LIMIT = 3
+
+        /** 重新求解的次数上限：一直重算说明盘面/识别在飘。 */
+        const val PLAN_ROUND_LIMIT = 12
+
+        /** 自动模式下连续这么多帧定位不到棋盘，就停下来报错（多半是切走了应用）。 */
+        const val MISS_LIMIT = 3
+
+        /** 手势回调的看门狗时限：超过它没收到回调，就自己去排下一帧。 */
+        const val GESTURE_TIMEOUT_MS = 1500L
     }
 }
