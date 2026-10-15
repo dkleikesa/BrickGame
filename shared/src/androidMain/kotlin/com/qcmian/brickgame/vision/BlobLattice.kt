@@ -8,13 +8,15 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * 残局兜底：自相关失效（棋盘只剩几块砖）时，用"棋盘底色 + 砖块色块"反推网格。
+ * 残局兜底：自相关失效（棋盘只剩几块砖）时，用"棋盘底色外框 + 格距"重建等距网格。
  *
- * 对应 `tile_recognizer.py` 的 `_board_blobs` / `_pitch_from_centers` / `estimate_lattice_from_blobs`。
+ * 对应 `tile_recognizer.py` 的 `_board_blobs` / `_pitch_from_centers` / `_pick_pitch` /
+ * `estimate_lattice_from_blobs`。
  *
- * 实测触发场景：棋盘只剩十几块砖时，边沿投影被天空/马路/UI 的边缘带偏，
- * 算出的 x 周期 23px、y 周期 94px（真值 110/110），网格画到房子上去了，
- * 于是切出一堆"半块砖"和背景。这里用棋盘外框 + 砖块间距重建等距网格。
+ * 实测触发场景：① 棋盘只剩十几块砖时，边沿投影被天空/马路/UI 的边缘带偏，
+ * 算出的 x 周期 23px、y 周期 94px（真值 110/110），网格画到房子上去了；
+ * ② 残局整轴投影没有周期（真机第 1 层 x102/y12），该轴完全测不到格距。
+ * 两条都靠"棋盘外框定范围 + 格距铺格"，格距从多候选择优（见 [LatticeMath.pickPitch]）。
  */
 internal object BlobLattice {
 
@@ -28,7 +30,12 @@ internal object BlobLattice {
     private const val BG_TOLERANCE = 45.0
     private const val MIN_BOX = 12
 
-    fun estimate(img: Mat): Lattice? {
+    fun estimate(
+        img: Mat,
+        pitch: Double = 0.0,
+        colProf: DoubleArray? = null,
+        rowProf: DoubleArray? = null,
+    ): Lattice? {
         val h = img.rows()
         val w = img.cols()
         if (h < 32 || w < 32 || img.channels() != 3) return null
@@ -40,9 +47,12 @@ internal object BlobLattice {
         val isBg = BooleanArray(h * w)
         for (p in 0 until h * w) {
             val i = p * 3
-            val db = bytes[i].toInt() - bg[0]
-            val dg = bytes[i + 1].toInt() - bg[1]
-            val dr = bytes[i + 2].toInt() - bg[2]
+            // 必须 and 0xFF：Byte 是有符号的，板底色的 R 通道实测 150（= -106 当 Byte），
+            // 少了这一步就变成 150 与 -106 相减 → 整个底板都被判成"非底色"，
+            // 反推出来的棋盘外框直接消失（真机表现：残局一直"棋盘反推失败"）
+            val db = (bytes[i].toInt() and 0xFF) - bg[0]
+            val dg = (bytes[i + 1].toInt() and 0xFF) - bg[1]
+            val dr = (bytes[i + 2].toInt() and 0xFF) - bg[2]
             isBg[p] = sqrt((db * db + dg * dg + dr * dr).toDouble()) < BG_TOLERANCE
         }
 
@@ -73,20 +83,23 @@ internal object BlobLattice {
 
         val cx = kept.map { it.left + it.width / 2.0 }.toDoubleArray()
         val cy = kept.map { it.top + it.height / 2.0 }.toDoubleArray()
-        val px = pitchFromCenters(cx, wMed)
-        val py = pitchFromCenters(cy, hMed)
-        val cand = listOf(px, py).filter { it > 0 }
-        if (cand.isEmpty()) return null
+        // 两个轴的格距各自从候选里挑：自相关给的（一个轴测到就够，砖块是方的）、
+        // 色块中心间距给的、以及横向已选定的（方形先验兜底）。见 LatticeMath.pickPitch。
+        val px = LatticeMath.pickPitch(listOf(pitch, pitchFromCenters(cx, wMed)), board.width.toDouble())
+        val py = LatticeMath.pickPitch(
+            listOf(pitch, pitchFromCenters(cy, hMed), px),
+            board.height.toDouble(),
+        )
+        if (px <= 0 || py <= 0) return null
+        val cols = (board.width / px).roundToInt()
+        val rows = (board.height / py).roundToInt()
 
-        val pitch = medianOf(cand)
-        if (pitch <= 0) return null
-        val cols = (board.width / pitch).roundToInt()
-        val rows = (board.height / pitch).roundToInt()
-        if (cols !in 3..30 || rows !in 3..30) return null
-
+        // 有投影就顺手把网格线精调到缝隙中心：外框带圆角，等距铺出来的线会偏几个像素
+        val xl = linspace(board.left.toDouble(), (board.left + board.width).toDouble(), cols + 1)
+        val yl = linspace(board.top.toDouble(), (board.top + board.height).toDouble(), rows + 1)
         return Lattice(
-            xlines = linspace(board.left.toDouble(), (board.left + board.width).toDouble(), cols + 1),
-            ylines = linspace(board.top.toDouble(), (board.top + board.height).toDouble(), rows + 1),
+            xlines = colProf?.let { LatticeMath.refineLines(it, xl, (board.width.toDouble() / cols).roundToInt()) } ?: xl,
+            ylines = rowProf?.let { LatticeMath.refineLines(it, yl, (board.height.toDouble() / rows).roundToInt()) } ?: yl,
             pitchX = (board.width.toDouble() / cols).roundToInt(),
             pitchY = (board.height.toDouble() / rows).roundToInt(),
         )

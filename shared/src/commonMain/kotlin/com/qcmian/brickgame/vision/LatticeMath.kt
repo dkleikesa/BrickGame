@@ -3,6 +3,7 @@ package com.qcmian.brickgame.vision
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * `BrickGame-Tool/tile_recognizer.py` 里"纯数学"部分的 Kotlin 等价实现：把一维投影信号解成网格。
@@ -14,6 +15,12 @@ import kotlin.math.min
  * `refine_lines` / `trim_board_extent`。所有边界行为（取首个极值、`win|1` 强制奇数等）都保留。
  */
 object LatticeMath {
+
+    /**
+     * 判断"一段砖块是一排真格子还是 UI 噪声"的密度线：真格子每格至少 2 块砖，
+     * 而误判进来的状态栏/设置图标那种，一段里平均下来连 1.5 都到不了（真机实测 1.25）。
+     */
+    private const val MIN_RUN_DENSITY = 2.0
 
     /** numpy 默认（linear interpolation）的百分位。 */
     fun percentile(values: DoubleArray, q: Double): Double {
@@ -278,18 +285,67 @@ object LatticeMath {
      * 而真棋盘每行至少有"中位数 30%"的砖块。
      */
     fun trimBoardExtent(counts: IntArray): Pair<Int, Int> {
-        val mask = BooleanArray(counts.size) { counts[it] >= 1 }
-        val (a0, b0) = longestRun(mask)
-        if (b0 - a0 < 2) return a0 to b0
+        // 取"砖块成片"的区段，跨过整列/整行已消完的空洞（见 Python 侧同名函数的注释）：
+        // 只取最长连续段会把残局里"中间整列消完"的棋盘切窄（真机第 1 层：10 列棋盘第 7 列
+        // 全空 → 切成 14×6 → 被尺寸闸门当离谱网格丢掉整帧），所以相邻的成片段要并回来；
+        // 但棋盘上方的 UI 噪声（设置图标/状态栏）密度很低，只并"每格平均 ≥2 块砖"的段。
+        val runs = ArrayList<IntArray>()                    // [start, end)
+        var i = 0
+        while (i < counts.size) {
+            if (counts[i] < 1) {
+                i++
+                continue
+            }
+            var j = i
+            while (j < counts.size && counts[j] >= 1) j++
+            runs.add(intArrayOf(i, j))
+            i = j
+        }
+        if (runs.isEmpty()) return 0 to 0
+        val main = runs.maxByOrNull { r -> (r[0] until r[1]).sumOf { counts[it] } }!!
+        val kept = ArrayList<IntArray>().apply { add(main) }
+        for (r in runs) {
+            if (r === main) continue
+            val near = kept.any { k -> r[0] - k[1] <= 1 || k[0] - r[1] <= 1 }
+            val density = (r[0] until r[1]).sumOf { counts[it] }.toDouble() / (r[1] - r[0])
+            if (near && density >= MIN_RUN_DENSITY) kept.add(r)
+        }
+        var a = kept.minOf { it[0] }
+        var b = kept.maxOf { it[1] }
+        if (b - a < 2) return a to b
         val med = percentile(
-            DoubleArray(b0 - a0) { counts[a0 + it].toDouble() },
+            DoubleArray(b - a) { counts[a + it].toDouble() },
             50.0,
         )
-        var a = a0
-        var b = b0
         while (a < b - 2 && counts[a] < 0.30 * med) a++
         while (b - a > 2 && counts[b - 1] < 0.30 * med) b--
         return a to b
+    }
+
+    /**
+     * 从候选格距里挑"能把棋盘外框铺成整格"的那个（见 Python 侧 `_pick_pitch`）。
+     *
+     * 棋盘是整格铺满底板的：正确格距下 span/pitch 必然接近整数（实测误差 ≤2%），
+     * 错的候选会差出小半格（1102/94=11.72 差 0.28、1102/110=10.02 差 0.02）。
+     * 这是唯一能把"自相关给 94"和"色块间距给 110"分出对错的判据 —— 两者都不能盲信：
+     * 残局里相邻砖块会连成一片（色块只剩个位数），自相关又可能整轴没周期或取到偏周期。
+     *
+     * @return 选中的格距；候选全都不可用（凑不出 3~30 格）时返回 0。
+     */
+    fun pickPitch(candidates: List<Double>, span: Double, lo: Int = 3, hi: Int = 30): Double {
+        var best = 0.0
+        var bestErr = 9.9
+        for (p in candidates) {
+            if (p <= 0) continue
+            val n = (span / p).roundToInt()
+            if (n < lo || n > hi) continue
+            val err = abs(span / p - n)
+            if (err < bestErr) {
+                best = p
+                bestErr = err
+            }
+        }
+        return best
     }
 
     /** `np.arange(start, stop, step)` 的等价：半开区间，步长为正。 */

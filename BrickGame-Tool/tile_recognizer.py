@@ -34,9 +34,14 @@ INSET = 0.14       # 裁切时向内收缩的比例（去掉格子边框/圆角�
 FLAT_THR = 5.0     # 内部边缘能量低于它 = 平坦 = 已消除的空位（实测砖块最低 31、空位最高 0.8）
 
 # 棋盘列数的合理范围（与 Android 侧 OpenCvBoardScanner.MIN_COLS/MAX_COLS 一致）：
-# 低置信度留档里列数恒为 10，留余量覆盖不同关卡。谐波修正后必须落在这一档才算数。
-MIN_COLS = 8
+# 实测出现过 6 列（连消模式，格距 164）与 10 列（格距 102）两种关卡，留余量覆盖。
+# 谐波修正后必须落在这一档才算数。
+MIN_COLS = 6
 MAX_COLS = 16
+
+# 判断"一段砖块是一排真格子还是 UI 噪声"的密度线：真格子每格至少 2 块砖，
+# 而误判进来的状态栏/设置图标那种，一段里平均下来连 1.5 都到不了（真机实测 1.25）。
+MIN_RUN_DENSITY = 2.0
 
 
 # ---------------------------------------------------------------- 图像与投影
@@ -246,13 +251,37 @@ def icon_features(patches: np.ndarray, tol: float = 40.0,
 
 
 def trim_board_extent(tile: np.ndarray, axis: int) -> tuple[int, int]:
-    """在砖块掩码上取"最长连续段"，再去掉两端明显偏稀的行/列。
+    """在砖块掩码上定棋盘范围：取"砖块成片"的区段，跨过整列/整行已消完的空洞。
 
-    为什么要裁两端：棋盘上方那条草地条带偶尔会有 1~2 格被误判成砖块，
-    而真棋盘每行至少有"中位数 30%"的砖块。
+    为什么要跨过空洞：残局里整列消完是常态（真机第 1 层实测 10 列棋盘第 7 列 0 块砖），
+    只取"最长连续段"会把棋盘切成左边 6 列 —— 14×6 又被尺寸闸门当"离谱网格"整帧丢掉。
+
+    为什么不能直接取首尾：棋盘上方（草地/状态栏/设置图标）偶尔有 1~2 格被误判成砖块，
+    所以只并"与已成片区段相邻（间隔 ≤1 格）且每格平均 ≥2 块砖"的段 —— UI 噪声达不到这个密度；
+    两端再按中位数 30% 裁掉偏稀的行/列。
     """
     cnt = tile.sum(axis=1 - axis)
-    a, b = longest_run(cnt >= 1)
+    runs, i = [], 0
+    while i < len(cnt):
+        if cnt[i] < 1:
+            i += 1
+            continue
+        j = i
+        while j < len(cnt) and cnt[j] >= 1:
+            j += 1
+        runs.append((i, j))
+        i = j
+    if not runs:
+        return 0, 0
+    main = max(runs, key=lambda r: cnt[r[0]:r[1]].sum())
+    kept = [main]
+    for r in runs:
+        if r is main:
+            continue
+        near = any(r[0] - k[1] <= 1 or k[0] - r[1] <= 1 for k in kept)
+        if near and cnt[r[0]:r[1]].mean() >= MIN_RUN_DENSITY:
+            kept.append(r)
+    a, b = min(k[0] for k in kept), max(k[1] for k in kept)
     if b - a < 2:
         return a, b
     med = float(np.median(cnt[a:b]))
@@ -318,12 +347,38 @@ def _pitch_from_centers(centers: np.ndarray, plate: float) -> float:
     return plate if plate > 0 else 0.0
 
 
-def estimate_lattice_from_blobs(img: np.ndarray) -> dict | None:
-    """兜底：自相关失效（空棋盘只剩几块砖）时，用棋盘底色 + 砖块色块反推网格。
+def _pick_pitch(cands: list[float], span: float, lo: int = 3, hi: int = 30) -> float:
+    """从候选格距里挑"能把棋盘外框铺成整格"的那个。
 
-    实测触发场景：棋盘只剩十几块砖时，边沿投影被天空/马路/UI 的边缘带偏，
-    算出的 x 周期 23px、y 周期 94px（真值 110/110），网格画到房子上去了，
-    于是切出一堆"半块砖"和背景。这里用棋盘外框 + 砖块间距重建等距网格。
+    棋盘是整格铺满底板的：正确格距下 span/pitch 必然接近整数（实测误差 ≤2%），
+    错的候选会差出小半格（1102/94=11.72 差 0.28、1102/110=10.02 差 0.02）。
+    这是唯一能把"自相关给 94"和"色块间距给 110"分出对错的判据 —— 两者都不能盲信：
+    残局里色块会连成片（相邻砖并成一个连通域），自相关又可能整轴没周期或取到偏周期。
+    """
+    best, best_err = 0.0, 9.9
+    for p in cands:
+        if p <= 0:
+            continue
+        n = round(span / p)
+        if not lo <= n <= hi:
+            continue
+        err = abs(span / p - n)
+        if err < best_err:
+            best, best_err = float(p), err
+    return best
+
+
+def estimate_lattice_from_blobs(img: np.ndarray, pitch: float = 0.0,
+                                col_prof: np.ndarray | None = None,
+                                row_prof: np.ndarray | None = None) -> dict | None:
+    """兜底：自相关失效时，用**棋盘底色外框**定范围，格距按多候选择优后等距铺格。
+
+    @param pitch 自相关给出的"还信得过"的格距（砖块是方的，一个轴测到就够）。
+                 与"砖块色块间距"一起当候选，谁能把底板铺成整格就用谁（见 `_pick_pitch`）。
+    @param col_prof/row_prof 已有投影就传进来，省一遍 Sobel；传了就顺手把网格线精调到缝隙中心。
+
+    实测触发场景：① 棋盘只剩十几块砖时边沿投影被天空/马路/UI 带偏（x23/y94，真值 110/110）；
+    ② 残局整轴投影没有周期（真机第 1 层 x102/y12）。两条都靠这套重建等距网格。
     """
     got = _board_blobs(img)
     if got is None:
@@ -331,20 +386,21 @@ def estimate_lattice_from_blobs(img: np.ndarray) -> dict | None:
     _, (bx, by, bw, bh), boxes, (w_med, h_med) = got
     cx = np.array([b[0] + b[2] / 2.0 for b in boxes])
     cy = np.array([b[1] + b[3] / 2.0 for b in boxes])
-    px = _pitch_from_centers(cx, w_med)
-    py = _pitch_from_centers(cy, h_med)
-    cand = [v for v in (px, py) if v > 0]
-    if not cand:
+    px = _pick_pitch([pitch, _pitch_from_centers(cx, w_med)], bw)
+    py = _pick_pitch([pitch, _pitch_from_centers(cy, h_med), px], bh)
+    if px <= 0 or py <= 0:
         return None
-    pitch = float(np.median(cand))
-    cols = int(round(bw / pitch))
-    rows = int(round(bh / pitch))
-    if not (3 <= cols <= 30 and 3 <= rows <= 30):
-        return None
+    cols, rows = int(round(bw / px)), int(round(bh / py))
+    pxc, pyc = round(bw / cols), round(bh / rows)
+    xl = np.linspace(bx, bx + bw, cols + 1)
+    yl = np.linspace(by, by + bh, rows + 1)
+    if col_prof is not None:
+        xl = refine_lines(col_prof, xl, pxc)
+    if row_prof is not None:
+        yl = refine_lines(row_prof, yl, pyc)
     return {
-        "xlines": np.linspace(bx, bx + bw, cols + 1),
-        "ylines": np.linspace(by, by + bh, rows + 1),
-        "pitch_x": int(round(bw / cols)), "pitch_y": int(round(bh / rows)),
+        "xlines": xl, "ylines": yl,
+        "pitch_x": int(pxc), "pitch_y": int(pyc),
         "source": "blob",
     }
 
@@ -366,33 +422,46 @@ def detect_grid(img: np.ndarray, min_pitch: int, inset: float = INSET,
     pitch_y, ac_y = fundamental_pitch(row_prof, min_pitch, int(h * 0.25))
     pitch_x, ac_x = fundamental_pitch(col_prof, min_pitch, int(w * 0.25))
 
-    # 砖块是正方形的 → x/y 周期必然接近。差得远说明自相关取歪了，两种都实测过：
+    # 砖块是正方形的 → x/y 周期必然接近。差得远 / 测不到都是自相关取歪了，实测三种：
     #  - 取到 2/3 倍谐波：行周期 307 = 3×102，棋盘被切成左上角 5×10（低置信度留档 14 帧里 12 帧）
-    #  - 被"空棋盘 + 天空/马路/UI 边缘"带偏：残局截图给 x23/y94（真值 110/110），砖块切成半块
-    # 先按方形先验把谐波除回基波（除回后列数必须合理，否则留给反推），不行再用棋盘底色反推。
+    #  - 整轴**没测到**周期（周期=min_pitch）：残局只剩几十块砖，该轴投影已经没有周期结构
+    #    （真机第 1 层实测 x=102 / y=12，整帧被丢掉）
+    #  - 被"天空/马路/UI 边缘"带偏：残局截图给 x23/y94（真值 110/110），砖块切成半块
+    # 前两种按方形先验处理（除回基波 / 借另一个轴的周期），最后一种用棋盘底色外框反推。
     fallback = None
+    xlines = ylines = None
+    found_x, found_y = pitch_x > 2 * min_pitch, pitch_y > 2 * min_pitch
     fx, fy = reconcile_pitches(pitch_x, pitch_y)
     if (fx, fy) != (pitch_x, pitch_y) and MIN_COLS <= w // fx <= MAX_COLS:
         if verbose:
             print(f"x/y 周期不一致（{pitch_x}/{pitch_y}）→ 按方形砖块先验做谐波修正 {fx}/{fy}")
         pitch_x, pitch_y = fx, fy
-        harmonic = True
-    else:
-        harmonic = False
-
-    ylines = refine_lines(row_prof, np.arange(lattice_phase(row_prof, pitch_y), h, pitch_y), pitch_y)
-    xlines = refine_lines(col_prof, np.arange(lattice_phase(col_prof, pitch_x), w, pitch_x), pitch_x)
-
-    if not harmonic and max(pitch_x, pitch_y) > 1.35 * max(1, min(pitch_x, pitch_y)):
-        lat = estimate_lattice_from_blobs(img)
+    elif not (found_x and found_y):
+        # 单轴或双轴失锁（残局常见）：借测到的那个当格距，棋盘范围交给底板外框。
+        # 两轴都失锁时 good=0，格距从"砖块色块中心间距"与"底板能铺成整格"两个判据里选。
+        good = int(pitch_x if found_x else (pitch_y if found_y else 0))
+        lat = estimate_lattice_from_blobs(img, pitch=good, col_prof=col_prof, row_prof=row_prof)
         if lat is not None:
             if verbose:
-                print(f"自相关不可信（x 周期{pitch_x} / y 周期{pitch_y} 相差过大）"
-                      f" → 用棋盘底色反推 {len(lat['xlines']) - 1} 列 x {len(lat['ylines']) - 1} 行"
-                      f"（格距 ~{lat['pitch_x']}px）")
+                print(f"自相关失锁（x{pitch_x}/y{pitch_y}，借格距 {good or '色块间距'}）"
+                      f" → 棋盘底色外框定界 {len(lat['xlines']) - 1} 列 x {len(lat['ylines']) - 1} 行")
             fallback = lat["source"]
             xlines, ylines = lat["xlines"], lat["ylines"]
             pitch_x, pitch_y = lat["pitch_x"], lat["pitch_y"]
+
+    if fallback is None:
+        xlines = refine_lines(col_prof, np.arange(lattice_phase(col_prof, pitch_x), w, pitch_x), pitch_x)
+        ylines = refine_lines(row_prof, np.arange(lattice_phase(row_prof, pitch_y), h, pitch_y), pitch_y)
+        if max(pitch_x, pitch_y) > 1.35 * max(1, min(pitch_x, pitch_y)):
+            lat = estimate_lattice_from_blobs(img)
+            if lat is not None:
+                if verbose:
+                    print(f"自相关不可信（x 周期{pitch_x} / y 周期{pitch_y} 相差过大）"
+                          f" → 用棋盘底色反推 {len(lat['xlines']) - 1} 列 x {len(lat['ylines']) - 1} 行"
+                          f"（格距 ~{lat['pitch_x']}px）")
+                fallback = lat["source"]
+                xlines, ylines = lat["xlines"], lat["ylines"]
+                pitch_x, pitch_y = lat["pitch_x"], lat["pitch_y"]
 
     ring = cell_ring_score(img, xlines, ylines)
     if fallback is None:
