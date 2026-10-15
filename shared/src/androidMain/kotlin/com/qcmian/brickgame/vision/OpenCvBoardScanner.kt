@@ -42,19 +42,19 @@ object OpenCvBoardScanner {
     const val MIN_PITCH = 12
 
     /**
-     * 网格尺寸的合理范围。真实棋盘在 `build_dataset/frames.csv` 台账里是 **14 行 × 10 列**，
-     * 当前关卡实测 **16 行 × 10 列** —— 列数稳定在 10，行数随关卡变，上下限按这个留余量。
+     * 网格尺寸的合理范围。台账里出现过 **14/15/16 行 × 10 列**（格距 102）与 **6~8 行 × 6 列**
+     * （连消模式，格距 164，逐帧核对过网格是对齐的），所以下限按 6 留余量。
      *
      * 为什么必须卡住上限：自相关会被画面内容带偏，实测拿到过 **199×10（1990 格）** 的假网格，
      * 而下游是 O(n²)（图标两两距离）甚至更差，那一帧跑了 **24.8 秒**，整个提示循环看起来就是"卡死"。
      * 尺寸离谱就直接当"没定位到棋盘"丢掉这一帧 —— 宁可不出提示，也不能卡住。
      *
-     * 下限同样重要：周期取到谐波时会给出 **6×6** 这种"看着像棋盘"的网格，照样能算出一堆提示，
-     * 但格子全是错的（真机实测：行周期 307 = 3×102，棋盘被切成左上角 6×6）。
+     * 下限只是"最后一道闸"，真正把假网格挡在外面的是两处：周期先按方形砖块先验做谐波修正
+     * （3×102 → 102，否则 10 列棋盘会被切成 6 列那个假网格）、裁边跨过"整列已消完"的空洞。
      */
-    const val MIN_ROWS = 8
+    const val MIN_ROWS = 6
     const val MAX_ROWS = 20
-    const val MIN_COLS = 8
+    const val MIN_COLS = 6
     const val MAX_COLS = 16
 
     private const val RING_LO = 0.04
@@ -123,26 +123,23 @@ object OpenCvBoardScanner {
             val (pitchY, _) = LatticeMath.fundamentalPitch(rowProf, minPitch, (h * 0.25).toInt())
             val (pitchX, _) = LatticeMath.fundamentalPitch(colProf, minPitch, (w * 0.25).toInt())
 
-            var xlines = LatticeMath.refineLines(
-                colProf,
-                LatticeMath.arange(LatticeMath.latticePhase(colProf, pitchX).toDouble(), w.toDouble(), pitchX.toDouble()),
-                pitchX,
-            )
-            var ylines = LatticeMath.refineLines(
-                rowProf,
-                LatticeMath.arange(LatticeMath.latticePhase(rowProf, pitchY).toDouble(), h.toDouble(), pitchY.toDouble()),
-                pitchY,
-            )
+            // 网格线先不急着铺：周期还可能被谐波修正/单轴失锁/反推改写（y=12 那种会白铺 200 条线）
             var px = pitchX
             var py = pitchY
+            var xsRaw: DoubleArray? = null
+            var ysRaw: DoubleArray? = null
             var fromBlobs = false
             var diag = ""
 
-            // 砖块是正方形的 → x/y 周期必然接近。差得远说明自相关取歪了，两种都实测过：
+            // 砖块是正方形的 → x/y 周期必然接近。差得远 / 测不到都是自相关取歪了，三种都实测过：
             //  - 取到 2/3 倍谐波：行周期 307 = 3×102，棋盘被切成左上角 6×6，提示全错；
+            //  - 整轴**没测到**周期（fundamentalPitch 找不到就返回 minPitch）：残局只剩几十块砖，
+            //    该轴投影已无周期结构（真机第 1 层 x102/y12）—— 整帧被丢，界面报"未识别到棋盘"；
             //  - 被"空棋盘 + 天空/马路/UI 边缘"带偏：残局截图给 x23/y94，真值 110/110，砖块被切成半块。
-            // 先按方形砖块先验把大周期除回基波；除不动再走棋盘底色 + 残余砖块间距反推；
-            // 两条路都不认就丢掉这一帧 —— 宁可不出提示，也不能拿错网格给提示。
+            // 前两种靠方形先验（除回基波 / 借另一个轴的周期），最后一种靠棋盘底色外框反推；
+            // 都不认就丢掉这一帧 —— 宁可不出提示，也不能拿错网格给提示。
+            val foundX = px > 2 * minPitch
+            val foundY = py > 2 * minPitch
             val (fixedPx, fixedPy) = LatticeMath.reconcilePitches(px, py)
             // 修正必须给出"列数合理"的格距才算数：残局那种 x23/y94（真值 110/110）除一下
             // 也能凑成 23/23，但那样一屏会有 40+ 列，明显不是棋盘 —— 这种情况留给反推兜底。
@@ -151,40 +148,37 @@ object OpenCvBoardScanner {
             if (harmonicPlausible) {
                 px = fixedPx
                 py = fixedPy
-                // 用修正后的周期重新求相位 + 精调网格线
-                xlines = LatticeMath.refineLines(
-                    colProf,
-                    LatticeMath.arange(
-                        LatticeMath.latticePhase(colProf, px).toDouble(),
-                        w.toDouble(),
-                        px.toDouble(),
-                    ),
-                    px,
-                )
-                ylines = LatticeMath.refineLines(
-                    rowProf,
-                    LatticeMath.arange(
-                        LatticeMath.latticePhase(rowProf, py).toDouble(),
-                        h.toDouble(),
-                        py.toDouble(),
-                    ),
-                    py,
-                )
                 diag = "谐波修正（$pitchX/$pitchY → $px/$py）"
                 Log.i(TAG, "x/y 周期不一致，按方形砖块先验做谐波修正：$pitchX/$pitchY → $px/$py")
-            } else if (max(px, py) > 1.35 * max(1, min(px, py))) {
-                val lat = BlobLattice.estimate(img)
+            } else if (!(foundX && foundY) || max(px, py) > 1.35 * max(1, min(px, py))) {
+                // 单轴/双轴失锁时把测到的那个当格距候选（砖块是方的），另一轴的候选由色块中心补
+                val known = if (foundX != foundY) (if (foundX) px else py).toDouble() else 0.0
+                val lat = BlobLattice.estimate(img, known, colProf, rowProf)
                 if (lat != null) {
-                    xlines = lat.xlines
-                    ylines = lat.ylines
+                    xsRaw = lat.xlines
+                    ysRaw = lat.ylines
                     px = lat.pitchX
                     py = lat.pitchY
                     fromBlobs = true
+                    diag = if (known > 0) "单轴失锁，借格距 ${known.toInt()} + 棋盘底色定界"
+                    else "两轴都没测到周期，棋盘底色 + 色块间距反推"
+                    Log.i(TAG, "x/y 周期不可信（$pitchX/$pitchY）→ $diag：${px}/${py}")
                 } else {
-                    Log.w(TAG, "x/y 周期差太远（$pitchX/$pitchY）且棋盘反推失败 → 丢弃这一帧")
+                    Log.w(TAG, "x/y 周期不可信（$pitchX/$pitchY）且棋盘反推失败 → 丢弃这一帧")
                     return null
                 }
             }
+            // 定下来的周期铺线：反推路径用外框算好的线，其余走相位 + 精调
+            var xlines = xsRaw ?: LatticeMath.refineLines(
+                colProf,
+                LatticeMath.arange(LatticeMath.latticePhase(colProf, px).toDouble(), w.toDouble(), px.toDouble()),
+                px,
+            )
+            var ylines = ysRaw ?: LatticeMath.refineLines(
+                rowProf,
+                LatticeMath.arange(LatticeMath.latticePhase(rowProf, py).toDouble(), h.toDouble(), py.toDouble()),
+                py,
+            )
 
             // 周期 + 相位 + 精调线 + 谐波修正/反推，全都算这一段
             val pitchNs = System.nanoTime() - t
