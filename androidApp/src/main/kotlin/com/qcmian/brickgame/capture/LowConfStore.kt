@@ -39,8 +39,10 @@ object LowConfStore {
     private const val SHARE_DIR = "lowconf-share"
 
     /** 存一帧。[bitmap] 是这一帧的原图，调用方随后就会 recycle，所以在这里先写完再返回。 */
-    fun save(context: Context, bitmap: Bitmap, result: HintPipeline.Result) {
-        if (result.lowConfidence.isEmpty()) return
+    fun save(context: Context, bitmap: Bitmap, result: HintPipeline.Result, force: Boolean = false) {
+        // force：无解继续模式要每帧都留，哪怕这一帧识别器"很有把握"——
+        // 有把握却走不通，本身就是最值得回看的样本
+        if (!force && result.lowConfidence.isEmpty()) return
         val dir = ensureDir(context) ?: return
         val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss-SSS", Locale.US).format(Date())
         val scan = result.scan
@@ -56,6 +58,7 @@ object LowConfStore {
                     appendLine("# ${scan.rows}x${scan.cols} pitch=${scan.pitchX}x${scan.pitchY} " +
                         "空位=${scan.empty.count { it }}/${scan.cellCount} 模型=${result.modelLabel} " +
                         result.timingText())
+                    if (force) appendLine("# 无解继续模式强制留档（低置信格 ${result.lowConfidence.size} 个）")
                     appendLine("# 没把握的格子（序号=相似度）：" + result.lowConfidence.joinToString(" ") {
                         "(${it.first / scan.cols},${it.first % scan.cols})=${it.second}"
                     })

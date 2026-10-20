@@ -184,6 +184,14 @@ class HintSession(
     private var missStreak = 0
 
     /**
+     * "无解 + 一对都消不掉"连续重试了几次。
+     *
+     * 这个状态下程序什么也做不了，只能等外部变化；但游戏是静止的，不设上限就是无限空转
+     * （每 3 秒一次截屏 + 识别）。所以到 [UNSOLVABLE_RETRY_LIMIT] 次就停，让人去洗牌。
+     */
+    private var unsolvableRetries = 0
+
+    /**
      * 上一次手势是否还没收到回调。
      *
      * `dispatchGesture` 的回调**可能永远不来**（游戏抢焦点、系统手势冲突），
@@ -202,8 +210,9 @@ class HintSession(
 
     init {
         overlay.onRefresh = { refreshNow() }
-        overlay.onClose = { stop() }
         overlay.onToggleAuto = { on -> if (on) startAuto() else stopAuto() }
+        // 切定位算法只改落盘的选择，下一帧自然生效；不自动重跑 —— 此刻前台可能是 App 自己，
+        // 截图必然定位失败，看起来就像"一切就坏"。
         overlay.onToggleGrid = { on ->
             HintUiBus.showGrid = on
             redrawHints()
@@ -212,8 +221,12 @@ class HintSession(
             HintUiBus.showLabels = on
             redrawHints()
         }
-        // 切定位算法只改落盘的选择，下一帧自然生效；不自动重跑 —— 此刻前台可能是 App 自己，
-        // 截图必然定位失败，看起来就像"一切就坏"。
+        // 无解继续：只改落盘开关，下一帧自动流程读它决定"退出还是继续贪心"
+        overlay.onToggleContinue = { on ->
+            AutoContinue.save(context, on)
+            updateBar(if (on) "无解时继续自动玩：开" else "无解时继续自动玩：关",
+                "点「刷新」重跑一帧")
+        }
         overlay.onToggleLocator = { on ->
             val locator = if (on) Locator.Yolo else Locator.OpenCV
             LocatorChoice.save(context, locator)
@@ -229,9 +242,10 @@ class HintSession(
         // 顺手把上一次自动留下的报错清掉：重新开一次会话不该还挂着旧错误
         HintUiBus.state = HintUiBus.state.copy(running = true, autoMessage = null)
         // 控制条上的开关跟着 App 界面里的开关走（两处共用 HintUiBus 这一个状态）
-        overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         overlay.setBarAuto(auto.get())
+        overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         overlay.setBarLocator(LocatorChoice.current(context) == Locator.Yolo)
+        overlay.setBarContinue(AutoContinue.enabled(context))
         refreshNow()
     }
 
@@ -264,6 +278,7 @@ class HintSession(
             badChecks = 0
             planRounds = 0
             missStreak = 0
+            unsolvableRetries = 0
             HintUiBus.state = HintUiBus.state.copy(auto = true, autoSteps = 0, autoMessage = null)
             overlay.setBarAuto(true)
         }
@@ -272,7 +287,7 @@ class HintSession(
         } else if (!capturing.get()) {
             refreshNow()
         }
-        updateBar("自动：正在识别盘面…", "等待第一帧")
+        updateBar("识别中…", "")
     }
 
     /** 停止自动，回到手动提示（会话与悬浮窗都留着）。 */
@@ -281,7 +296,7 @@ class HintSession(
         main.removeCallbacks(autoTick)
         overlay.setBarAuto(false)
         HintUiBus.state = HintUiBus.state.copy(auto = false)
-        updateBar("已停止自动", "已消 $autoSteps 对 · 点「刷新」继续手动")
+        updateBar("已停止", "已消 $autoSteps 对")
     }
 
     /**
@@ -298,7 +313,7 @@ class HintSession(
         }
         // 一帧要好几秒（标定 + 推理），这段时间用户只能看这条状态行，自动模式下要说清在干什么
         if (auto.get()) {
-            updateBar("自动：正在识别盘面…", "已消 $autoSteps 对")
+            updateBar("识别中…", "")
         } else {
             updateBar("正在分析…", "")
         }
@@ -507,15 +522,13 @@ class HintSession(
         val scan = result.scan
         val hints = result.hints
         val bricks = scan.empty.count { !it }
-        // 一行里能消的对可能有很多对，控制条放不下，只报总数 + 前两对
+        // 坐标由悬浮窗画，文字只报"现在就能点"了几对；全被挡住时说清原因
+        val direct = hints.count { it.direct }
         val hintText = when {
             result.cleared -> "盘面已清空"
-            hints.isNotEmpty() -> buildString {
-                append("共 ${hints.size} 对可消除：" )
-                append(hints.take(2).joinToString("，") { it.pairText() })
-                if (hints.size > 2) append(" …")
-            }
-            else -> "没有可消除的一对（多半是识别把同类判成了不同类）"
+            direct > 0 -> "$direct 对可消"
+            hints.isNotEmpty() -> "${hints.size} 对同款，都被挡住（要先挪开挡路的砖）"
+            else -> "没有同款可消的砖"
         }
         // copy 而不是新建：自动那三个字段（auto/autoSteps/autoMessage）也要跟着走，
         // 每帧 `HintUiState(...)` 会把它们冲回默认值，界面上"自动通关"就永远显示未启用。
@@ -539,11 +552,12 @@ class HintSession(
         val totalMs = SystemClock.elapsedRealtime() - frameStartMs
         // 自动模式下这两行归 [autoAdvance] 管（识别中 / 求解中 / 第 k/N 步），
         // 这里再写一遍只会被同帧的下一刻覆盖，干脆不写；帧信息照旧进日志。
+        // 总耗时单独写进控制条右侧：自动模式的状态行会被"求解中/第 k 步"反复改写，
+        // 拼在状态行里一转眼就没了。分段明细仍只在 logcat 里（控制条放不下那么多字）。
+        lastTiming = "总耗时 ${totalMs}ms"
+        overlay.setBarTiming(lastTiming)
         if (!auto.get()) {
-            updateBar(
-                hintText,
-                "${result.modelLabel} · 第 $frames 帧 · 端到端 ${totalMs}ms（识别 ${result.classifyMs}）",
-            )
+            updateBar(hintText, "剩 $bricks 块")
         }
 
         // 每帧一条：刷新是用户手动点的，一帧最多一行，不会刷屏。
@@ -623,7 +637,7 @@ class HintSession(
     private fun solveAndPlan(result: HintPipeline.Result) {
         val grid = result.state.asGrid()
         val gen = generation.get()
-        updateBar("自动：求解中…（这一步可能几秒）", "已消 $autoSteps 对 · 剩 ${countBricks(result.state)} 块")
+        updateBar("求解中…", "剩 ${countBricks(result.state)} 块")
 
         worker.post {
             // 节点预算拦不住"单次尝试就是慢"的病态盘，再压一道挂钟上限
@@ -645,8 +659,8 @@ class HintSession(
                         // 先把"一共多少步"亮出来再动手：不给这一下停顿的话，
                         // 紧接着的 [playStep] 会把它覆盖成"第 1/N 步"，用户根本看不到总数。
                         updateBar(
-                            "自动：求解完成，共 ${plan.size} 步",
-                            "已消 $autoSteps 对 · 剩 ${countBricks(result.state)} 块",
+                            "共 ${plan.size} 步",
+                            "剩 ${countBricks(result.state)} 块",
                         )
                         main.postDelayed({
                             if (gen == generation.get() && auto.get() && planIndex < plan.size) {
@@ -655,8 +669,42 @@ class HintSession(
                         }, PLAN_ANNOUNCE_MS)
                     }
 
-                    AutoSolver.Outcome.Unsolvable ->
-                        finishAuto("本关无解（已穷举证明），要用游戏里的洗牌/道具才能继续")
+                    AutoSolver.Outcome.Unsolvable -> {
+                        if (!AutoContinue.enabled(context)) {
+                            finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」")
+                            return@post
+                        }
+                        // 补数据模式：无解说明盘面多半已经识别错了，继续走一步让游戏产生变化，
+                        // 每帧强制留档（见 beginCapture），攒够再一次性回训练。
+                        val action = BrickGameTipHelper.autoHint(grid)
+                        if (action != null) {
+                            unsolvableRetries = 0
+                            playAction(result, action, "无解，继续消")
+                        } else {
+                            // 诊断：无解时把"配对存在但落点不通"这件事说清楚，别让人以为程序坏了
+                            val moves = BrickGameTipHelper.findMoves(grid)
+                            Log.w(TAG, "autoHint=null：找到 ${moves.size} 对同款，逐对检查落点")
+                            moves.take(6).forEach { m ->
+                                val cA = grid[m[0]][m[3]]   // 落点 (fromRow, pairCol)
+                                val cB = grid[m[2]][m[1]]   // 落点 (pairRow, fromCol)
+                                val ok = BrickGameTipHelper.resolveAction(grid, m) != null
+                                Log.w(TAG, "  (${m[0]},${m[1]})+(${m[2]},${m[3]}) " +
+                                    "落点值=$cA/$cB 可执行=$ok")
+                            }
+                            unsolvableRetries++
+                            if (unsolvableRetries >= UNSOLVABLE_RETRY_LIMIT) {
+                                finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」")
+                                return@post
+                            }
+                            // 这里只描述"程序自己在做什么"；要用户动手的话放在结束文案里说清楚
+                            updateBar(
+                                "无解，重试中 $unsolvableRetries/$UNSOLVABLE_RETRY_LIMIT",
+                                "剩 ${countBricks(result.state)} 块",
+                            )
+                            finishFrame()
+                            main.postDelayed(autoTick, UNSOLVABLE_RETRY_MS)
+                        }
+                    }
 
                     is AutoSolver.Outcome.Unknown -> {
                         // 预算烧完还没结论：不算失败，先贪心走一步，下一帧重新求解
@@ -664,7 +712,7 @@ class HintSession(
                         if (action == null) {
                             finishAuto("无解：一步都走不了")
                         } else {
-                            playAction(result, action, "自动：求解超预算，先贪心一步")
+                            playAction(result, action, "求解超预算，先走一步")
                         }
                     }
                 }
@@ -682,7 +730,7 @@ class HintSession(
         val remaining = (plan.size - planIndex).coerceAtLeast(1)
         val total = autoSteps + remaining
         val current = autoSteps + 1
-        playAction(result, step.toAction(), note ?: "自动：第 $current/$total 步")
+        playAction(result, step.toAction(), note ?: "第 $current/$total 步")
     }
 
     /**
@@ -724,16 +772,8 @@ class HintSession(
         val gen = generation.get()
         // 记下配对砖那一格：下一帧 [autoAdvance] 拿它复检这一步有没有真的落地
         pendingPair = CellPoint(pr, pc)
-        // 第一行报"第几步"（[playStep] 传进来的 note），这一手具体点哪儿/滑到哪儿放第二行
-        val what = if (inPlace) {
-            "点 ($fr,$fc) 消 ($pr,$pc)"
-        } else {
-            "滑 ($fr,$fc)→($tr,$tc) 消 ($pr,$pc)"
-        }
-        updateBar(
-            note ?: "自动：执行中",
-            "$what · 已消 $autoSteps 对 · 剩 ${countBricks(result.state)} 块",
-        )
+        // 坐标/滑动方向屏幕上看得到，不再写进状态行；只报"还剩多少块"
+        updateBar(note ?: "执行中", "剩 ${countBricks(result.state)} 块")
 
         // 手势发出去之后要排下一帧。步数不在这里记 —— 要等下一帧复检确认真的消掉了才算
         // （见 [autoAdvance]），否则"没生效的手势"也会被算成战果。
@@ -776,12 +816,17 @@ class HintSession(
         main.removeCallbacks(autoTick)
         overlay.setBarAuto(false)
         HintUiBus.state = HintUiBus.state.copy(auto = false, autoMessage = message, autoSteps = autoSteps)
-        updateBar(message, "自动已停 · 共消 $autoSteps 对", message)
+        // 第一行给标题+统计，第二行才是原因（message 非空时控制条用红色显示它）——
+        // 以前两行都塞 message，屏幕上就是同一句话重复两遍
+        updateBar("已停止 · 已消 $autoSteps 对", "", message)
         Log.i(TAG, "自动结束：$message（已消 $autoSteps 对）")
     }
 
     private fun countBricks(state: com.qcmian.brickgame.vision.BoardState): Int =
         state.labels.count { it != 0 }
+
+    /** 本帧分段耗时，自动模式也要看得到，所以挂在 [updateBar] 上统一追加。 */
+    private var lastTiming = ""
 
     private fun updateBar(hintText: String, statusText: String, message: String? = null) {
         overlay.updateBar(ControlBarView.State(hintText = hintText, statusText = statusText, message = message))
@@ -831,6 +876,12 @@ class HintSession(
 
         /** 消掉一对之后等游戏把动画播完再截下一帧。 */
         const val STEP_SETTLE_MS = 700L
+
+        /** 无解继续模式下，一步都走不动时的重试间隔。 */
+        const val UNSOLVABLE_RETRY_MS = 3000L
+
+        /** 无解且一对都消不掉时最多重试几次（10 次 ≈ 30 秒），超过就停下来让人洗牌。 */
+        const val UNSOLVABLE_RETRY_LIMIT = 10
 
         /**
          * 求解完成后，把"一共多少步"亮一会儿再开始动手的时长。

@@ -66,7 +66,13 @@ object BrickGameTipHelper {
     // 提示：枚举所有可行操作
     // ------------------------------------------------------------------
 
-    fun findMoves(grid: Array<IntArray>): List<IntArray> {
+    /**
+     * 全部可执行动作：[fromRow, fromCol, toRow, toCol, pairRow, pairCol]。
+     *
+     * 关键点是**带着目标位置**。早先只给 [from, pair]，执行层只能拿"矩形的另一个角"去猜落点，
+     * 猜出来跟枚举时的实际目标不一致，于是出现"提示画了框、自动却判无解"。
+     */
+    fun findActions(grid: Array<IntArray>): List<IntArray> {
         val moves = ArrayList<IntArray>()
         val rows = grid.size
         val cols = grid[0].size
@@ -81,6 +87,10 @@ object BrickGameTipHelper {
         }
         return uniqueMove(moves)
     }
+
+    /** 兼容旧口径：只给 [fromRow, fromCol, pairRow, pairCol]。 */
+    fun findMoves(grid: Array<IntArray>): List<IntArray> =
+        findActions(grid).map { intArrayOf(it[0], it[1], it[4], it[5]) }
 
     /** [findMoves] 的强类型包装：全部可行走法（识别出来的整盘二维数组直接喂进来）。 */
     fun hints(grid: Array<IntArray>): List<BrickMove> = findMoves(grid).map { move ->
@@ -110,27 +120,22 @@ object BrickGameTipHelper {
         val pairRow = move[2]
         val pairCol = move[3]
 
-        val candidates = listOf(
-            intArrayOf(fromRow, pairCol),
-            intArrayOf(pairRow, fromCol),
-        )
-
-        for (to in candidates) {
-            if (to[0] == pairRow && to[1] == pairCol) continue
-            val isFrom = to[0] == fromRow && to[1] == fromCol
-            if (!isFrom && grid[to[0]][to[1]] != BACKGROUND) continue
-            if (to[0] != fromRow && to[1] != fromCol) continue
-
-            val action = intArrayOf(fromRow, fromCol, to[0], to[1], pairRow, pairCol)
-            val probe = Array(grid.size) { grid[it].copyOf() }
-            // GAME_FAIL 也算"这一步能动"：它表示这步消完盘面没救了（全局策略问题），
-            // 不是这一步不合法 —— 提示层要列全部可消对，不能因此把真能消的一对吞掉。
-            when (actionStep(probe, action)) {
-                ACTION_SUCCESS, GAME_SUCCESS, GAME_FAIL -> return action
-            }
+        // 候选落点 = 两个十字交叉点 + 沿 from 所在行/列能滑到的所有空位。
+        //
+        // 只用交叉点是错的：两块同列、中间隔着别的东西时，交叉点就是它们自己的位置，
+        // 全被跳过，于是判成"无解"；但实际把上面那块往下滑到配对砖旁边就能消。
+        // 下面按"由近到远"枚举可达空位，覆盖这类走法。
+        // 目标位置由枚举阶段直接给出（它就是"这一列/行上的空行"里的某一格），不再猜
+        val action = findActions(grid).firstOrNull {
+            it[0] == fromRow && it[1] == fromCol && it[4] == pairRow && it[5] == pairCol
+        } ?: return null
+        val probe = Array(grid.size) { grid[it].copyOf() }
+        // GAME_FAIL 也算"这一步能动"：它表示这步消完盘面没救了（全局策略问题），
+        // 不是这一步不合法 —— 提示层要列全部可消对，不能因此把真能消的一对吞掉。
+        return when (actionStep(probe, action)) {
+            ACTION_SUCCESS, GAME_SUCCESS, GAME_FAIL -> action
+            else -> null
         }
-
-        return null
     }
 
     /**
@@ -139,8 +144,11 @@ object BrickGameTipHelper {
      * @return 可直接交给 [actionStep] 的动作；已无可消除对时返回 null（即游戏失败）。
      */
     fun autoHint(grid: Array<IntArray>): IntArray? {
-        for (move in findMoves(grid)) {
-            resolveAction(grid, move)?.let { return it }
+        for (action in findActions(grid)) {
+            val probe = Array(grid.size) { grid[it].copyOf() }
+            when (actionStep(probe, action)) {
+                ACTION_SUCCESS, GAME_SUCCESS, GAME_FAIL -> return action
+            }
         }
         return null
     }
@@ -278,7 +286,7 @@ object BrickGameTipHelper {
         for (i in colIndex - 1 downTo 0) {
             if (grid[rowIndex][i] != BACKGROUND) {
                 if (grid[rowIndex][i] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, i))
+                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, rowIndex, i))
                 }
                 break
             }
@@ -288,7 +296,7 @@ object BrickGameTipHelper {
         for (i in colIndex + 1 until grid[0].size) {
             if (grid[rowIndex][i] != BACKGROUND) {
                 if (grid[rowIndex][i] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, i))
+                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, rowIndex, i))
                 }
                 return
             }
@@ -408,7 +416,7 @@ object BrickGameTipHelper {
         for (i in rowIndex - 1 downTo 0) {
             if (grid[i][colIndex] != BACKGROUND) {
                 if (grid[i][colIndex] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, i, colIndex))
+                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, i, colIndex))
                 }
                 break
             }
@@ -418,7 +426,7 @@ object BrickGameTipHelper {
         for (i in rowIndex + 1 until grid.size) {
             if (grid[i][colIndex] != BACKGROUND) {
                 if (grid[i][colIndex] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, i, colIndex))
+                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, i, colIndex))
                 }
                 return
             }

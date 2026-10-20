@@ -58,10 +58,11 @@ class OverlayController(context: Context) {
             barView.onRefresh = value
         }
 
-    var onClose: (() -> Unit)?
-        get() = barView.onClose
+    /** 定位算法开关：true = YOLO，false = OpenCV。 */
+    var onToggleLocator: ((Boolean) -> Unit)?
+        get() = barView.onToggleLocator
         set(value) {
-            barView.onClose = value
+            barView.onToggleLocator = value
         }
 
     var onToggleGrid: ((Boolean) -> Unit)?
@@ -76,11 +77,11 @@ class OverlayController(context: Context) {
             barView.onToggleLabels = value
         }
 
-    /** 定位算法开关：true = YOLO，false = OpenCV。 */
-    var onToggleLocator: ((Boolean) -> Unit)?
-        get() = barView.onToggleLocator
+    /** 无解继续开关。 */
+    var onToggleContinue: ((Boolean) -> Unit)?
+        get() = barView.onToggleContinue
         set(value) {
-            barView.onToggleLocator = value
+            barView.onToggleContinue = value
         }
 
     /** 自动通关开关：点一下回调期望的新状态（true = 开始自动）。 */
@@ -89,12 +90,6 @@ class OverlayController(context: Context) {
         set(value) {
             barView.onToggleAuto = value
         }
-
-    /** 把两个调试开关的当前状态同步到控制条（会话开始时对齐一次，之后由控制条自己翻）。 */
-    fun setBarToggles(grid: Boolean, labels: Boolean) {
-        barView.showGrid = grid
-        barView.showLabels = labels
-    }
 
     /**
      * 把"自动"开关同步到控制条。
@@ -106,9 +101,25 @@ class OverlayController(context: Context) {
         barView.autoOn = on
     }
 
+    /** 把两个调试开关的当前状态同步到控制条（会话开始与每帧各一次，避免两边显示不一致）。 */
+    fun setBarToggles(grid: Boolean, labels: Boolean) {
+        barView.showGrid = grid
+        barView.showLabels = labels
+    }
+
     /** 把定位算法同步到控制条开关上（会话开始/切换后都要对齐一次）。 */
     fun setBarLocator(yolo: Boolean) {
         barView.locatorYolo = yolo
+    }
+
+    /** 把本帧分段耗时写到控制条右上角。 */
+    fun setBarTiming(text: String) {
+        barView.timingText = text
+    }
+
+    /** 把"无解继续"同步到控制条。 */
+    fun setBarContinue(on: Boolean) {
+        barView.continueOn = on
     }
 
     /** 提示层 + 控制条一起挂。@return 是否挂上。 */

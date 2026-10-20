@@ -120,7 +120,7 @@ class HintOverlayView(context: Context) : View(context) {
         // 只有调试图层打开时才给"所有格子"上色；默认屏幕上除了提示那几格没有别的涂色
         if (f.showLabels) drawClasses(canvas, f)
         if (f.showGrid) drawGrid(canvas, f)
-        drawHints(canvas, f.hints)
+        drawHints(canvas, f)
     }
 
     private fun drawGrid(canvas: Canvas, f: Frame) {
@@ -156,23 +156,28 @@ class HintOverlayView(context: Context) : View(context) {
     }
 
     /**
-     * 画出全部可消除的对：全部统一红色框，同一对的两块砖上写**同一个序号** —— 颜色不区分对，
-     * 靠序号认"哪两块是一对"。
+     * 画出全部可消除的对：全部统一红色框，两块砖上写**类别号**。
+     *
+     * 以前写的是"第几对"（1、2、3…），和砖块本身没关系，用户没法拿它跟盘面对照；
+     * 类别号才是识别模型给的编号，能直接说"编号 1 的斧子"。
      *
      * 只标 [Hint.fromRect] 与 [Hint.pairRect] 这两块砖（就是会被消掉的两块）；
      * 不画落点、也不画箭头（滑哪边由游戏自己判定）。
      */
-    private fun drawHints(canvas: Canvas, hints: List<Hint>) {
+    private fun drawHints(canvas: Canvas, f: Frame) {
+        val hints = f.hints
         if (hints.isEmpty()) return
         // 开场闪烁的"灭"段整批不画；闪完之后这里恒为 true，提示框稳住常亮
         if (!blinkVisible(SystemClock.uptimeMillis())) return
         val first = hints.first().fromRect
         pairText.textSize = min(first.width, first.height) * 0.5f
         pairHalo.textSize = pairText.textSize
-        for ((i, hint) in hints.withIndex()) {
+        for (hint in hints) {
             drawMarker(canvas, hint.fromRect)
             drawMarker(canvas, hint.pairRect)
-            val label = (i + 1).toString()
+            // 两块是同款，类别号必然一样；写同一个数字正好说明"它们是一对"
+            val cls = f.state.labels[f.scan.indexOf(hint.from.row, hint.from.col)]
+            val label = cls.toString()
             drawPairIndex(canvas, hint.fromRect, label)
             drawPairIndex(canvas, hint.pairRect, label)
         }
@@ -191,7 +196,7 @@ class HintOverlayView(context: Context) : View(context) {
         canvas.drawRoundRect(rect, radius, radius, hintStroke)
     }
 
-    /** 两块砖上写同一个序号，位置固定在格子上沿，不挡中间的图案。 */
+    /** 两块砖上写同一个类别号，位置固定在格子上沿，不挡中间的图案。 */
     private fun drawPairIndex(canvas: Canvas, r: CellRect, label: String) {
         val x = r.centerX.toFloat()
         val y = r.top + (r.height * 0.26f) - (pairText.ascent() + pairText.descent()) / 2f

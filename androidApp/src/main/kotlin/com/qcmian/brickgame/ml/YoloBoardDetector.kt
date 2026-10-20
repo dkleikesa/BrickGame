@@ -102,33 +102,32 @@ class YoloBoardDetector(context: Context) : Closeable {
             return null
         }
         val tiles = boxes.filter { it.cls == CLS_TILE }
-        if (tiles.size < 3) {
-            Log.w(TAG, "tile 只有 ${tiles.size} 个，不足以定格距 → 放弃")
-            return null
-        }
-        val tileSide = tiles.map { (it.w + it.h) / 2f }.sorted()[tiles.size / 2]
-        val pitch = tileSide / TILE_INSET
-        if (pitch < 12f) {
-            Log.w(TAG, "格距只有 ${pitch}px（tile 框太小）→ 放弃")
-            return null
-        }
-        val cols = (board.w / pitch).roundToInt()
-        val rows = (board.h / pitch).roundToInt()
-        if (cols !in 6..16 || rows !in 6..20) {
-            Log.w(TAG, "网格尺寸不合理：${rows}x$cols（pitch=${pitch.roundToInt()}）→ 放弃")
-            return null
-        }
 
-        // board 框是"整片区域"的回归，边缘常差十几像素；每块砖的中心准得多。
-        // 先按 board 框定初值，再用砖心做一次最小二乘，把网格对齐到砖块上。
-        val fitX = fitAxis(tiles.map { it.cx }.toFloatArray(), board.left.toDouble(), board.w.toDouble() / cols, cols)
-        val fitY = fitAxis(tiles.map { it.cy }.toFloatArray(), board.top.toDouble(), board.h.toDouble() / rows, rows)
-        val leftC = fitX.first
-        val stepX = fitX.second.toFloat()
-        val topC = fitY.first
-        val stepY = fitY.second.toFloat()
-        val cellW = stepX
-        val cellH = stepY
+        // 残局只剩一两块砖时，砖的尺寸仍然可测（一块就够），缺的是交叉验证的样本数。
+        // 所以：砖够多 → 现算并缓存；砖很少 → 复用上一帧的网格，前提是棋盘框还在原位
+        // （换关卡/换模式时框会明显跳变，缓存随之作废）。
+        val cached = lastGrid?.takeIf { sameBoard(it, board) }
+        val grid = when {
+            tiles.size >= 3 -> buildGrid(board, tiles)?.also { lastGrid = it }
+            cached != null -> cached.also {
+                Log.i(TAG, "只检出 ${tiles.size} 块砖，复用上一帧网格（${it.rows}x${it.cols}）")
+            }
+            // 1~2 块砖：砖框尺寸照样能测，只是没有多余样本交叉验证，所以不写缓存
+            tiles.isNotEmpty() -> buildGrid(board, tiles)?.also {
+                Log.i(TAG, "只检出 ${tiles.size} 块砖，直接用砖框尺寸定格距（${it.rows}x${it.cols}）")
+            }
+            else -> null
+        }
+        if (grid == null) {
+            Log.w(TAG, "tile ${tiles.size} 个且没有可复用的网格 → 放弃")
+            return null
+        }
+        val cols = grid.cols
+        val rows = grid.rows
+        val leftC = grid.left
+        val topC = grid.top
+        val stepX = grid.stepX
+        val stepY = grid.stepY
         val score = FloatArray(rows * cols)
         for (r in 0 until rows) {
             val cy = (topC + (r + 0.5) * stepY).toFloat()
@@ -172,6 +171,51 @@ class YoloBoardDetector(context: Context) : Closeable {
             score = score, scoreThreshold = 0.5f,
             rects = rects, pitchX = stepX.roundToInt(), pitchY = stepY.roundToInt(),
         )
+    }
+
+    /** 一帧的网格几何。缓存它是为了在残局（砖少到无法独立定格距）时继续可用。 */
+    private class Grid(
+        val left: Double, val top: Double, val stepX: Float, val stepY: Float,
+        val cols: Int, val rows: Int,
+        val boardCx: Float, val boardCy: Float, val boardW: Float, val boardH: Float,
+    )
+
+    private var lastGrid: Grid? = null
+
+    /** 用 board 框定范围、砖块尺寸定格距，再用砖心最小二乘把网格对齐到砖上。 */
+    private fun buildGrid(board: Box, tiles: List<Box>): Grid? {
+        val tileSide = tiles.map { (it.w + it.h) / 2f }.sorted()[tiles.size / 2]
+        val pitch = tileSide / TILE_INSET
+        if (pitch < 12f) {
+            Log.w(TAG, "格距只有 ${pitch}px（tile 框太小）→ 放弃")
+            return null
+        }
+        val cols = (board.w / pitch).roundToInt()
+        val rows = (board.h / pitch).roundToInt()
+        if (cols !in 6..16 || rows !in 6..20) {
+            Log.w(TAG, "网格尺寸不合理：${rows}x$cols（pitch=${pitch.roundToInt()}）→ 放弃")
+            return null
+        }
+        // board 框是"整片区域"的回归，边缘常差十几像素；每块砖的中心准得多
+        val fitX = fitAxis(tiles.map { it.cx }.toFloatArray(), board.left.toDouble(), board.w.toDouble() / cols, cols)
+        val fitY = fitAxis(tiles.map { it.cy }.toFloatArray(), board.top.toDouble(), board.h.toDouble() / rows, rows)
+        return Grid(
+            left = fitX.first, top = fitY.first,
+            stepX = fitX.second.toFloat(), stepY = fitY.second.toFloat(),
+            cols = cols, rows = rows,
+            boardCx = (board.left + board.right) / 2f, boardCy = (board.top + board.bottom) / 2f,
+            boardW = board.w, boardH = board.h,
+        )
+    }
+
+    /** 缓存的网格还能不能用：棋盘框中心和大小都没明显变化（换关卡/换模式时会跳）。 */
+    private fun sameBoard(g: Grid, board: Box): Boolean {
+        val dx = (board.left + board.right) / 2f - g.boardCx
+        val dy = (board.top + board.bottom) / 2f - g.boardCy
+        val tol = g.stepX * 0.5f
+        val dw = kotlin.math.abs(board.w - g.boardW) / g.boardW
+        val dh = kotlin.math.abs(board.h - g.boardH) / g.boardH
+        return dx * dx + dy * dy <= tol * tol && dw < 0.08f && dh < 0.08f
     }
 
     /**

@@ -79,6 +79,13 @@ data class Hint(
     val pair: CellPoint,
     val fromRect: CellRect,
     val pairRect: CellRect,
+    /**
+     * true = 这一对现在就能消（落点为空格）。
+     *
+     * false 表示两块呈 L 形、十字交叉点被别的砖占着：必须先挪开挡路的那块，
+     * 属于两步操作。提示层照画，但要让人看得出区别。
+     */
+    val direct: Boolean = true,
 ) {
     /** "哪两块能消"的短描述（UI 上标对、日志里列对用这个）。 */
     fun pairText(): String = "(${from.row},${from.col})+(${pair.row},${pair.col})"

@@ -17,12 +17,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -43,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.qcmian.brickgame.capture.BrickGameAccessibilityService
+import com.qcmian.brickgame.capture.AutoContinue
 import com.qcmian.brickgame.capture.LowConfStore
 import com.qcmian.brickgame.ml.ModelChoice
 import com.qcmian.brickgame.ml.ModelVariant
@@ -71,6 +74,9 @@ fun HintApp() {
         var busy by remember { mutableStateOf(false) }
         var sharing by remember { mutableStateOf(false) }
         var deleting by remember { mutableStateOf(false) }
+        // 调试开关从悬浮条挪到 App：控制条只留日常会用到的四个，这样每个能画得更宽
+        var gridOn by remember { mutableStateOf(HintUiBus.showGrid) }
+        var labelsOn by remember { mutableStateOf(HintUiBus.showLabels) }
         var confirmDelete by remember { mutableStateOf(false) }
         // 放大看的哪张留档（null = 没开大图）
         var zoom by remember { mutableStateOf<File?>(null) }
@@ -191,6 +197,27 @@ fun HintApp() {
                         }
                     },
                 ) { Text(if (ui.running) "停止提示" else if (busy) "连接中…" else "开始提示") }
+            }
+
+            // 调试开关（原来在悬浮条上）。改完下一帧生效 —— 截屏分析本来就一轮一轮跑。
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = gridOn,
+                    onCheckedChange = {
+                        gridOn = it
+                        HintUiBus.showGrid = it
+                    },
+                )
+                Text("显示网格", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.width(18.dp))
+                Checkbox(
+                    checked = labelsOn,
+                    onCheckedChange = {
+                        labelsOn = it
+                        HintUiBus.showLabels = it
+                    },
+                )
+                Text("显示类别号", style = MaterialTheme.typography.bodySmall)
             }
 
             // 自动通关：进游戏前点它，之后由无障碍服务在游戏画面上自己滑。
