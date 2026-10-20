@@ -54,6 +54,35 @@ for f in sorted(os.listdir("samples")):
 PY
 ```
 
+### 分类标注也要跑一遍（补进来的帧，类别还没标）
+
+定位和分类是两条链：**定位**学"哪格是砖"，**分类**学"这块砖是什么"。补进来的帧两条都得过。
+
+```bash
+cd BrickGame-Tool/build-dataset
+../.venv-train/bin/python build_dataset.py              # 裁格 + 自动识别 + 出标注页
+../.venv-train/bin/python embed_features.py             # 刷特征缓存（标完再跑一次）
+../.venv-train/bin/python annotate_server.py --no-open  # :8770 分类标注
+open http://127.0.0.1:8770/build-dataset/annotate.html
+```
+
+**裁格定位必须用 YOLO**：`build_dataset.py` 默认 `--locator yolo`。残局/空盘时 OpenCV 的
+detect_grid 没有周期可数，会把 14 行算成 13 行、格线整体错一格 —— 用它切出来的格子本身
+就是歪的，标注等于白标。YOLO 判不出的帧（砖块 < 2，多是空盘）直接跳过，**不**退回 OpenCV。
+
+### 清理页：删重复 / 无用图
+
+```bash
+../.venv-train/bin/python review_server.py --purge       # :8765
+open http://127.0.0.1:8765/build-dataset/review.html
+```
+
+按 class_id 铺开，**拖拽框选**批量标删（要整张图都在框里才算选中；悬停不放大，否则和框选冲突）。
+点 ✎ 改类别会**直接写回 index.csv**，且不再整页刷新（原来每改一格就 reload，标注没法连续做），
+右上角有「刷新页面」按钮手动归位。
+
+**服务要用后台任务托管启动**，别用 `(cmd &)` —— 父 shell 一退出子进程就被回收，页面会突然 404（踩过好几次）。
+
 ## 2. 预标注：模型先出框，人只删改
 
 ```bash
@@ -62,17 +91,21 @@ cd BrickGame-Tool
 ```
 
 产物 `build-dataset/yolo/prelabel/<帧名>.txt`（YOLO 格式，含 board 与 tile）。
-**抽查是必须的**：预标注的 tile 框来自当前模型，模型在残局/新皮肤上会漏，漏的框等于告诉下一版"这里不是砖"。
-快速抽查：
+
+**必须人工过一遍**：预标注是当前模型自己出的框，漏检在训练里等于"这里没有砖"，会被固化。
+逐格点 140 个框不现实，所以只做两件事：删误检、补漏检。页面数据由 `GET /data` 现算
+（HTML 是静态的，不用每次重新生成），`POST /save` 直接写回 `yolo/labels`：
 
 ```bash
-.venv-train/bin/python - <<'PY'
-from ultralytics import YOLO
-YOLO("runs/brick/weights/best.pt").predict("build-dataset/samples", imgsz=640,
-      conf=0.25, save=True, project="runs", name="check", exist_ok=True)
-PY
-open runs/check    # 一张张看框，错得多的那几帧直接删掉 samples 里的图重采
+cd BrickGame-Tool/build-dataset
+../.venv-train/bin/python box_server.py                  # :8771，自动开浏览器
+open http://127.0.0.1:8771/
 ```
+
+- **蓝色 = 砖块**（点一下 = 删掉它，再点一次恢复）、**白色 = 棋盘**（一般不动）
+- **空白处拖拽** = 补一个漏检的砖（黄框，点一下可撤掉）
+- 保存幂等：首次保存前备份 `.orig`，之后每次从备份重算再叠加，反复保存不会重复加框
+- 改完再跑 `make_yolo_data.py` 装配，然后 `train_yolo.py --resume`
 
 ## 3. 装配数据集（划分持久化）
 
