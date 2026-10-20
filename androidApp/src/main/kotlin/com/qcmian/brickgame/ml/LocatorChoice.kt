@@ -9,7 +9,8 @@ enum class Locator(val label: String) {
     ;
 
     companion object {
-        val DEFAULT = OpenCV
+        /** YOLO 在残局/换肤下明显更稳，默认走它；要对比再在 App 里切回 OpenCV。 */
+        val DEFAULT = Yolo
         fun parse(raw: String?): Locator = entries.firstOrNull { it.name == raw } ?: DEFAULT
     }
 }

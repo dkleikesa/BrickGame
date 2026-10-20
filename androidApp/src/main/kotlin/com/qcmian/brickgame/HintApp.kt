@@ -6,9 +6,16 @@ import android.content.Intent
 import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,8 +33,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,15 +47,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.qcmian.brickgame.capture.BrickGameAccessibilityService
 import com.qcmian.brickgame.capture.AutoContinue
 import com.qcmian.brickgame.capture.LowConfStore
+import com.qcmian.brickgame.ml.Locator
+import com.qcmian.brickgame.ml.LocatorChoice
 import com.qcmian.brickgame.ml.ModelChoice
 import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.ml.TfliteTileClassifier
@@ -78,6 +93,9 @@ fun HintApp() {
         var gridOn by remember { mutableStateOf(HintUiBus.showGrid) }
         var labelsOn by remember { mutableStateOf(HintUiBus.showLabels) }
         var confirmDelete by remember { mutableStateOf(false) }
+        var showSettings by remember { mutableStateOf(false) }
+        // 定位算法：默认 YOLO；切回 OpenCV 只用来做对照
+        var yoloOn by remember { mutableStateOf(LocatorChoice.current(context) == Locator.Yolo) }
         // 放大看的哪张留档（null = 没开大图）
         var zoom by remember { mutableStateOf<File?>(null) }
         var openCvReady by remember { mutableStateOf<Boolean?>(null) }
@@ -103,6 +121,7 @@ fun HintApp() {
             HintUiBus.variant = withContext(Dispatchers.IO) { ModelChoice.current(context) }
         }
 
+        Box(Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -112,7 +131,11 @@ fun HintApp() {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("BrickGame 提示", style = MaterialTheme.typography.headlineSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("BrickGame 提示", style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.weight(1f))
+                Button(onClick = { showSettings = true }) { Text("设置") }
+            }
 
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -151,27 +174,6 @@ fun HintApp() {
                 }
             }
 
-            // 识别模型：两个都内置在 APK 里，切换 = 服务重建解释器（不用重装、不用重启）。
-            // 服务没连上时只落盘，下次服务起来读到的就是新模型。
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("模型", style = MaterialTheme.typography.bodyMedium)
-                ModelVariant.entries.forEach { variant ->
-                    FilterChip(
-                        selected = HintUiBus.variant == variant,
-                        onClick = {
-                            if (HintUiBus.variant == variant) return@FilterChip
-                            HintUiBus.variant = variant
-                            BrickGameAccessibilityService.selectModel(variant)
-                        },
-                        label = { Text(variant.label) },
-                    )
-                }
-            }
-
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
@@ -196,28 +198,7 @@ fun HintApp() {
                             }
                         }
                     },
-                ) { Text(if (ui.running) "停止提示" else if (busy) "连接中…" else "开始提示") }
-            }
-
-            // 调试开关（原来在悬浮条上）。改完下一帧生效 —— 截屏分析本来就一轮一轮跑。
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(
-                    checked = gridOn,
-                    onCheckedChange = {
-                        gridOn = it
-                        HintUiBus.showGrid = it
-                    },
-                )
-                Text("显示网格", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.width(18.dp))
-                Checkbox(
-                    checked = labelsOn,
-                    onCheckedChange = {
-                        labelsOn = it
-                        HintUiBus.showLabels = it
-                    },
-                )
-                Text("显示类别号", style = MaterialTheme.typography.bodySmall)
+                ) { Text(if (ui.running) "隐藏悬浮窗" else if (busy) "连接中…" else "显示悬浮窗") }
             }
 
             // 自动通关：进游戏前点它，之后由无障碍服务在游戏画面上自己滑。
@@ -322,7 +303,189 @@ fun HintApp() {
             Box(Modifier.height(24.dp))
         }
 
+        // 设置页做成覆盖层：主页一直渲染在下面，动画只作用在这一层。
+        // 用 AnimatedContent 替换内容时容器尺寸会跳变，退出动画会被裁掉。
+        AnimatedVisibility(
+            visible = showSettings,
+            enter = slideInHorizontally(tween(240)) { it },
+            exit = slideOutHorizontally(tween(200)) { it },
+        ) {
+            SettingsPage(
+                yoloOn = yoloOn,
+                gridOn = gridOn,
+                labelsOn = labelsOn,
+                onYolo = {
+                    yoloOn = it
+                    LocatorChoice.save(context, if (it) Locator.Yolo else Locator.OpenCV)
+                },
+                onGrid = {
+                    gridOn = it
+                    HintUiBus.showGrid = it
+                },
+                onLabels = {
+                    labelsOn = it
+                    HintUiBus.showLabels = it
+                },
+                onBack = { showSettings = false },
+            )
+        }
+        }
         zoom?.let { file -> LowConfZoomDialog(file) { zoom = null } }
+    }
+}
+
+
+/**
+ * 设置页，照 iOS「设置」的样子：浅灰分组底 + 白色圆角卡片 + 行内左标题右控件。
+ *
+ * 用覆盖层渲染（见调用处的 AnimatedVisibility），所以这里自己铺满、自己滚动。
+ */
+@Composable
+private fun SettingsPage(
+    yoloOn: Boolean,
+    gridOn: Boolean,
+    labelsOn: Boolean,
+    onYolo: (Boolean) -> Unit,
+    onGrid: (Boolean) -> Unit,
+    onLabels: (Boolean) -> Unit,
+    onBack: () -> Unit,
+) {
+    val groupBg = Color(0xFFF2F2F7)
+    val cardBg = Color.White
+    val secondary = Color(0xFF8E8E93)
+    val separator = Color(0xFFC6C6C8).copy(alpha = 0.55f)
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(groupBg)
+            .systemBarsPadding()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        // 顶部导航条：返回在左、标题居中
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(cardBg)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onBack) { Text("返回") }
+            Spacer(Modifier.weight(1f))
+            Text("设置", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(72.dp))
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        GroupTitle("识别模型")
+        SettingsCard(cardBg) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Text("MobileNet", fontSize = 16.sp)
+                Spacer(Modifier.height(8.dp))
+                // 分段控件单独占一行、三等分：跟着文字宽度排会一宽一窄，很难看
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFE9E9EB))
+                        .padding(2.dp),
+                ) {
+                    ModelVariant.entries.forEach { variant ->
+                        val selected = HintUiBus.variant == variant
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (selected) Color.White else Color.Transparent)
+                                .clickable {
+                                    if (!selected) {
+                                        HintUiBus.variant = variant
+                                        BrickGameAccessibilityService.selectModel(variant)
+                                    }
+                                }
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                variant.label,
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center,
+                                color = if (selected) Color.Black else secondary,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        GroupTitle("定位")
+        SettingsCard(cardBg) {
+            SettingsRow("用 YOLO 定位", yoloOn, onYolo)
+        }
+        Text(
+            "关掉则用 OpenCV 的几何算法做对照",
+            fontSize = 13.sp,
+            color = secondary,
+            modifier = Modifier.padding(start = 32.dp, top = 6.dp),
+        )
+
+        GroupTitle("调试显示")
+        SettingsCard(cardBg) {
+            SettingsRow("显示网格", gridOn, onGrid)
+            HorizontalDivider(
+                color = separator,
+                thickness = 0.5.dp,
+                modifier = Modifier.padding(start = 16.dp),
+            )
+            SettingsRow("显示类别号", labelsOn, onLabels)
+        }
+        Text(
+            "改完下一帧生效：截屏分析本身就是一轮一轮跑的",
+            fontSize = 13.sp,
+            color = secondary,
+            modifier = Modifier.padding(start = 32.dp, top = 6.dp),
+        )
+
+        Spacer(Modifier.height(28.dp))
+    }
+}
+
+@Composable
+private fun GroupTitle(text: String) {
+    Text(
+        text,
+        fontSize = 13.sp,
+        color = Color(0xFF8E8E93),
+        modifier = Modifier.padding(start = 32.dp, top = 18.dp, bottom = 6.dp),
+    )
+}
+
+@Composable
+private fun SettingsCard(bg: Color, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        Modifier
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg),
+        content = content,
+    )
+}
+
+@Composable
+private fun SettingsRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onChange(!checked) }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, fontSize = 16.sp)
+        Spacer(Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

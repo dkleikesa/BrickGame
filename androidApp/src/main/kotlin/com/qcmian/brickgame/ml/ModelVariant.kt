@@ -14,13 +14,13 @@ package com.qcmian.brickgame.ml
  */
 enum class ModelVariant(val tag: String, val label: String) {
     /** MobileNetV3-large，3.22M 参数，线上一直在跑的那个。 */
-    LARGE("", "Large"),
+    LARGE("", "V3 Large"),
 
     /**
      * MobileNetV3-small，1.07M 参数。留档阈值与 large 不同（85 vs 84，见 [ModelMeta.dumpSimilarity]）：
      * 它的度量空间更挤，没见过的东西更容易被判"没把握"。
      */
-    SMALL("_small", "Small"),
+    SMALL("_small", "V3 Small"),
 
     /**
      * MobileNetV2，2.55M 参数。**进这个变体的唯一理由是它在手机 GPU 上能整图跑**：

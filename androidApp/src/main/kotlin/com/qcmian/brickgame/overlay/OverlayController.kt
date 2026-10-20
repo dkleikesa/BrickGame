@@ -58,13 +58,6 @@ class OverlayController(context: Context) {
             barView.onRefresh = value
         }
 
-    /** 定位算法开关：true = YOLO，false = OpenCV。 */
-    var onToggleLocator: ((Boolean) -> Unit)?
-        get() = barView.onToggleLocator
-        set(value) {
-            barView.onToggleLocator = value
-        }
-
     var onToggleGrid: ((Boolean) -> Unit)?
         get() = barView.onToggleGrid
         set(value) {
@@ -105,11 +98,6 @@ class OverlayController(context: Context) {
     fun setBarToggles(grid: Boolean, labels: Boolean) {
         barView.showGrid = grid
         barView.showLabels = labels
-    }
-
-    /** 把定位算法同步到控制条开关上（会话开始/切换后都要对齐一次）。 */
-    fun setBarLocator(yolo: Boolean) {
-        barView.locatorYolo = yolo
     }
 
     /** 把本帧分段耗时写到控制条右上角。 */

@@ -152,24 +152,24 @@ class YoloBoardDetector(context: Context) : Closeable {
                 rt.coerceIn(0, frame.width), b.coerceIn(0, frame.height),
             )
         }
-        // 拟合残差：砖块中心到"它所在格中心"的距离，正常应该只有几像素
-        var res = 0.0
-        tiles.forEach {
-            val c = ((it.cx - leftC) / stepX).toInt().coerceIn(0, cols - 1)
-            val r = ((it.cy - topC) / stepY).toInt().coerceIn(0, rows - 1)
-            val dx = it.cx - (leftC + (c + 0.5) * stepX)
-            val dy = it.cy - (topC + (r + 0.5) * stepY)
-            res = maxOf(res, kotlin.math.hypot(dx, dy))
-        }
+        // 网格置信度：残差偏大 / board 分数低 / 砖太少，都算"能用但可疑"，交给上层留档
+        val suspect = buildList {
+            if (grid.residual > stepX * 0.15f) add("网格残差 ${grid.residual.roundToInt()}px")
+            if (board.conf < 0.6f) add("board 分数 ${"%.2f".format(board.conf)}")
+            if (tiles.size < 3) add("只检出 ${tiles.size} 块砖")
+        }.takeIf { it.isNotEmpty() }?.joinToString("、")
         Log.i(TAG, "YOLO 定位 ${rows}x$cols pitch=${stepX.roundToInt()}/${stepY.roundToInt()}" +
             " 原点=(${leftC.roundToInt()},${topC.roundToInt()}) tile ${tiles.size} 个" +
-            " 最大残差=${res.roundToInt()}px，耗时 ${(System.nanoTime() - t0) / 1_000_000}ms")
+            " 最大残差=${grid.residual.roundToInt()}px" +
+            (suspect?.let { " ⚠$it" } ?: "") +
+            "，耗时 ${(System.nanoTime() - t0) / 1_000_000}ms")
         return BoardScan(
             rows = rows, cols = cols,
             xlines = DoubleArray(cols + 1) { leftC + it * stepX.toDouble() },
             ylines = DoubleArray(rows + 1) { topC + it * stepY.toDouble() },
             score = score, scoreThreshold = 0.5f,
             rects = rects, pitchX = stepX.roundToInt(), pitchY = stepY.roundToInt(),
+            suspect = suspect,
         )
     }
 
@@ -178,6 +178,13 @@ class YoloBoardDetector(context: Context) : Closeable {
         val left: Double, val top: Double, val stepX: Float, val stepY: Float,
         val cols: Int, val rows: Int,
         val boardCx: Float, val boardCy: Float, val boardW: Float, val boardH: Float,
+        /** 砖块中心到最近格中心的最大偏差（像素）。网格错一格时这个值≈一个 pitch。 */
+        val residual: Float,
+    )
+
+    private fun Grid.copyWithResidual(res: Float) = Grid(
+        left = left, top = top, stepX = stepX, stepY = stepY, cols = cols, rows = rows,
+        boardCx = boardCx, boardCy = boardCy, boardW = boardW, boardH = boardH, residual = res,
     )
 
     private var lastGrid: Grid? = null
@@ -190,22 +197,55 @@ class YoloBoardDetector(context: Context) : Closeable {
             Log.w(TAG, "格距只有 ${pitch}px（tile 框太小）→ 放弃")
             return null
         }
-        val cols = (board.w / pitch).roundToInt()
-        val rows = (board.h / pitch).roundToInt()
-        if (cols !in 6..16 || rows !in 6..20) {
-            Log.w(TAG, "网格尺寸不合理：${rows}x$cols（pitch=${pitch.roundToInt()}）→ 放弃")
+        val baseCols = (board.w / pitch).roundToInt()
+        val baseRows = (board.h / pitch).roundToInt()
+
+        // 行列数各试 ±1：残局时 board 框会缩一点，14 行就被算成 13 行，格线整体错一格
+        // （实测残差 104px ≈ 一个 pitch，随后执行必然"坐标越界"）。
+        // 用"砖块中心到最近格中心"的残差挑最优，残差过大说明怎么排都对不上，这一帧直接放弃。
+        var best: Grid? = null
+        for (dr in -1..1) {
+            for (dc in -1..1) {
+                val rows = baseRows + dr
+                val cols = baseCols + dc
+                if (rows !in 6..20 || cols !in 6..16) continue
+                val fitX = fitAxis(tiles.map { it.cx }.toFloatArray(),
+                    board.left.toDouble(), board.w.toDouble() / cols, cols)
+                val fitY = fitAxis(tiles.map { it.cy }.toFloatArray(),
+                    board.top.toDouble(), board.h.toDouble() / rows, rows)
+                val g = Grid(
+                    left = fitX.first, top = fitY.first,
+                    stepX = fitX.second.toFloat(), stepY = fitY.second.toFloat(),
+                    cols = cols, rows = rows,
+                    boardCx = (board.left + board.right) / 2f,
+                    boardCy = (board.top + board.bottom) / 2f,
+                    boardW = board.w, boardH = board.h,
+                    residual = 0f,
+                )
+                val res = residualOf(g, tiles)
+                if (best == null || res < best.residual) best = g.copyWithResidual(res)
+            }
+        }
+        val pick = best ?: return null
+        if (pick.residual > pitch * 0.35f) {
+            Log.w(TAG, "网格残差 ${pick.residual.roundToInt()}px（上限 ${(pitch * 0.35f).roundToInt()}）" +
+                " → 这一帧不可信，放弃")
             return null
         }
-        // board 框是"整片区域"的回归，边缘常差十几像素；每块砖的中心准得多
-        val fitX = fitAxis(tiles.map { it.cx }.toFloatArray(), board.left.toDouble(), board.w.toDouble() / cols, cols)
-        val fitY = fitAxis(tiles.map { it.cy }.toFloatArray(), board.top.toDouble(), board.h.toDouble() / rows, rows)
-        return Grid(
-            left = fitX.first, top = fitY.first,
-            stepX = fitX.second.toFloat(), stepY = fitY.second.toFloat(),
-            cols = cols, rows = rows,
-            boardCx = (board.left + board.right) / 2f, boardCy = (board.top + board.bottom) / 2f,
-            boardW = board.w, boardH = board.h,
-        )
+        return pick
+    }
+
+    /** 砖块中心到"它所在格中心"的最大距离。网格错一格时等于一个 pitch。 */
+    private fun residualOf(g: Grid, tiles: List<Box>): Float {
+        var worst = 0f
+        tiles.forEach {
+            val c = ((it.cx - g.left) / g.stepX).toInt().coerceIn(0, g.cols - 1)
+            val r = ((it.cy - g.top) / g.stepY).toInt().coerceIn(0, g.rows - 1)
+            val dx = it.cx - (g.left + (c + 0.5) * g.stepX)
+            val dy = it.cy - (g.top + (r + 0.5) * g.stepY)
+            worst = maxOf(worst, kotlin.math.hypot(dx, dy).toFloat())
+        }
+        return worst
     }
 
     /** 缓存的网格还能不能用：棋盘框中心和大小都没明显变化（换关卡/换模式时会跳）。 */

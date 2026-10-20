@@ -227,11 +227,6 @@ class HintSession(
             updateBar(if (on) "无解时继续自动玩：开" else "无解时继续自动玩：关",
                 "点「刷新」重跑一帧")
         }
-        overlay.onToggleLocator = { on ->
-            val locator = if (on) Locator.Yolo else Locator.OpenCV
-            LocatorChoice.save(context, locator)
-            updateBar("已切到 ${locator.label} 定位", "点「刷新」重跑一帧对比", null)
-        }
     }
 
     /** 开始提示：挂悬浮窗 + 立刻跑一帧。手动模式下之后等用户点「刷新」。 */
@@ -244,7 +239,6 @@ class HintSession(
         // 控制条上的开关跟着 App 界面里的开关走（两处共用 HintUiBus 这一个状态）
         overlay.setBarAuto(auto.get())
         overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
-        overlay.setBarLocator(LocatorChoice.current(context) == Locator.Yolo)
         overlay.setBarContinue(AutoContinue.enabled(context))
         refreshNow()
     }
@@ -466,7 +460,7 @@ class HintSession(
                 // 位图所有权一并移交：谁最后用谁回收。
                 if (result != null) {
                     dumpExecutor.execute {
-                        runCatching { LowConfStore.save(context, bitmap, result) }
+                        runCatching { LowConfStore.save(context, bitmap, result, result.scanSuspect) }
                             .onFailure { Log.w(TAG, "留档失败", it) }
                         if (!bitmap.isRecycled) bitmap.recycle()
                     }

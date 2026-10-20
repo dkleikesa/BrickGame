@@ -39,6 +39,8 @@ object HintPipeline {
         val classifyMs: Long,
         /** 标定（定位网格 + 裁格 + 判空）耗时。 */
         val scanMs: Long,
+        /** 非空 = 定位"能用但可疑"（网格残差大 / board 分数低 / 砖太少），需要留档。 */
+        val scanSuspect: String? = null,
         /** 接算法那一段（构造盘面 + 枚举可消对）；实测是微秒级，列出来是为了**排除**它。 */
         val hintsMs: Long,
         /** 识别内部的细分（阶段名 → ms），见 [TileClassifier.phaseTimings]。 */
@@ -93,6 +95,7 @@ object HintPipeline {
                 modelLabel = classifier.label,
                 classifyMs = classifyMs,
                 scanMs = scanMs,
+                scanSuspect = scan.suspect,
                 hintsMs = hintsMs,
                 classifyDetail = classifier.phaseTimings(),
             )

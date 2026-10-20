@@ -28,6 +28,13 @@ class BoardScan(
     val rects: Array<CellRect>,
     val pitchX: Int,
     val pitchY: Int,
+    /**
+     * 非空 = 定位结果"能用但可疑"（网格残差偏大、board 置信度低、砖块太少）。
+     *
+     * 这类帧照样出提示，但要留档：它往往是"识别错了却看起来正常"的来源，
+     * 事后补数据时比低置信度分类帧更值钱。
+     */
+    val suspect: String? = null,
 ) {
     val cellCount: Int get() = rows * cols
 

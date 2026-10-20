@@ -44,9 +44,6 @@ class ControlBarView(context: Context) : View(context) {
 
     var onRefresh: (() -> Unit)? = null
 
-    /** 定位算法开关：true = 切到 YOLO，false = 回到 OpenCV。会话负责落盘。 */
-    var onToggleLocator: ((Boolean) -> Unit)? = null
-
     /** 调试开关：网格 / 类别号。点一下立刻回调，由上层即时重画（不用等下一次刷新）。 */
     var onToggleGrid: ((Boolean) -> Unit)? = null
     var onToggleLabels: ((Boolean) -> Unit)? = null
@@ -56,13 +53,6 @@ class ControlBarView(context: Context) : View(context) {
 
     /** 自动通关开关：点一下把期望的新状态回调出去（true = 开始自动）。 */
     var onToggleAuto: ((Boolean) -> Unit)? = null
-
-    /** 当前用的是不是 YOLO 定位（只做显示，真值在 LocatorChoice 里）。 */
-    var locatorYolo: Boolean = false
-        set(value) {
-            field = value
-            invalidate()
-        }
 
     /** 两个调试开关的显示状态（写进去就重绘）。 */
     var showGrid: Boolean = false
@@ -176,7 +166,6 @@ class ControlBarView(context: Context) : View(context) {
     private val autoRect = RectF()
     private val gridRect = RectF()
     private val labelsRect = RectF()
-    private val locatorRect = RectF()
     private val continueRect = RectF()
     private val rect = RectF()
 
@@ -184,7 +173,6 @@ class ControlBarView(context: Context) : View(context) {
     private var autoToggleWidth = 0f
     private var gridToggleWidth = 0f
     private var labelsToggleWidth = 0f
-    private var locatorToggleWidth = 0f
     private var continueToggleWidth = 0f
 
     /** 当前按下的控件：[REFRESH]/[CLOSE]/[GRID]/[LABELS]/[AUTO]；-1 = 没有。 */
@@ -202,20 +190,16 @@ class ControlBarView(context: Context) : View(context) {
         autoToggleWidth = trackWidth + trackGap + toggleText.measureText(AUTO_LABEL)
         gridToggleWidth = trackWidth + trackGap + toggleText.measureText(GRID_LABEL)
         labelsToggleWidth = trackWidth + trackGap + toggleText.measureText(LABELS_LABEL)
-        locatorToggleWidth = trackWidth + trackGap + toggleText.measureText(LOCATOR_LABEL)
         continueToggleWidth = trackWidth + trackGap + toggleText.measureText(CONTINUE_LABEL)
 
-        // 从右往左排：刷新 ← 自动 ← 类别号 ← 网格 ← YOLO ← 续玩
-        // 关闭按钮移出（只能从 App 停），腾出来的宽度给了开关（轨道 26→30dp、标签 11→12sp）
+        // 从右往左排：刷新 ← 自动 ← 类别号 ← 网格 ← 续玩
+        // 关闭与"定位算法"都移回 App 了，这里只留操作/调试开关
         val fixed = buttonWidth + autoToggleWidth + labelsToggleWidth + gridToggleWidth +
-            locatorToggleWidth + continueToggleWidth
+            continueToggleWidth
         val available = w - padding * 2
-        val gap = if (fixed + buttonGap * 4 <= available) {
-            buttonGap
-        } else {
-            // 窄屏（320dp）兜底：压缩间距也要把这排塞下，不能叠在一起
-            ((available - fixed) / 5f).coerceIn(dp(1f), buttonGap)
-        }
+        // 空间富余时把余量**均分**到间隔里（以前固定 4dp，右边挤成一坨、左边一大片空白）；
+        // 窄屏才压到 2dp 兜底，保证不叠在一起
+        val gap = ((available - fixed) / 4f).coerceIn(dp(2f), dp(24f))
         var right = w - padding
         refreshRect.set(right - buttonWidth, top, right, bottom)
         right -= buttonWidth + gap
@@ -225,8 +209,6 @@ class ControlBarView(context: Context) : View(context) {
         right -= labelsToggleWidth + gap
         gridRect.set(right - gridToggleWidth, top, right, bottom)
         right -= gridToggleWidth + gap
-        locatorRect.set(right - locatorToggleWidth, top, right, bottom)
-        right -= locatorToggleWidth + gap
         continueRect.set(right - continueToggleWidth, top, right, bottom)
     }
 
@@ -264,7 +246,6 @@ class ControlBarView(context: Context) : View(context) {
         drawToggle(canvas, autoRect, AUTO_LABEL, autoOn, pressed == AUTO)
         drawToggle(canvas, gridRect, GRID_LABEL, showGrid, pressed == GRID)
         drawToggle(canvas, labelsRect, LABELS_LABEL, showLabels, pressed == LABELS)
-        drawToggle(canvas, locatorRect, LOCATOR_LABEL, locatorYolo, pressed == LOCATOR)
         drawToggle(canvas, continueRect, CONTINUE_LABEL, continueOn, pressed == CONTINUE)
         drawButton(canvas, refreshRect, "刷新", pressed == REFRESH, false)
     }
@@ -345,10 +326,6 @@ class ControlBarView(context: Context) : View(context) {
                         // 本地翻完就没机会被纠正了。只报"期望的新状态"，由会话回写 autoOn。
                         AUTO -> onToggleAuto?.invoke(!autoOn)
                         // 这两个是纯显示开关，立刻翻 + 回调，上层拿信号即时重画提示层
-                        LOCATOR -> {
-                            locatorYolo = !locatorYolo
-                            onToggleLocator?.invoke(locatorYolo)
-                        }
                         GRID -> {
                             showGrid = !showGrid
                             onToggleGrid?.invoke(showGrid)
@@ -383,7 +360,6 @@ class ControlBarView(context: Context) : View(context) {
         autoRect.contains(x, y) -> AUTO
         gridRect.contains(x, y) -> GRID
         labelsRect.contains(x, y) -> LABELS
-        locatorRect.contains(x, y) -> LOCATOR
         continueRect.contains(x, y) -> CONTINUE
         else -> NONE
     }
@@ -392,13 +368,11 @@ class ControlBarView(context: Context) : View(context) {
         const val NONE = -1
         const val REFRESH = 0
         const val AUTO = 4
-        const val LOCATOR = 5
         const val GRID = 2
         const val LABELS = 3
         const val CONTINUE = 6
 
         const val AUTO_LABEL = "自动"
-        const val LOCATOR_LABEL = "YOLO"
         const val GRID_LABEL = "网格"
         const val LABELS_LABEL = "类别号"
         const val CONTINUE_LABEL = "续玩"
