@@ -69,10 +69,12 @@ button.danger{color:#b42318;border-color:#f0c9c5}
 /* 悬停放大是这里唯一的"看清细节"手段：不占版面、不打断连点标记的节奏 */
 .tile{width:var(--ts);cursor:pointer;text-align:center}
 .tile img{width:var(--ts);height:var(--ts);image-rendering:pixelated;border-radius:5px;background:#eef0f2;display:block;border:2px solid transparent;transition:transform .08s}
-.tile:hover img{border-color:#1f6feb;transform:scale(2.2);position:relative;z-index:30;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.tile:hover img{border-color:#1f6feb}
+.body-boxing .tile:hover img{border-color:transparent}
 .tile .cap{font-size:9px;color:#8b8f96;line-height:1.3;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .tile .cap.k-manual{color:#1a7f37;font-weight:600}
 .tile.del img{opacity:.25;border-color:#d1242f}
+.tile.chg img{border-color:#1f6feb;box-shadow:0 0 0 2px rgba(31,111,235,.35)}
 .tile.del .cap{color:#d1242f;text-decoration:line-through}
 .tile.del{position:relative}
 .tile.del::after{content:'✕';position:absolute;top:1px;right:3px;color:#d1242f;font-weight:700;font-size:15px;text-shadow:0 0 3px #fff}
@@ -91,7 +93,7 @@ button.danger{color:#b42318;border-color:#f0c9c5}
 .grid{display:flex;flex-wrap:wrap;gap:5px}
 .cand{display:inline-block;text-align:center;cursor:pointer;padding:2px;border-radius:6px;border:2px solid transparent}
 .cand:hover{border-color:#1f6feb;background:#f4f7ff}
-.cand img{width:48px;height:48px;image-rendering:pixelated;border-radius:4px;background:#eee;display:block}
+.cand img{width:64px;height:64px;image-rendering:pixelated;border-radius:4px;background:#eee;display:block}
 .cand .ct{font-size:9px;color:#8b8f96}
 .tile .edit{display:none;position:absolute;top:1px;left:2px;padding:0 4px;font-size:11px;line-height:1.4;border-radius:4px;border:1px solid #d0d5da;background:#fff;z-index:31}
 body.serve .tile:hover .edit{display:block}
@@ -113,9 +115,10 @@ body.serve .tile:hover .edit{display:block}
   <button id="undo" class="danger" hidden>撤销上次删除</button>
   <button id="del" class="danger" hidden>删除选中</button>
   <button id="clr" class="danger">清空标记</button>
+  <button id="reload">刷新页面</button>
 </header>
 <div id="wrap">
-  <div class="head"><b id="ds"></b><span id="hint">点图 = 标记删除（再点取消）· 悬停放大 · 导出 JSON 后跑 apply_deletions.py</span></div>
+  <div class="head"><b id="ds"></b><span id="hint">点图 = 标记删除（再点取消）· 按住拖拽框选 = 标记框住的图（要整张都在框里）</span></div>
   <div id="sync" hidden></div>
   <div id="warn" hidden></div>
   <div id="list"></div>
@@ -267,6 +270,7 @@ const closePanel = () => { document.getElementById('mask').classList.remove('sho
                            document.getElementById('panel').classList.remove('show'); SEL = null; };
 
 // 写回 index.csv（服务模式）。frames 留空：去重页只管类别，不碰 frames.csv 的"标完"状态。
+let CHG = 0;
 function writeCorr(corr, msg) {
   if (!DATA.serve) {
     alert('当前页面是 file:// 打开的，浏览器写不了 index.csv。\n'
@@ -278,8 +282,16 @@ function writeCorr(corr, msg) {
     .then(r => r.json().then(j => ({ok: r.ok, j})))
     .then(({ok, j}) => {
       if (!ok || !j.ok) throw new Error(j.error || '写回失败');
-      alert(`${msg}\n已写回 index.csv（指派 ${j.n_set} / 标未知 ${j.n_unk} / 无变化 ${j.n_same}）。页面即将刷新。`);
-      location.reload();
+      // 改类别会把这格挪到别的类下，但**不整页刷新**：标一下就继续往下标，
+      // 想看它归位时点右上角「刷新页面」即可（原来每次都 reload，标注完全没法连续做）。
+      corr.forEach(c => {
+        document.querySelectorAll('.tile').forEach(el => {
+          if (el.dataset.path === c.path) el.classList.add('chg');
+        });
+      });
+      CHG += corr.length;
+      const sc = document.getElementById('stat');
+      if (sc) sc.textContent = '已改 ' + CHG + ' 格（刷新后归位）';
     })
     .catch(e => alert('写回失败：' + e.message));
 }
@@ -290,7 +302,8 @@ function renderPanel() {
   const m = SEL;
   const cur = m.cid === null ? '未识别' : m.cid;
   p.innerHTML = `
-    <div><img src="${m.src}" style="width:150px;height:150px;image-rendering:pixelated;border-radius:8px;background:#eee">
+    <div><img src="${m.src}" style="width:100%;max-width:300px;height:auto;border-radius:8px;background:#eee;display:block">
+      <div style="margin-top:5px"><a href="${m.src}" target="_blank" style="font-size:11px">在新标签打开原图（100%）</a></div>
       <div class="tag" style="margin-top:4px">${esc(m.path)}<br>帧 ${esc(m.frame)} · 第 ${m.row} 行 ${m.col} 列<br>
         当前类别 <span class="cur">${cur}</span>${REF[m.cid] ? '（' + esc(REF[m.cid]) + '）' : ''}
         · 来源 ${KINDNAME[m.kind] || m.kind}${m.d ? ' · 距离 ' + m.d : ''}</div></div>
@@ -337,6 +350,70 @@ function toggleDel(m) {
   row.classList.toggle('has', n > 0);
   stats();
 }
+
+// ---- 框选批量标记：按住拖拽画一个框，框内所有缩略图一次标删 ----
+let boxStart = null, boxLayer = null, suppressClick = false;
+function ensureBoxLayer() {
+  if (boxLayer) return boxLayer;
+  boxLayer = document.createElement('div');
+  boxLayer.style.cssText =
+    'position:fixed;border:2px solid #ff3b30;background:rgba(255,59,48,.18);' +
+    'pointer-events:none;z-index:9998;display:none;border-radius:4px';
+  document.body.appendChild(boxLayer);
+  return boxLayer;
+}
+document.addEventListener('mousedown', ev => {
+  if (ev.button !== 0) return;
+  if (ev.target.closest('button, #panel, .hd')) return;
+  boxStart = {x: ev.clientX, y: ev.clientY, moved: false};
+  document.body.classList.add('body-boxing');
+}, true);
+document.addEventListener('mousemove', ev => {
+  if (!boxStart) return;
+  const dx = ev.clientX - boxStart.x, dy = ev.clientY - boxStart.y;
+  if (!boxStart.moved && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) boxStart.moved = true;
+  if (!boxStart.moved) return;
+  ev.preventDefault();
+  const el = ensureBoxLayer();
+  el.style.display = 'block';
+  el.style.left = Math.min(boxStart.x, ev.clientX) + 'px';
+  el.style.top = Math.min(boxStart.y, ev.clientY) + 'px';
+  el.style.width = Math.abs(dx) + 'px';
+  el.style.height = Math.abs(dy) + 'px';
+}, true);
+document.addEventListener('mouseup', ev => {
+  if (!boxStart) return;
+  const st = boxStart; boxStart = null;
+  document.body.classList.remove('body-boxing');
+  if (boxLayer) boxLayer.style.display = 'none';
+  if (!st.moved) return;          // 单击：交给原来的 click 处理
+  suppressClick = true;           // 拖拽结束别再触发 click（否则会把拖到的图取消标记）
+  const l = Math.min(st.x, ev.clientX), r = Math.max(st.x, ev.clientX);
+  const t = Math.min(st.y, ev.clientY), b = Math.max(st.y, ev.clientY);
+  let n = 0;
+  document.querySelectorAll('.tile').forEach(el => {
+    const rc = el.getBoundingClientRect();
+    if (rc.width < 1) return;
+    // 四角都在框内才算选中：只看中心点会把一整排同类的图都圈进去
+    if (rc.left < l || rc.right > r || rc.top < t || rc.bottom > b) return;
+    const ds = el.dataset;
+    if (!S.del[ds.path]) {
+      S.del[ds.path] = {frame: ds.frame, cid: ds.cid === '' ? null : Number(ds.cid)};
+      n++;
+    }
+  });
+  render();
+  const sc = document.getElementById('stat');
+  if (sc) sc.textContent = '框选标记 ' + n + ' 张';
+}, true);
+document.addEventListener('click', ev => {
+  if (!suppressClick) return;
+  suppressClick = false;
+  ev.stopPropagation();
+  ev.preventDefault();
+}, true);
+
+document.getElementById('reload').onclick = () => location.reload();
 
 document.getElementById('list').addEventListener('click', ev => {
   // ✎：打开改标注抽屉（不是标删，别顺手把图标掉了）
