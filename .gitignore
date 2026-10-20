@@ -42,3 +42,6 @@ BrickGame-Tool/build-dataset/*.log
 # 训练/验证产物（根目录 runs/ 由 ultralytics 的 val 生成）
 runs/
 build.log
+
+# 标注工具导出的原始留档（含大图，不入库）
+BrickGame-Tool/build-dataset/dumps-new/
