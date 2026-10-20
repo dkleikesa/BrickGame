@@ -49,6 +49,9 @@ class ControlBarView(context: Context) : View(context) {
     var onToggleGrid: ((Boolean) -> Unit)? = null
     var onToggleLabels: ((Boolean) -> Unit)? = null
 
+    /** 定位算法开关：true = 切到 YOLO，false = 回到 OpenCV。会话负责落盘。 */
+    var onToggleLocator: ((Boolean) -> Unit)? = null
+
     /** 自动通关开关：点一下把期望的新状态回调出去（true = 开始自动）。 */
     var onToggleAuto: ((Boolean) -> Unit)? = null
 
@@ -60,6 +63,13 @@ class ControlBarView(context: Context) : View(context) {
         }
 
     var showLabels: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    /** 当前用的是不是 YOLO 定位（只做显示，真值在 LocatorChoice 里）。 */
+    var locatorYolo: Boolean = false
         set(value) {
             field = value
             invalidate()
@@ -145,12 +155,14 @@ class ControlBarView(context: Context) : View(context) {
     private val gridRect = RectF()
     private val labelsRect = RectF()
     private val autoRect = RectF()
+    private val locatorRect = RectF()
     private val rect = RectF()
 
     /** 三个开关的宽度：轨道 + 标题文字按实际宽度算，窄屏上别把标签挤掉。 */
     private var gridToggleWidth = 0f
     private var labelsToggleWidth = 0f
     private var autoToggleWidth = 0f
+    private var locatorToggleWidth = 0f
 
     /** 当前按下的控件：[REFRESH]/[CLOSE]/[GRID]/[LABELS]/[AUTO]；-1 = 没有。 */
     private var pressed = -1
@@ -167,15 +179,17 @@ class ControlBarView(context: Context) : View(context) {
         gridToggleWidth = trackWidth + trackGap + toggleText.measureText(GRID_LABEL)
         labelsToggleWidth = trackWidth + trackGap + toggleText.measureText(LABELS_LABEL)
         autoToggleWidth = trackWidth + trackGap + toggleText.measureText(AUTO_LABEL)
+        locatorToggleWidth = trackWidth + trackGap + toggleText.measureText(LOCATOR_LABEL)
 
         // 从右往左排：关闭 ← 刷新 ← 自动 ← 类别号 ← 网格
-        val fixed = buttonWidth * 2 + autoToggleWidth + labelsToggleWidth + gridToggleWidth
+        val fixed = buttonWidth * 2 + autoToggleWidth + labelsToggleWidth + gridToggleWidth +
+            locatorToggleWidth
         val available = w - padding * 2
         val gap = if (fixed + buttonGap * 4 <= available) {
             buttonGap
         } else {
             // 窄屏（320dp）兜底：压缩间距也要把这排塞下，不能叠在一起
-            ((available - fixed) / 4f).coerceIn(dp(2f), buttonGap)
+            ((available - fixed) / 5f).coerceIn(dp(1f), buttonGap)
         }
         var right = w - padding
         closeRect.set(right - buttonWidth, top, right, bottom)
@@ -187,6 +201,8 @@ class ControlBarView(context: Context) : View(context) {
         labelsRect.set(right - labelsToggleWidth, top, right, bottom)
         right -= labelsToggleWidth + gap
         gridRect.set(right - gridToggleWidth, top, right, bottom)
+        right -= gridToggleWidth + gap
+        locatorRect.set(right - locatorToggleWidth, top, right, bottom)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -217,6 +233,7 @@ class ControlBarView(context: Context) : View(context) {
         drawToggle(canvas, autoRect, AUTO_LABEL, autoOn, pressed == AUTO)
         drawToggle(canvas, gridRect, GRID_LABEL, showGrid, pressed == GRID)
         drawToggle(canvas, labelsRect, LABELS_LABEL, showLabels, pressed == LABELS)
+        drawToggle(canvas, locatorRect, LOCATOR_LABEL, locatorYolo, pressed == LOCATOR)
         drawButton(canvas, refreshRect, "刷新", pressed == REFRESH, false)
         drawButton(canvas, closeRect, "关闭", pressed == CLOSE, true)
     }
@@ -306,6 +323,10 @@ class ControlBarView(context: Context) : View(context) {
                             showLabels = !showLabels
                             onToggleLabels?.invoke(showLabels)
                         }
+                        LOCATOR -> {
+                            locatorYolo = !locatorYolo
+                            onToggleLocator?.invoke(locatorYolo)
+                        }
                     }
                     performClick()
                 }
@@ -329,6 +350,7 @@ class ControlBarView(context: Context) : View(context) {
         autoRect.contains(x, y) -> AUTO
         gridRect.contains(x, y) -> GRID
         labelsRect.contains(x, y) -> LABELS
+        locatorRect.contains(x, y) -> LOCATOR
         else -> NONE
     }
 
@@ -339,9 +361,11 @@ class ControlBarView(context: Context) : View(context) {
         const val GRID = 2
         const val LABELS = 3
         const val AUTO = 4
+        const val LOCATOR = 5
 
         const val GRID_LABEL = "网格"
         const val LABELS_LABEL = "类别号"
         const val AUTO_LABEL = "自动"
+        const val LOCATOR_LABEL = "YOLO"
     }
 }

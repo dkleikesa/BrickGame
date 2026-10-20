@@ -76,6 +76,13 @@ class OverlayController(context: Context) {
             barView.onToggleLabels = value
         }
 
+    /** 定位算法开关：true = YOLO，false = OpenCV。 */
+    var onToggleLocator: ((Boolean) -> Unit)?
+        get() = barView.onToggleLocator
+        set(value) {
+            barView.onToggleLocator = value
+        }
+
     /** 自动通关开关：点一下回调期望的新状态（true = 开始自动）。 */
     var onToggleAuto: ((Boolean) -> Unit)?
         get() = barView.onToggleAuto
@@ -97,6 +104,11 @@ class OverlayController(context: Context) {
      */
     fun setBarAuto(on: Boolean) {
         barView.autoOn = on
+    }
+
+    /** 把定位算法同步到控制条开关上（会话开始/切换后都要对齐一次）。 */
+    fun setBarLocator(yolo: Boolean) {
+        barView.locatorYolo = yolo
     }
 
     /** 提示层 + 控制条一起挂。@return 是否挂上。 */

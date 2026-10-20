@@ -25,3 +25,20 @@ BrickGame-Tool/build-dataset/cache/
 
 # Python 字节码缓存（各目录下的 __pycache__）
 __pycache__/
+
+# 定位模型链路的本地产物（数据集/合成图/评估结果都不入库）
+BrickGame-Tool/.venv-train/
+BrickGame-Tool/runs/
+BrickGame-Tool/yolo11n.pt
+BrickGame-Tool/build-dataset/yolo/
+BrickGame-Tool/build-dataset/samples-sparse/
+BrickGame-Tool/build-dataset/samples-fail/
+BrickGame-Tool/build-dataset/eval_*.csv
+BrickGame-Tool/build-dataset/sparse_result.csv
+BrickGame-Tool/eval_yolo.txt
+BrickGame-Tool/*.log
+BrickGame-Tool/build-dataset/*.log
+
+# 训练/验证产物（根目录 runs/ 由 ultralytics 的 val 生成）
+runs/
+build.log

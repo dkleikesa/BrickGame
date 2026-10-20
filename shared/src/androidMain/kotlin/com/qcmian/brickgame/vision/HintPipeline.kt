@@ -66,11 +66,13 @@ object HintPipeline {
         frame: Bitmap,
         classifier: TileClassifier,
         minPitch: Int = OpenCvBoardScanner.MIN_PITCH,
+        /** 定位实现；默认走 OpenCV。换 YOLO 只是换这一个 lambda。 */
+        localize: BoardLocalizer = BoardLocalizer { OpenCvBoardScanner.scan(it, minPitch) },
     ): Result? {
         val start = System.nanoTime()
         return try {
             val scanStart = System.nanoTime()
-            val scan = OpenCvBoardScanner.scan(frame, minPitch) ?: return null
+            val scan = localize.locate(frame) ?: return null
             val scanMs = (System.nanoTime() - scanStart) / 1_000_000
 
             val classifyStart = System.nanoTime()

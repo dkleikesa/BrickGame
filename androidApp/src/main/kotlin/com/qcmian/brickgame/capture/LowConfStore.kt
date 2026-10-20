@@ -42,7 +42,7 @@ object LowConfStore {
     fun save(context: Context, bitmap: Bitmap, result: HintPipeline.Result) {
         if (result.lowConfidence.isEmpty()) return
         val dir = ensureDir(context) ?: return
-        val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
+        val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss-SSS", Locale.US).format(Date())
         val scan = result.scan
         val t0 = SystemClock.elapsedRealtime()
         try {
@@ -130,20 +130,26 @@ object LowConfStore {
      * @return ZIP 文件；没有可分享的帧或建不出目录时返回 null。
      */
     fun zipAll(context: Context): File? {
-        val dir = readDir(context) ?: return null
-        val shots = pngs(dir)
-        if (shots.isEmpty()) return null
+        // 两个目录都要打：只打 low-conf 的话，"定位失败"那批帧永远拿不到 ——
+        // 而那正是补数据最缺的一类（定位错/没定位到）。
+        val groups = listOf(LOW_CONF_DIR to readDir(context), SCAN_FAIL_DIR to readFailDir(context))
+            .mapNotNull { (name, dir) -> dir?.takeIf { pngs(it).isNotEmpty() }?.let { name to it } }
+        if (groups.isEmpty()) return null
         val outDir = File(context.cacheDir, SHARE_DIR)
         if (!outDir.exists() && !outDir.mkdirs()) return null
         outDir.listFiles()?.forEach { runCatching { it.delete() } }
-        val zip = File(outDir, "brickgame-lowconf.zip")
+        val zip = File(outDir, "brickgame-dumps.zip")
+        var total = 0
         try {
             ZipOutputStream(zip.outputStream().buffered()).use { out ->
-                for (png in shots) {
-                    addEntry(out, png)
-                    // 同名 txt 是这一帧的说明，跟着一起打包
-                    val txt = File(dir, png.name.removeSuffix(".png") + ".txt")
-                    if (txt.isFile) addEntry(out, txt)
+                for ((prefix, dir) in groups) {
+                    for (png in pngs(dir)) {
+                        // 带子目录前缀：解压后 low-conf / scan-fail 各自成目录，入库脚本按目录分流
+                        addEntry(out, png, "$prefix/${png.name}")
+                        val txt = File(dir, png.name.removeSuffix(".png") + ".txt")
+                        if (txt.isFile) addEntry(out, txt, "$prefix/${txt.name}")
+                        total++
+                    }
                 }
             }
         } catch (e: Throwable) {
@@ -151,7 +157,7 @@ object LowConfStore {
             zip.delete()
             return null
         }
-        Log.i(TAG, "已打包 ${shots.size} 帧：$zip")
+        Log.i(TAG, "已打包 $total 帧（${groups.joinToString("/") { it.first }}）：$zip")
         return zip
     }
 
@@ -160,8 +166,8 @@ object LowConfStore {
         HintUiBus.lowConfShots = shots(context)
     }
 
-    private fun addEntry(out: ZipOutputStream, file: File) {
-        out.putNextEntry(ZipEntry(file.name))
+    private fun addEntry(out: ZipOutputStream, file: File, entryName: String = file.name) {
+        out.putNextEntry(ZipEntry(entryName))
         file.inputStream().use { it.copyTo(out) }
         out.closeEntry()
     }
@@ -169,6 +175,12 @@ object LowConfStore {
     /** 只读地找留档目录（数张数/打包用，不建目录）。 */
     private fun readDir(context: Context): File? {
         val dir = File(context.getExternalFilesDir(DUMP_DIR) ?: return null, LOW_CONF_DIR)
+        return if (dir.isDirectory) dir else null
+    }
+
+    /** 只读地找"定位失败"目录，与 [readDir] 同构。 */
+    private fun readFailDir(context: Context): File? {
+        val dir = File(context.getExternalFilesDir(DUMP_DIR) ?: return null, SCAN_FAIL_DIR)
         return if (dir.isDirectory) dir else null
     }
 

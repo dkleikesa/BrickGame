@@ -11,14 +11,19 @@ import com.qcmian.brickgame.HintUiBus
 import com.qcmian.brickgame.HintUiState
 import com.qcmian.brickgame.algorithm.AutoSolver
 import com.qcmian.brickgame.algorithm.BrickGameTipHelper
+import com.qcmian.brickgame.ml.Locator
+import com.qcmian.brickgame.ml.LocatorChoice
 import com.qcmian.brickgame.ml.ModelChoice
+import com.qcmian.brickgame.ml.YoloBoardDetector
 import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.overlay.ControlBarView
 import com.qcmian.brickgame.overlay.HintOverlayView
 import com.qcmian.brickgame.overlay.OverlayController
+import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.CellPoint
 import com.qcmian.brickgame.vision.HintEngine
 import com.qcmian.brickgame.vision.HintPipeline
+import com.qcmian.brickgame.vision.OpenCvBoardScanner
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -82,6 +87,9 @@ class HintSession(
      */
     private var loadedVariant: ModelVariant? = null
     private var loaded: TileClassifier? = null
+
+    /** YOLO 定位器（10MB 模型 + 解释器）。同 [loaded] 一样只在 worker 线程构造/关闭。 */
+    private var yolo: YoloBoardDetector? = null
 
     private val main = Handler(Looper.getMainLooper())
     private val workerThread = HandlerThread("brick-hint-worker").apply { start() }
@@ -204,6 +212,13 @@ class HintSession(
             HintUiBus.showLabels = on
             redrawHints()
         }
+        // 切定位算法只改落盘的选择，下一帧自然生效；不自动重跑 —— 此刻前台可能是 App 自己，
+        // 截图必然定位失败，看起来就像"一切就坏"。
+        overlay.onToggleLocator = { on ->
+            val locator = if (on) Locator.Yolo else Locator.OpenCV
+            LocatorChoice.save(context, locator)
+            updateBar("已切到 ${locator.label} 定位", "点「刷新」重跑一帧对比", null)
+        }
     }
 
     /** 开始提示：挂悬浮窗 + 立刻跑一帧。手动模式下之后等用户点「刷新」。 */
@@ -216,6 +231,7 @@ class HintSession(
         // 控制条上的开关跟着 App 界面里的开关走（两处共用 HintUiBus 这一个状态）
         overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         overlay.setBarAuto(auto.get())
+        overlay.setBarLocator(LocatorChoice.current(context) == Locator.Yolo)
         refreshNow()
     }
 
@@ -339,8 +355,24 @@ class HintSession(
         }
     }
 
+    /** 按落盘的选择走 OpenCV 或 YOLO；YOLO 模型加载失败就退回 OpenCV，不让整帧不可用。 */
+    private fun localize(frame: Bitmap): BoardScan? {
+        val picked = LocatorChoice.current(context)
+        Log.i(TAG, "定位算法=$picked")
+        if (picked != Locator.Yolo) return OpenCvBoardScanner.scan(frame)
+        val detector = yolo ?: runCatching { YoloBoardDetector(context).also { yolo = it } }
+            .onFailure { Log.w(TAG, "YOLO 模型加载失败", it) }
+            .getOrNull()
+            ?: return OpenCvBoardScanner.scan(frame)
+        return runCatching { detector.scan(frame) }
+            .onFailure { Log.w(TAG, "YOLO 定位异常", it) }
+            .getOrNull()
+    }
+
     private fun closeClassifier() {
         (loaded as? java.io.Closeable)?.let { runCatching { it.close() } }
+        yolo?.let { runCatching { it.close() } }
+        yolo = null
         loaded = null
         loadedVariant = null
     }
@@ -386,7 +418,9 @@ class HintSession(
             worker.post {
                 // analyze 自己会把异常吞成 null；这里兜的是**识别器初始化**（懒加载模型/GPU delegate）
                 // 抛出来的那类异常 —— 工作线程上没人接就是整个进程崩掉。失败不缓存，点「刷新」会重试。
-                val analysis = runCatching { HintPipeline.analyze(bitmap, acquireClassifier()) }
+                val analysis = runCatching {
+                    HintPipeline.analyze(bitmap, acquireClassifier()) { localize(it) }
+                }
                 val result = analysis.getOrNull()
 
                 // 先把结果推给主线程，**留档写盘必须排在它后面**（见下面）。
