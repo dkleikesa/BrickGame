@@ -10,6 +10,7 @@ import android.util.Log
 import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.CellRect
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -61,9 +62,17 @@ class YoloBoardDetector(context: Context) : Closeable {
         val bottom get() = cy + h / 2f
     }
 
+    /** 有 GPU 就用 GPU：YOLO 全是标准卷积，delegate 支持度比识别模型高得多。 */
+    private val gpuDelegate: GpuDelegate? = runCatching { GpuDelegate() }
+        .onFailure { Log.w(TAG, "GPU delegate 初始化失败，回退 CPU", it) }
+        .getOrNull()
+
     private val interp = Interpreter(
         loadModel(context, "brick_yolo.tflite"),
-        Interpreter.Options().apply { setNumThreads(4) },
+        Interpreter.Options().apply {
+            gpuDelegate?.let { addDelegate(it) }
+            setNumThreads(4)
+        },
     )
 
     private val inputBuf: ByteBuffer =
@@ -91,11 +100,21 @@ class YoloBoardDetector(context: Context) : Closeable {
         canvas.drawBitmap(frame, null, RectF(ox.toFloat(), oy.toFloat(),
             (ox + dw).toFloat(), (oy + dh).toFloat()), drawPaint)
 
+        val tLb = System.nanoTime()
+
         fillInput(letterboxed)
+        val tFill = System.nanoTime()
+
         interp.run(inputBuf, output)
+        val tRun = System.nanoTime()
+
         val boxes = decode(ox, oy, scale)
+        val tDec = System.nanoTime()
         Log.i(TAG, "原始输出最高分 board=${maxBoardScore} tile=${maxTileScore}，" +
-            "过阈值后 board=${boxes.count { it.cls == CLS_BOARD }} tile=${boxes.count { it.cls == CLS_TILE }}")
+            "过阈值后 board=${boxes.count { it.cls == CLS_BOARD }} tile=${boxes.count { it.cls == CLS_TILE }}" +
+            "｜分段(ms) letterbox=${(tLb - t0) / 1_000_000} fill=${(tFill - tLb) / 1_000_000} " +
+            "推理=${(tRun - tFill) / 1_000_000} 解码=${(tDec - tRun) / 1_000_000} " +
+            "网格=${(System.nanoTime() - tDec) / 1_000_000}")
 
         val board = boxes.filter { it.cls == CLS_BOARD }.maxByOrNull { it.conf } ?: run {
             Log.w(TAG, "没有 board 框 → 这一帧放弃")
@@ -363,6 +382,7 @@ class YoloBoardDetector(context: Context) : Closeable {
 
     override fun close() {
         runCatching { interp.close() }
+        gpuDelegate?.let { runCatching { it.close() } }
         letterboxed.recycle()
     }
 }

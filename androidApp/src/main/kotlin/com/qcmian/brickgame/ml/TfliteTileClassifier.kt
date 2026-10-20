@@ -55,6 +55,18 @@ class TfliteTileClassifier private constructor(
     private val outDim = meta.outDim
 
     private val cropper = CellCropper(img)
+
+    /**
+     * 裁格并行：135 格串行要 200ms，主要开销是一次次 JNI + resize。
+     *
+     * CellCropper 内部复用 Mat，不能跨线程共享，所以每线程各持一份（ThreadLocal）。
+     * 目标数组按格号分片写入，互不重叠，不需要额外同步。
+     */
+    private val cropThreads = 4
+    private val cropPool = java.util.concurrent.Executors.newFixedThreadPool(cropThreads) { r ->
+        Thread(r, "brick-crop").apply { isDaemon = true }
+    }
+    private val threadCropper = ThreadLocal.withInitial { CellCropper(img) }
     private val per = cropper.floatsPerTile
 
     val usingGpu: Boolean get() = gpuDelegate != null
@@ -107,9 +119,10 @@ class TfliteTileClassifier private constructor(
         try {
             for (chunk in targets.chunked(BATCH)) {
                 val tCrop = System.nanoTime()
-                for ((s, index) in chunk.withIndex()) {
-                    cropper.fill(bgr, scan, index, side, batchInput, s * per)
+                val jobs = chunk.mapIndexed { s, index ->
+                    cropPool.submit { threadCropper.get()!!.fill(bgr, scan, index, side, batchInput, s * per) }
                 }
+                jobs.forEach { it.get() }
                 // 补满：直接复制最后一张的有效段，比重新裁一次便宜；多出来的结果反正要丢掉
                 if (chunk.size < BATCH) {
                     val src = (chunk.size - 1) * per
@@ -198,6 +211,7 @@ class TfliteTileClassifier private constructor(
     override fun lowConfidenceCells(): List<Pair<Int, Int>> = lastLowConfidence
 
     override fun close() {
+        cropPool.shutdownNow()
         cropper.release()
         interpreter.close()
         // delegate 要晚于 interpreter 释放：Interpreter 还引用着它
