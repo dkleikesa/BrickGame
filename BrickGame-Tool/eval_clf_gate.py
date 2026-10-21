@@ -90,23 +90,24 @@ def main() -> None:
     ckpt = os.path.join(args.new, "best.pt")
     if not os.path.exists(ckpt):
         raise SystemExit(f"找不到 {ckpt}")
-    if not args.base and os.path.exists(os.path.join(args.new, "baseline.json")):
-        args.base = args.new   # 同目录下的 baseline.json
-
     print(f"新模型 {ckpt}（{ckpt_info(ckpt)['backbone']} img={ckpt_info(ckpt)['img']}）")
     with tempfile.TemporaryDirectory() as td:
         new_m = eval_ckpt(ckpt, os.path.join(td, "new"))
 
+        # 基线来源：显式 --base 且目录里有 best.pt → 重跑评测；
+        # 否则读 baseline.json（**绝不能拿 --new 自己的 best.pt 当基线**，那是自己跟自己比）
+        base_dir = args.base or args.new
+        base_ckpt = os.path.join(args.base, "best.pt") if args.base else ""
         base_m = None
-        if args.base:
-            base_ckpt = os.path.join(args.base, "best.pt")
-            if os.path.exists(base_ckpt):
-                print(f"基线   {base_ckpt}")
-                base_m = eval_ckpt(base_ckpt, os.path.join(td, "base"))
-            elif os.path.exists(os.path.join(args.base, "baseline.json")):
-                base_m = json.load(open(os.path.join(args.base, "baseline.json"),
-                                        encoding="utf-8"))["real"]
-                print(f"基线   沿用 {args.base}/baseline.json（{base_m.get('at', '')}）")
+        if base_ckpt and os.path.exists(base_ckpt):
+            print(f"基线   {base_ckpt}")
+            base_m = eval_ckpt(base_ckpt, os.path.join(td, "base"))
+        elif os.path.exists(os.path.join(base_dir, "baseline.json")):
+            saved = json.load(open(os.path.join(base_dir, "baseline.json"), encoding="utf-8"))
+            base_m = saved["real"]
+            print(f"基线   沿用 {base_dir}/baseline.json（{saved.get('at', '')}）")
+        else:
+            print("基线   无（首次运行，只查绝对下限；通过后 --update 建基线）")
 
     print(f"新     {fmt(new_m)}")
     print(f"基线   {fmt(base_m)}")

@@ -73,6 +73,9 @@ def apply(fixes: dict) -> tuple[int, int]:
     """按 fixes 重写 labels，返回（删除数, 新增数）。"""
     deleted = added = 0
     for base, fix in fixes.items():
+        # 只是"确认无误"（没改框）的帧不重写文件，也不留 .orig
+        if not (fix.get("deleted") or fix.get("added") or fix.get("board")):
+            continue
         p = label_path(base)
         if not os.path.exists(p):
             continue
@@ -83,9 +86,19 @@ def apply(fixes: dict) -> tuple[int, int]:
         for x1, y1, x2, y2 in fix.get("added", []):
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             new.append(f"1 {cx:.6f} {cy:.6f} {x2 - x1:.6f} {y2 - y1:.6f}\n")
+        board = fix.get("board")
+        replaced_board = 0
+        if board:
+            # 重画棋盘：整帧只有 1 个 board，先剔掉旧的 0 类框再写新的。
+            # 旧 board 是"被替换"不是"被删除"，别算进 deleted 的提示里。
+            x1, y1, x2, y2 = [min(1.0, max(0.0, float(v))) for v in board]
+            replaced_board = sum(1 for l in keep if l.lstrip().startswith("0 "))
+            keep = [l for l in keep if not l.lstrip().startswith("0 ")]
+            new.append(f"0 {(x1 + x2) / 2:.6f} {(y1 + y2) / 2:.6f} "
+                       f"{x2 - x1:.6f} {y2 - y1:.6f}\n")
         with open(p, "w", encoding="utf-8") as f:
             f.writelines(keep + new)
-        deleted += len(rows) - len(keep)
+        deleted += len(rows) - len(keep) - replaced_board
         added += len(new)
     return deleted, added
 
@@ -123,8 +136,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"ok": False, "error": str(e)}).encode(), "application/json")
             return
         bases = list(fixes.keys())
-        snapshot(bases)   # 首次保存先留底
-        restore(bases)    # 每次从原始版本重算，避免重复叠加
+        changed = [b for b in bases
+                   if fixes[b].get("deleted") or fixes[b].get("added") or fixes[b].get("board")]
+        snapshot(changed)   # 首次保存先留底（只对真的改了框的帧）
+        restore(changed)    # 每次从原始版本重算，避免重复叠加
         deleted, added = apply(fixes)
         mark_reviewed(bases)
         body = json.dumps({"ok": True, "frames": len(bases), "deleted": deleted, "added": added},

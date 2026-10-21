@@ -4773,8 +4773,8 @@
   "p037_b3_r1_c7"
  ],
  "thresholds": {
-  "dist_hit_p95": 0.0385,
-  "dist_wrong_p5": 0.1589,
+  "dist_hit_p95": 0.0381,
+  "dist_wrong_p5": 0.1588,
   "top1": 1.0,
   "top1_macro": 1.0,
   "n_query": 481,

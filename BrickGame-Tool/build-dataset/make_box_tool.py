@@ -46,7 +46,7 @@ TEMPLATE = r"""<!doctype html>
 </style></head><body>
 <header>
   <b>砖块框标注</b>
-  <span class="hint">蓝色 = 砖块（点一下 = 删掉它）；白色 = 棋盘，一般不用动；拖空白 = 补漏检</span>
+  <span class="hint">蓝色 = 砖块（点一下 = 删掉它）；拖空白 = 补漏检；棋盘偏了点卡片上的「重画棋盘」再拖一个框</span>
   <span id="prog" class="hint"></span>
   <button class="primary" id="export">保存到训练集</button>
   <button id="resetall">清空修改</button>
@@ -68,10 +68,11 @@ async function boot(){
 const state = JSON.parse(localStorage.getItem('brick-box-tool') || '{}');
 const cache = {};
 
-function st(f){ if(!state[f]) state[f] = {deleted:[], added:[]}; return state[f]; }
+function st(f){ if(!state[f]) state[f] = {deleted:[], added:[], board:null, ok:false}; return state[f]; }
+const armed = new Set();   // 哪些卡片处于"重画棋盘"模式（不落盘，刷新即清）
 function save(){ localStorage.setItem('brick-box-tool', JSON.stringify(state)); progress(); }
 function progress(){
-  const n = DATA.filter(d => { const s=state[d.file]; return s && (s.deleted.length || s.added.length); }).length;
+  const n = DATA.filter(d => { const s=state[d.file]; return s && (s.deleted.length || s.added.length || s.board || s.ok); }).length;
   document.getElementById('prog').textContent = '已修改 ' + n + ' / ' + DATA.length;
 }
 function draw(d, cv, draft){
@@ -95,6 +96,19 @@ function draw(d, cv, draft){
     ctx.lineWidth = 2; ctx.strokeStyle = '#ffcc00';
     ctx.strokeRect(a[0]*W, a[1]*H, (a[2]-a[0])*W, (a[3]-a[1])*H);
   });
+  if (cur.ok){
+    ctx.fillStyle = 'rgba(0,150,60,.85)';
+    ctx.fillRect(W - 88, 8, 80, 24);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif';
+    ctx.fillText('已确认', W - 76, 25);
+  }
+  if (cur.board){
+    const b = cur.board;
+    ctx.lineWidth = 3; ctx.strokeStyle = '#00e5ff';
+    ctx.strokeRect(b[0]*W, b[1]*H, (b[2]-b[0])*W, (b[3]-b[1])*H);
+    ctx.fillStyle = '#00e5ff'; ctx.font = 'bold 13px sans-serif';
+    ctx.fillText('新棋盘', b[0]*W + 4, b[1]*H + 15);
+  }
   // 砖很少时给一句醒目提示：这类帧本来就是"要人判断是空盘还是漏检"的
   const nTile = d.boxes.filter(b=>b[0]===1).length - 0;
   const liveTile = nTile - cur.deleted.filter(i=>d.boxes[i][0]===1).length + cur.added.length;
@@ -106,7 +120,9 @@ function draw(d, cv, draft){
     ctx.textAlign='left';
   }
   if (draft){
-    ctx.lineWidth = 2; ctx.strokeStyle = '#ffcc00'; ctx.setLineDash([6,4]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = armed.has(d.file) ? '#00e5ff' : '#ffcc00';
+    ctx.setLineDash([6,4]);
     ctx.strokeRect(draft[0], draft[1], draft[2]-draft[0], draft[3]-draft[1]);
   }
 }
@@ -136,12 +152,32 @@ function build(){
     card.innerHTML =
       '<div class="hd"><span>'+d.src+'</span><span>砖 '+d.boxes.filter(b=>b[0]===1).length+' 块</span></div>'+
       '<canvas width="'+w+'" height="'+h+'"></canvas>'+
-      '<div class="row"><span class="msg"></span></div>';
+      '<div class="row"><button class="bd">重画棋盘</button>'+
+      '<button class="ok">确认无误</button><span class="msg"></span></div>';
     host.appendChild(card);
     const cv = card.querySelector('canvas');
     const img = new Image();
     img.onload = ()=>{ cache[d.file]=img; draw(d,cv,null); };
     img.src = 'data:image/jpeg;base64,'+d.img;
+
+    const bbtn = card.querySelector('.bd');
+    const obtn = card.querySelector('.ok');
+    const paintOk = ()=>{
+      const on = st(d.file).ok;
+      obtn.textContent = on ? '已确认 ✓' : '确认无误';
+      obtn.classList.toggle('primary', on);
+    };
+    paintOk();
+    obtn.onclick = ()=>{
+      const s = st(d.file);
+      s.ok = !s.ok;
+      paintOk(); save(); draw(d,cv,null); msg(d);
+    };
+    bbtn.onclick = ()=>{
+      if (armed.has(d.file)) armed.delete(d.file); else armed.add(d.file);
+      bbtn.textContent = armed.has(d.file) ? '拖一个棋盘框…' : '重画棋盘';
+      bbtn.classList.toggle('primary', armed.has(d.file));
+    };
 
     let down=null, draft=null, moved=false;
     cv.addEventListener('mousedown', e=>{
@@ -179,7 +215,16 @@ function build(){
       } else {
         const x1=Math.min(p[0],down[0])/cv.width, y1=Math.min(p[1],down[1])/cv.height;
         const x2=Math.max(p[0],down[0])/cv.width, y2=Math.max(p[1],down[1])/cv.height;
-        if ((x2-x1)>0.01 && (y2-y1)>0.01){ cur.added.push([x1,y1,x2,y2]); save(); draw(d,cv,null); msg(d); }
+        if ((x2-x1)>0.01 && (y2-y1)>0.01){
+          if (armed.has(d.file)){
+            cur.board = [x1,y1,x2,y2];
+            armed.delete(d.file);
+            bbtn.textContent = '重画棋盘'; bbtn.classList.remove('primary');
+          } else {
+            cur.added.push([x1,y1,x2,y2]);
+          }
+          save(); draw(d,cv,null); msg(d);
+        }
       }
       down=null; draft=null;
     });
@@ -187,7 +232,7 @@ function build(){
   });
   document.getElementById('export').onclick = async ()=>{
     const out = {};
-    DATA.forEach(d=>{ const s=state[d.file]; if (s && (s.deleted.length||s.added.length)) out[d.file]=s; });
+    DATA.forEach(d=>{ const s=state[d.file]; if (s && (s.deleted.length||s.added.length||s.board||s.ok)) out[d.file]=s; });
     const btn = document.getElementById('export');
     btn.textContent = '保存中…'; btn.disabled = true;
     try {
@@ -209,7 +254,9 @@ function build(){
 }
 function msg(d){
   const s=st(d.file); const el=document.querySelector('#c-'+d.file+' .msg');
-  if(el) el.textContent = (s.deleted.length?('删 '+s.deleted.length+'  '):'') + (s.added.length?('补 '+s.added.length):'');
+  if(el) el.textContent = (s.deleted.length?('删 '+s.deleted.length+'  '):'')
+    + (s.added.length?('补 '+s.added.length+'  '):'')
+    + (s.board?'棋盘已重画  ':'') + (s.ok?'已确认':'');
 }
 boot();
 </script></body></html>"""
