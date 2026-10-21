@@ -14,11 +14,13 @@ import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
 /**
- * 身份识别：每格裁图 → MobileNetV3 出 256 维身份向量 → 与 [ModelMeta.nClass] 条原型比余弦 → 最近的那类。
+ * 身份识别：每格裁图 → MobileNetV2 出 2369 类相似度（检索已融合）→ 取最大。
  *
- * **当前跑纯 CPU（XNNPACK）**：挂上 GPU delegate 后这个模型只有 24% 的算子能上 GPU，
- * 整图被切成 3 个 GPU 分区 + 25 个 CPU 分区，来回搬张量反而把推理拖到一批 1.6 秒
- * （一帧 8.1s，占整帧 72%）。判定依据与回退方法见 [PREFER_GPU] 的注释，那段有真机日志。
+ * **优先 GPU**：V2 只有 conv/dwconv/relu6/add，能被 GPU delegate 整图吃下（导出时已校验）。
+ * 但 `CompatibilityList` 在部分机器（实测 Adreno 830 / Xiaomi）会因为探测不到 OpenCL 直接判
+ * 不支持，所以这里**不看它的结论、照样尝试挂载**，失败由 [Interpreter] 构造时的 catch 回退 CPU。
+ *
+ * CPU 兜底是 XNNPACK 4 线程：实测真机一帧 140 格约 930ms（5 个 batch），是整帧的大头。
  *
  * 模型形状是硬约定：固定 batch=[BATCH]、输入 NHWC。GPU delegate 不支持动态 shape 的 resize，
  * 与其留一段"偷偷 resize 再退回 CPU"的代码，不如直接校验失败 —— 换 shape 就重导模型
@@ -62,7 +64,8 @@ class TfliteTileClassifier private constructor(
      * CellCropper 内部复用像素缓冲，不能跨线程共享，所以每线程各持一份（ThreadLocal）。
      * 目标数组按格号分片写入，互不重叠，不需要额外同步。
      */
-    private val cropThreads = 4
+    /** 裁格线程：GPU 推理时 CPU 是空的，按核心数铺满（上限 8，再多只会抢内存带宽）。 */
+    private val cropThreads = minOf(8, Runtime.getRuntime().availableProcessors())
     private val cropPool = java.util.concurrent.Executors.newFixedThreadPool(cropThreads) { r ->
         Thread(r, "brick-crop").apply { isDaemon = true }
     }
@@ -261,7 +264,8 @@ class TfliteTileClassifier private constructor(
 
         /** 界面显示用：实际会跑在哪条后端上。 */
         fun backendDescription(): String =
-            if (PREFER_GPU && gpuSupported()) "GPU delegate" else "CPU（XNNPACK $DEFAULT_THREADS 线程）"
+            if (PREFER_GPU) "GPU delegate（不支持时回退 CPU $DEFAULT_THREADS 线程）"
+            else "CPU（XNNPACK $DEFAULT_THREADS 线程）"
 
         /**
          * 加载一个变体。每次调用都新建一份解释器与缓冲 —— 切换模型时**先把旧的关掉**，
@@ -336,17 +340,18 @@ class TfliteTileClassifier private constructor(
 
         /** @return null = 本机不支持或创建失败，照 CPU 跑（这是唯一的兜底，别再往下退）。 */
         private fun createGpuDelegate(): GpuDelegate? = try {
-            val compat = CompatibilityList()
             if (!PREFER_GPU) {
-                // 见 PREFER_GPU 的说明：这个模型挂 GPU 反而是"CPU 跑大头 + 来回搬张量"
                 Log.i(TAG, "按 PREFER_GPU=false 走纯 CPU（XNNPACK $DEFAULT_THREADS 线程）")
                 null
-            } else if (!compat.isDelegateSupportedOnThisDevice) {
-                Log.w(TAG, "本机不支持 GPU delegate → 用 CPU")
-                null
             } else {
+                val compat = CompatibilityList()
+                if (!compat.isDelegateSupportedOnThisDevice) {
+                    // 不能拿它当硬门槛：Adreno 830 + HyperOS 实测这里返回 false（缺 OpenCL 探测），
+                    // 但 GLES 后端是好的。挂载失败会在 Interpreter 构造时抛异常、回退 CPU。
+                    Log.w(TAG, "CompatibilityList 说本机不支持 GPU，仍尝试挂载（失败自动回退）")
+                }
                 val opts = compat.bestOptionsForThisDevice ?: GpuDelegate.Options()
-                // 允许用 fp16 算：MobileNet 这类模型掉精度可忽略，但显存带宽省一半
+                // 允许 fp16：MobileNet 这类模型掉精度可忽略，显存带宽省一半
                 opts.setPrecisionLossAllowed(true)
                 GpuDelegate(opts)
             }

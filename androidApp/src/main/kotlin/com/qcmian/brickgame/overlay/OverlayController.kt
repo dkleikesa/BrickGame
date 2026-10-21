@@ -290,8 +290,8 @@ class OverlayController(context: Context) {
      *  1. 不加 `FLAG_LAYOUT_NO_LIMITS`，并且视图高度只算内容；
      *  2. 用 [navBarHeight] 把窗口整体上移，停在导航栏/手势条上沿。
      *
-     * [BAR_DOWN_OFFSET_DP] 是让控制条比"上沿"再**往下压**一点（视觉上更贴底），
-     * 会略侵入导航栏区域；数值别调太大，否则会压到手势条、影响上滑。
+     * [BAR_GAP_DP] 是控制条与导航栏上沿之间留的空隙：以前是往下压 10dp，
+     * 在全面屏手势条上会盖住上滑区域（实测真机挡住了手势条），现在改成往上留 8dp。
      */
     private fun barParams(type: Int): WindowManager.LayoutParams =
         WindowManager.LayoutParams(
@@ -302,8 +302,8 @@ class OverlayController(context: Context) {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.START
-            // Gravity.BOTTOM 下 y 是"离底边多远"：越小越靠下，减掉偏移即整体下移
-            y = (navBarHeight - barDownOffset).coerceAtLeast(0)
+            // Gravity.BOTTOM 下 y 是"离底边多远"：导航栏高度 + 空隙，整条落在手势条上方
+            y = navBarHeight + barGap
         }
 
     private val navBarHeight: Int by lazy {
@@ -311,15 +311,15 @@ class OverlayController(context: Context) {
         if (id > 0) context.resources.getDimensionPixelSize(id) else 0
     }
 
-    /** 控制条自导航栏上沿额外下移的距离（px）。 */
-    private val barDownOffset: Int by lazy {
-        (BAR_DOWN_OFFSET_DP * context.resources.displayMetrics.density).toInt()
+    /** 控制条与导航栏上沿之间的空隙（px）。 */
+    private val barGap: Int by lazy {
+        (BAR_GAP_DP * context.resources.displayMetrics.density).toInt()
     }
 
     private companion object {
         const val TAG = "OverlayController"
 
         /** 控制条自导航栏上沿再往下压的距离（dp）。 */
-        const val BAR_DOWN_OFFSET_DP = 10f
+        const val BAR_GAP_DP = 8f
     }
 }
