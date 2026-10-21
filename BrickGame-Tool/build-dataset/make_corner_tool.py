@@ -27,7 +27,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from tile_recognizer import INSET, detect_grid  # noqa: E402
+import yolo_grid  # noqa: E402
 
 TEMPLATE = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -203,8 +203,8 @@ def main() -> None:
         rows = cols = 0
         quad: list[float] = []
         vis = img.copy()
-        try:
-            g = detect_grid(img, 12, INSET, verbose=False)
+        g = yolo_grid.locate(img)
+        if g is not None:
             rows, cols = int(g["score"].shape[0]), int(g["score"].shape[1])
             xl, yl = np.asarray(g["xlines"]), np.asarray(g["ylines"])
             y0, y1 = int(yl[0]), int(yl[-1])
@@ -215,8 +215,8 @@ def main() -> None:
                 cv2.line(vis, (x0, int(y)), (x1, int(y)), (0, 255, 0), 2)
             cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 200, 255), 3)
             quad = [float(x0), float(y0), float(x1), float(y0), float(x1), float(y1), float(x0), float(y1)]
-        except (SystemExit, Exception):
-            pass
+        else:
+            rows = cols = 0
 
         scale = args.width / w
         small = cv2.resize(vis, (args.width, max(1, round(h * scale))), interpolation=cv2.INTER_AREA)

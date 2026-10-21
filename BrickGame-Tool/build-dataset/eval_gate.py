@@ -113,7 +113,19 @@ def main() -> None:
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--update", action="store_true", help="通过后把这版写成新基线")
     ap.add_argument("--force", action="store_true", help="不达标也更新基线")
+    ap.add_argument("--allow-unreviewed", action="store_true",
+                    help="val 里有没人工确认的预标注时也照常评估/写基线（指标会虚高）")
     args = ap.parse_args()
+
+    meta = json.load(open(os.path.join(YOLO_DIR, "meta.json"), encoding="utf-8"))
+    unreviewed = [m["src"] for m in meta if m["split"] == "val" and not m.get("reviewed")]
+    if unreviewed:
+        # 预标注是当前模型自己出的框：拿它当 val 真值，等于让模型给自己判卷。
+        print(f"⚠ val 里有 {len(unreviewed)} 帧仍是模型预标注（未人工确认），"
+              f"指标会虚高：{', '.join(unreviewed[:3])}{' …' if len(unreviewed) > 3 else ''}")
+        if (args.update or args.force) and not args.allow_unreviewed:
+            sys.exit("先跑 box_server.py 把 val 帧过一遍，再 --update；"
+                     "确实要写基线就加 --allow-unreviewed")
 
     cur = evaluate(args.weights, args.conf)
     print(f"候选  {fmt(cur)}")

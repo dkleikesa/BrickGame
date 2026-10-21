@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-用 YOLO 检测器定棋盘网格（替代 OpenCV 的 detect_grid）。
+用 YOLO 检测器定棋盘网格（**唯一的定位实现**；OpenCV 的 detect_grid 已删除）。
 
-为什么要有这条路：残局/空盘时投影没有周期可数，detect_grid 会把 14 行算成 13 行、
+为什么不用投影/自相关：残局/空盘时没有周期可数，那套算法会把 14 行算成 13 行、
 格线整体错一格；而 board/tile 检测在残局仍然稳。
 
 算法与 Android 端 YoloBoardDetector 一致：board 框定范围、砖块尺寸定格距、
@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 from ultralytics import YOLO
@@ -19,9 +20,27 @@ from ultralytics import YOLO
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 DEFAULT_WEIGHTS = os.path.join(_ROOT, "runs", "brick", "weights", "best.pt")
+# 新机器/新克隆还没有 runs/ 时，用仓库里已经打进 APK 的那份模型兜底 ——
+# 不然"切新截图"这一步会因为找不到 .pt 直接卡死。
+ASSET_WEIGHTS = os.path.join(os.path.dirname(_ROOT), "androidApp", "src", "main", "assets",
+                             "brick_yolo.tflite")
 TILE_INSET = 0.88   # 训练时 tile 框每边内缩 6%，框宽 = 0.88 格
 
 _model = None
+
+
+def resolve_weights(weights: str = "") -> str:
+    """按 .pt → APK 资产 .tflite 的顺序找可用模型；都没有就明确报错。"""
+    if weights:
+        if not os.path.exists(weights):
+            raise SystemExit(f"模型不存在：{weights}")
+        return weights
+    for path in (DEFAULT_WEIGHTS, ASSET_WEIGHTS):
+        if os.path.exists(path):
+            if path != DEFAULT_WEIGHTS:
+                print(f"没有 {DEFAULT_WEIGHTS}，改用 APK 里的 {path}")
+            return path
+    raise SystemExit(f"找不到定位模型：{DEFAULT_WEIGHTS} 或 {ASSET_WEIGHTS}；先跑 train_yolo.py")
 
 
 def _load(weights: str):
@@ -50,11 +69,11 @@ def _fit_axis(centers, start, step0, count):
     return center0 - step / 2.0, step
 
 
-def grid_of(img: np.ndarray, weights: str = DEFAULT_WEIGHTS, conf: float = 0.25):
+def grid_of(img: np.ndarray, weights: str = "", conf: float = 0.25):
     """
     @return (xlines, ylines, rows, cols) 或 None（砖太少/残差过大，判不出可信网格）。
     """
-    model = _load(weights)
+    model = _load(resolve_weights(weights))
     res = model.predict(img, imgsz=640, conf=conf, verbose=False)[0]
     board = None
     tiles = []
@@ -99,3 +118,25 @@ def grid_of(img: np.ndarray, weights: str = DEFAULT_WEIGHTS, conf: float = 0.25)
     xl = np.linspace(lx, lx + cols * sx, cols + 1)
     yl = np.linspace(ty, ty + rows * sy, rows + 1)
     return xl, yl, rows, cols
+
+
+def locate(img: np.ndarray, inset: float | None = None) -> dict | None:
+    """YOLO 定网格 + 裁格/判空，返回 `tile_recognizer.grid_from_lines` 那份 dict。
+
+    额外补 `pitch_x` / `pitch_y` / `src` 三个字段，兼容旧调用点读的 key。
+    定位失败（砖太少/残差过大）返回 None。
+    """
+    parent = os.path.dirname(_ROOT)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    import tile_recognizer as T  # noqa: PLC0415
+
+    got = grid_of(img)
+    if got is None:
+        return None
+    xl, yl, _, _ = got
+    g = T.grid_from_lines(img, xl, yl, T.INSET if inset is None else inset)
+    g["pitch_x"] = float(np.median(np.diff(xl)))
+    g["pitch_y"] = float(np.median(np.diff(yl)))
+    g["src"] = "yolo"
+    return g

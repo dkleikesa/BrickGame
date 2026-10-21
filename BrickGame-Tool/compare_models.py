@@ -20,7 +20,7 @@
   summary.csv          每张图的汇总（一致率、低置信格数、平均相似度、与 ref 的对齐率）
 用法：
   .venv/bin/python compare_models.py \
-      --a out/clf_real/best.pt --b out/clf_small/best.pt \
+      --a out/clf_v2/best.pt --b <旧模型目录>/best.pt \
       --images ~/Downloads/brickgame-lowconf --out out/compare
 """
 from __future__ import annotations
@@ -92,7 +92,10 @@ class Model:
 
 
 def detect(img: np.ndarray) -> dict:
-    return T.detect_grid(img, 12, T.INSET, verbose=False)
+    if os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-dataset") not in sys.path:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-dataset"))
+    import yolo_grid
+    return yolo_grid.locate(img, T.INSET)
 
 
 def android_crops(img: np.ndarray, g: dict) -> tuple[list[np.ndarray], np.ndarray]:
@@ -315,8 +318,8 @@ def run_image(path: str, ma: "Model", mb: "Model", out_dir: str, ref_dir: str,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="两个模型的同图逐格对比")
-    ap.add_argument("--a", default=os.path.join(_HERE, "out/clf_real/best.pt"), help="模型 A（线上/large）")
-    ap.add_argument("--b", default=os.path.join(_HERE, "out/clf_small/best.pt"), help="模型 B（small）")
+    ap.add_argument("--a", default=os.path.join(_HERE, "out/clf_v2/best.pt"), help="模型 A（线上 V2）")
+    ap.add_argument("--b", required=True, help="模型 B（对照，必填）")
     ap.add_argument("--proto-a", default="", help="默认取 --a 同目录 prototypes.npz")
     ap.add_argument("--proto-b", default="", help="默认取 --b 同目录 prototypes.npz")
     ap.add_argument("--images", default=os.path.expanduser("~/Downloads/brickgame-lowconf"),

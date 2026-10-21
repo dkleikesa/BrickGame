@@ -229,32 +229,30 @@ class Icons:
         return bg_surface(crop)
 
 
-def real_canvases(samples: str, limit: int = 400, seed: int = 0) -> np.ndarray:
-    """从真实截图里取"游戏格底板"当合成画布 —— 域合成的关键素材。"""
+def real_canvases(real_root: str, limit: int = 400, seed: int = 0) -> np.ndarray:
+    """从真实截图已裁好的格图里取"游戏格底板"当合成画布 —— 域合成的关键素材。
+
+    读 `build-dataset/dataset/images/frame/<帧>/r*c*.png`（YOLO 网格裁出来的 64x64 格），
+    不再对整帧跑一遍 OpenCV 定位：那套已删除，而且两套网格必然不一致。
+    """
+    root = os.path.join(real_root, "images", "frame")
+    paths = []
+    if os.path.isdir(root):
+        for frame in sorted(os.listdir(root)):
+            d = os.path.join(root, frame)
+            if os.path.isdir(d):
+                paths.extend(os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith(".png"))
     out = []
-    for f in sorted(x for x in os.listdir(samples) if x.lower().endswith((".jpg", ".png"))):
-        img = cv2.imread(os.path.join(samples, f))
-        if img is None:
+    for p in paths[:limit] if len(paths) > limit else paths:
+        img = cv2.imread(p)
+        if img is None or min(img.shape[:2]) < 24:
             continue
-        try:
-            g = T.detect_grid(img, 12, T.INSET, verbose=False)
-        except SystemExit:
-            continue
-        xs, ys = g["xlines"], g["ylines"]
-        for j in range(len(ys) - 1):
-            for i in range(len(xs) - 1):
-                c = img[int(ys[j]):int(ys[j + 1]), int(xs[i]):int(xs[i + 1])]
-                if c.size == 0 or min(c.shape[:2]) < 24:
-                    continue
-                out.append(bg_surface(cv2.resize(c, (CROP, CROP))))
-        if len(out) >= limit:
-            break
+        out.append(bg_surface(cv2.resize(img, (CROP, CROP))))
     arr = np.stack(out[:limit]) if out else np.zeros((1, CROP, CROP, 3), np.float32)
-    print(f"真实底板画布: {len(arr)} 张（来自 {samples}）")
+    print(f"真实底板画布: {len(arr)} 张（来自 {root}）")
     return arr
 
 
-# ---------------------------------------------------------------- 合成
 def _cell_bg(img: np.ndarray, w: int = 6) -> np.ndarray:
     """整格图的"当前底板色" = 外圈中位色（图标居中，够不到 6px 外圈）。"""
     ring = np.zeros(img.shape[:2], dtype=bool)
@@ -419,41 +417,6 @@ def eval_pairs(model, icons: Icons, gray_pairs, rng, device) -> dict:
         d.append(float(1.0 - float(e[0] @ e[1])))
     return {"n": len(d), "mean": float(np.mean(d)), "max": float(np.max(d))}
 
-
-def eval_frames(model, samples: str, device: str) -> dict:
-    """真实截图的帧内一致性（无身份真值，只能与像素基线对比）。"""
-    rows = []
-    for f in sorted(x for x in os.listdir(samples) if x.lower().endswith((".jpg", ".png"))):
-        img = cv2.imread(os.path.join(samples, f))
-        try:
-            g = T.detect_grid(img, 12, T.INSET, verbose=False)
-        except SystemExit:
-            continue
-        holes = (g["score"] < g["score_thr"]).ravel()
-        idx = np.where(~holes)[0]
-        if idx.size < 4:
-            continue
-        raw = g["patches"][idx].astype(np.uint8)                     # 32x32 原样裁切
-        pix = g["dev"][idx]                                          # 32x32 去底板
-        # 像素基线
-        Db = T.aligned_distance_matrix(pix)
-        sub_b, _, ok_b = T.cluster_by_parity(Db, T.gap_threshold(Db))
-        # 模型
-        e = embed(model, raw, device)
-        Dm = np.clip(1.0 - e @ e.T, 0, 2).astype(np.float32)
-        np.fill_diagonal(Dm, 0.0)
-        sub_m, _, ok_m = T.cluster_by_parity(Dm, T.gap_threshold(Dm))
-        rows.append({"frame": f, "cells": int(idx.size),
-                     "pix_clusters": int(len(set(sub_b.tolist()))), "pix_parity_ok": bool(ok_b),
-                     "mdl_clusters": int(len(set(sub_m.tolist()))), "mdl_parity_ok": bool(ok_m),
-                     "pix_max_intra_gap": float(np.max(np.sort(Db[np.triu_indices_from(Db, 1)])[:max(1, idx.size)]))})
-    if not rows:
-        return {}
-    return {"frames": len(rows),
-            "pix_parity_ok": float(np.mean([r["pix_parity_ok"] for r in rows])),
-            "mdl_parity_ok": float(np.mean([r["mdl_parity_ok"] for r in rows])),
-            "pix_clusters": float(np.mean([r["pix_clusters"] for r in rows])),
-            "mdl_clusters": float(np.mean([r["mdl_clusters"] for r in rows])), "detail": rows}
 
 
 def load_weights(model: nn.Module, ck_path: str, dev: str, args) -> dict:
@@ -807,7 +770,6 @@ def run_real(args, dev: str) -> None:
     print(f"\n=== 评测（权重 {ck_path}，epoch {ck.get('epoch')}，骨干 {ck.get('backbone', '?')}）")
     proto = build_prototypes(model, cat, real, dev, args.eval_batch, args.fuse_proto)
     ev = eval_real(model, cat, real, proto, dev, args.eval_batch)
-    fr = eval_frames(model, args.samples, dev)
     np.savez(os.path.join(args.out, "prototypes.npz"),
              proto=proto, class_ids=np.array(cat.class_ids), entries=np.array(cat.entries),
              faded=cat.faded, backbone=np.array(args.backbone), img=np.array(IMG),
@@ -820,11 +782,8 @@ def run_real(args, dev: str) -> None:
         print(f"  命中距离均值 {ev['same_mean']:.3f}(p95 {ev['same_p95']:.3f})，"
               f"最近异类距离 p5 {ev['wrong_dist_p5']:.3f}，命中 p95 {ev['hit_dist_p95']:.3f}"
               f"（可当 low-confidence 阈值参考）")
-    if fr:
-        print(f"真实截图帧内一致性: {fr['frames']} 帧；像素基线 偶数约束通过 {fr['pix_parity_ok']:.2f} "
-              f"平均簇数 {fr['pix_clusters']:.1f}；模型 {fr['mdl_parity_ok']:.2f} 平均簇数 {fr['mdl_clusters']:.1f}")
     with open(os.path.join(args.out, "metrics.json"), "w") as f:
-        json.dump({"config": config_dict(args), "real": ev, "frames": fr, "history": hist}, f,
+        json.dump({"config": config_dict(args), "real": ev, "history": hist}, f,
                   indent=2, ensure_ascii=False)
     print(f"输出: {args.out}/best.pt / prototypes.npz({cat.n} 类原型) / metrics.json / history.csv")
 
@@ -835,7 +794,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--catalog", default=os.path.join(_ROOT, "build-catalog", "catalog"))
     ap.add_argument("--samples", default=os.path.join(_ROOT, "build-dataset", "samples"))
     ap.add_argument("--out", default="",
-                    help="输出目录，留空= out/clf_real（--data real）/ out/clf（--data synth）")
+                    help="输出目录，留空= out/clf_v2（--data real）/ out/clf（--data synth）")
     # ---- 数据来源 ----
     ap.add_argument("--data", default="real", choices=["real", "synth"],
                     help="real（默认）=只用真实图：图鉴参考图 + 截图标注，零合成；"
@@ -901,7 +860,7 @@ def main() -> None:
     if not args.embed_dim:
         args.embed_dim = 256 if pretrained else 64
     if not args.out:
-        args.out = os.path.join(_ROOT, "out/clf" if args.data == "synth" else "out/clf_real")
+        args.out = os.path.join(_ROOT, "out/clf" if args.data == "synth" else "out/clf_v2")
 
     dev = ("mps" if torch.backends.mps.is_available() else "cpu") if args.device == "auto" else args.device
     torch.manual_seed(args.seed)
@@ -916,7 +875,7 @@ def run_synth(args, dev: str) -> None:
     """旧的合成增广流程（图鉴图 + 底色重染造视图）。--data synth 才走这里。"""
     rng = np.random.default_rng(args.seed)
     icons = Icons(args.catalog, args.max_classes, args.seed)
-    bgs = real_canvases(args.samples, 400, args.seed)
+    bgs = real_canvases(args.real, 400, args.seed)
     cat_bgs = np.stack([icons.canvas_from_catalog(i) for i in range(min(icons.n, 300))])
     bank = np.concatenate([bgs, cat_bgs], 0)
 
@@ -1020,7 +979,6 @@ def run_synth(args, dev: str) -> None:
     print(f"\n=== 评测（权重 {ck_path}，epoch {ck.get('epoch')}，骨干 {ck.get('backbone', '?')}）")
     ev = eval_holdout(model, icons, bank, hold, dev, rng, bs=args.eval_batch)
     pr = eval_pairs(model, icons, gray_pairs, rng, dev)
-    fr = eval_frames(model, args.samples, dev)
 
     gal = embed(model, np.stack([render(icons.icon[i], icons.canvas_from_catalog(i), rng)
                                  for i in range(icons.n)]), dev, args.eval_batch)
@@ -1038,15 +996,12 @@ def run_synth(args, dev: str) -> None:
           f"（越大越安全：可用于 unknown 拒识）")
     if pr:
         print(f"同素材异渲染对: {pr['n']} 对，距离均值 {pr['mean']:.3f}，最大 {pr['max']:.3f}")
-    if fr:
-        print(f"真实截图帧内一致性: {fr['frames']} 帧；像素基线 偶数约束通过 {fr['pix_parity_ok']:.2f} "
-              f"平均簇数 {fr['pix_clusters']:.1f}；模型 {fr['mdl_parity_ok']:.2f} 平均簇数 {fr['mdl_clusters']:.1f}")
     with open(os.path.join(args.out, "metrics.json"), "w") as f:
         json.dump({"config": {"backbone": args.backbone, "freeze_backbone": args.freeze_backbone,
                               "img": IMG, "crop": CROP, "embed_dim": args.embed_dim,
                               "epochs": args.epochs, "lr": args.lr,
                               "backbone_lr_scale": args.backbone_lr_scale, "seed": args.seed},
-                   "holdout": ev, "dup_pairs": pr, "frames": fr, "history": hist}, f, indent=2,
+                   "holdout": ev, "dup_pairs": pr, "history": hist}, f, indent=2,
                   ensure_ascii=False)
     print(f"输出: {args.out}/best.pt(权重) / prototypes.npz({icons.n} 类原型) / metrics.json / history.csv")
 

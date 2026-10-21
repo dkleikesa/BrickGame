@@ -59,7 +59,7 @@ class TfliteTileClassifier private constructor(
     /**
      * 裁格并行：135 格串行要 200ms，主要开销是一次次 JNI + resize。
      *
-     * CellCropper 内部复用 Mat，不能跨线程共享，所以每线程各持一份（ThreadLocal）。
+     * CellCropper 内部复用像素缓冲，不能跨线程共享，所以每线程各持一份（ThreadLocal）。
      * 目标数组按格号分片写入，互不重叠，不需要额外同步。
      */
     private val cropThreads = 4
@@ -79,6 +79,9 @@ class TfliteTileClassifier private constructor(
 
     /** 留档阈值：这个模型契约里的 `thresholds.dist_wrong_p5` 换算出来的相似度下限。 */
     private val dumpSimilarity = meta.dumpSimilarity
+
+    /** 整帧 ARGB：每帧只 getPixels 一次，裁格按 stride 直接取（原来每格一次 JNI）。 */
+    private var framePixels = IntArray(0)
 
     /** 一批的输入（HWC 交错）。复用同一块，避免每批 9.8MB 的新分配。 */
     private val batchInput = FloatArray(BATCH * per)
@@ -109,70 +112,69 @@ class TfliteTileClassifier private constructor(
 
         val tConvert = System.nanoTime()
         val side = cropper.cropSide(scan)
-        val bgr = CellCropper.bitmapToBgr(frame)
+        val fw = frame.width
+        val fh = frame.height
+        if (framePixels.size < fw * fh) framePixels = IntArray(fw * fh)
+        frame.getPixels(framePixels, 0, fw, 0, 0, fw, fh)
         val convertNs = System.nanoTime() - tConvert
 
         var cropNs = 0L
         var inferNs = 0L
         var searchNs = 0L
         var slot = 0
-        try {
-            for (chunk in targets.chunked(BATCH)) {
-                val tCrop = System.nanoTime()
-                val jobs = chunk.mapIndexed { s, index ->
-                    cropPool.submit { threadCropper.get()!!.fill(bgr, scan, index, side, batchInput, s * per) }
-                }
-                jobs.forEach { it.get() }
-                // 补满：直接复制最后一张的有效段，比重新裁一次便宜；多出来的结果反正要丢掉
-                if (chunk.size < BATCH) {
-                    val src = (chunk.size - 1) * per
-                    for (s in chunk.size until BATCH) {
-                        System.arraycopy(batchInput, src, batchInput, s * per, per)
-                    }
-                }
-                inputBuffer.rewind()
-                inputBuffer.asFloatBuffer().put(batchInput)
-                inputBuffer.rewind()
-                cropNs += System.nanoTime() - tCrop
-
-                val tInfer = System.nanoTime()
-                interpreter.run(inputBuffer, output)
-                inferNs += System.nanoTime() - tInfer
-
-                val tSearch = System.nanoTime()
-                for (k in chunk.indices) {
-                    val vec = output[k]
-                    // 与原型比余弦（两边都已 L2 归一化 → 点积即余弦），取最大。
-                    // 融合后这一步在模型里已经做完了，这里只是在一行 2369 个分数里取 argmax。
-                    var best = 0
-                    var bestScore = Float.NEGATIVE_INFINITY
-                    if (fused) {
-                        for (c in 0 until nClass) {
-                            val s = vec[c]
-                            if (s > bestScore) {
-                                bestScore = s
-                                best = c
-                            }
-                        }
-                    } else {
-                        for (c in 0 until nClass) {
-                            val protoBase = c * dim
-                            var dot = 0f
-                            for (d in 0 until dim) dot += vec[d] * prototypes[protoBase + d]
-                            if (dot > bestScore) {
-                                bestScore = dot
-                                best = c
-                            }
-                        }
-                    }
-                    bestClass[slot] = meta.classIds[best]
-                    similarity[targets[slot]] = (bestScore * 100).roundToInt()
-                    slot++
-                }
-                searchNs += System.nanoTime() - tSearch
+        for (chunk in targets.chunked(BATCH)) {
+            val tCrop = System.nanoTime()
+            val jobs = chunk.mapIndexed { s, index ->
+                cropPool.submit { threadCropper.get()!!.fill(framePixels, fw, fh, scan, index, side, batchInput, s * per) }
             }
-        } finally {
-            bgr.release()
+            jobs.forEach { it.get() }
+            // 补满：直接复制最后一张的有效段，比重新裁一次便宜；多出来的结果反正要丢掉
+            if (chunk.size < BATCH) {
+                val src = (chunk.size - 1) * per
+                for (s in chunk.size until BATCH) {
+                    System.arraycopy(batchInput, src, batchInput, s * per, per)
+                }
+            }
+            inputBuffer.rewind()
+            inputBuffer.asFloatBuffer().put(batchInput)
+            inputBuffer.rewind()
+            cropNs += System.nanoTime() - tCrop
+
+            val tInfer = System.nanoTime()
+            interpreter.run(inputBuffer, output)
+            inferNs += System.nanoTime() - tInfer
+
+            val tSearch = System.nanoTime()
+            for (k in chunk.indices) {
+                val vec = output[k]
+                // 与原型比余弦（两边都已 L2 归一化 → 点积即余弦），取最大。
+                // 融合后这一步在模型里已经做完了，这里只是在一行 2369 个分数里取 argmax。
+                var best = 0
+                var bestScore = Float.NEGATIVE_INFINITY
+                if (fused) {
+                    for (c in 0 until nClass) {
+                        val s = vec[c]
+                        if (s > bestScore) {
+                            bestScore = s
+                            best = c
+                        }
+                    }
+                } else {
+                    for (c in 0 until nClass) {
+                        val protoBase = c * dim
+                        var dot = 0f
+                        for (d in 0 until dim) dot += vec[d] * prototypes[protoBase + d]
+                        if (dot > bestScore) {
+                            bestScore = dot
+                            best = c
+                        }
+                    }
+                }
+                bestClass[slot] = meta.classIds[best]
+                similarity[targets[slot]] = (bestScore * 100).roundToInt()
+                slot++
+            }
+            searchNs += System.nanoTime() - tSearch
         }
         writeLabels(labels, targets, bestClass)
         // 阈值来自这个模型自己的契约（见 ModelMeta.dumpSimilarity）：两个模型的相似度分布不同，
@@ -180,7 +182,7 @@ class TfliteTileClassifier private constructor(
         lastLowConfidence = targets.filter { similarity[it] < dumpSimilarity }.map { it to similarity[it] }
         val searchName = if (fused) "取最大" else "检索"
         lastPhases = listOf(
-            "转图" to convertNs / 1_000_000,
+            "准备" to convertNs / 1_000_000,
             "裁格" to cropNs / 1_000_000,
             "推理" to inferNs / 1_000_000,
             searchName to searchNs / 1_000_000,
@@ -212,7 +214,6 @@ class TfliteTileClassifier private constructor(
 
     override fun close() {
         cropPool.shutdownNow()
-        cropper.release()
         interpreter.close()
         // delegate 要晚于 interpreter 释放：Interpreter 还引用着它
         gpuDelegate?.let { runCatching { it.close() } }

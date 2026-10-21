@@ -16,7 +16,6 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     // 分享留档 ZIP 要 FileProvider（androidx.core.content）
     implementation(libs.androidx.core.ktx)
-    implementation(libs.opencv)
     // 物品识别模型（brick_embedder.tflite）的运行时，模型与原型在 src/main/assets/
     implementation(libs.tensorflow.lite)
     // 识别跑在 GPU delegate 上（三者里最快），见 ml/TfliteTileClassifier

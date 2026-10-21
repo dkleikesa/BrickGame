@@ -140,7 +140,7 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
                     override fun onSuccess(screenshot: ScreenshotResult) {
                         val buffer = screenshot.hardwareBuffer
                         val bitmap = try {
-                            // wrapHardwareBuffer 拿到的是 HARDWARE 位图，OpenCV/OpenGL 之外读不了像素，
+                            // wrapHardwareBuffer 拿到的是 HARDWARE 位图，getPixels/纹理上传都读不了像素，
                             // 必须先拷成 ARGB_8888；buffer 关掉之后那张包装位图就失效了。
                             Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
                                 ?.copy(Bitmap.Config.ARGB_8888, false)
@@ -295,14 +295,5 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
             active?.session?.stopAuto()
         }
 
-        /**
-         * 切换识别模型（主页上的选择器走这里）。
-         *
-         * 换模型要重建解释器，只有服务手里的会话做得到；服务没连上就什么也不做 ——
-         * 存档已经写好了（见 `ModelChoice`），下次服务起来读到的就是新模型。
-         */
-        fun selectModel(variant: ModelVariant) {
-            active?.session?.selectModel(variant)
-        }
     }
 }

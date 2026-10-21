@@ -1,7 +1,7 @@
 {
  "name": "brick_embedder_v2",
  "variant": "v2",
- "exported_from": "BrickGame-Tool/out/clf_v2_new/best.pt",
+ "exported_from": "BrickGame-Tool/out/clf_v2/best.pt",
  "epoch": 20,
  "input": {
   "name": "input",
@@ -4773,7 +4773,7 @@
   "p037_b3_r1_c7"
  ],
  "thresholds": {
-  "dist_hit_p95": 0.0387,
+  "dist_hit_p95": 0.0385,
   "dist_wrong_p5": 0.1589,
   "top1": 1.0,
   "top1_macro": 1.0,

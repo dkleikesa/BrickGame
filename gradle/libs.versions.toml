@@ -13,12 +13,10 @@ composeMultiplatform = "1.12.1"
 junit = "4.13.2"
 kotlin = "2.4.20"
 material3 = "1.12.0-alpha03"
-opencv = "4.13.0"
 # 识别走 TFLite + GPU delegate（真机实测三者里最快，见 ml/TfliteTileClassifier）
 tensorflowLite = "2.16.1"
 
 [libraries]
-opencv = { module = "org.opencv:opencv", version.ref = "opencv" }
 tensorflow-lite = { module = "org.tensorflow:tensorflow-lite", version.ref = "tensorflowLite" }
 tensorflow-lite-gpu = { module = "org.tensorflow:tensorflow-lite-gpu", version.ref = "tensorflowLite" }
 # GpuDelegate.Options 的父类（GpuDelegateFactory）在这个 artifact 里，缺了连编都编不过

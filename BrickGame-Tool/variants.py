@@ -10,12 +10,12 @@
 （onnx2tf 环境）用的是两个不同的 venv，互相 import 会连带拉进 torch/onnx2tf；
 这个文件只放一个字典，两边都能安全 import。
 
-large 的后缀是空串 —— 线上那份资产的名字早已定下（`brick_embedder.tflite` 等），
-加第二个模型时不动它，只新增 small 那一套。
+**只剩 V2 一个变体**（2026-10 定稿）：large/small 精度和端上性能都不如 V2，
+训练资产与代码已经删除，别再往回加。
 """
 from __future__ import annotations
 
-VARIANTS = {"large": "", "small": "_small", "v2": "_v2"}
+VARIANTS = {"v2": "_v2"}
 
 
 def asset_names(variant: str) -> tuple[str, str, str]:

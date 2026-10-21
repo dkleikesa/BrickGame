@@ -29,6 +29,7 @@ ONNX 有版本对齐的运行时（onnxruntime）兜底，而且 `export_tflite.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -84,12 +85,14 @@ class Wrapped(nn.Module):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="训练权重 → Android 可加载的模型包")
-    ap.add_argument("--ckpt", default=os.path.join(_HERE, "out/clf_real/best.pt"))
+    ap.add_argument("--ckpt", default=os.path.join(_HERE, "out/clf_v2/best.pt"))
     ap.add_argument("--prototypes", default="", help="默认取 ckpt 同目录的 prototypes.npz")
     ap.add_argument("--metrics", default="", help="默认取 ckpt 同目录的 metrics.json")
     ap.add_argument("--out", default=os.path.join(_ROOT, "androidApp", "src", "main", "assets"))
-    ap.add_argument("--variant", default="large", choices=sorted(VARIANTS),
+    ap.add_argument("--variant", default="v2", choices=sorted(VARIANTS),
                     help="导出哪一个模型（决定文件名的后缀，对应 Android 的选择开关）")
+    ap.add_argument("--force", action="store_true",
+                    help="闸门没通过也装进 assets（只用于排障，正常流程别加）")
     ap.add_argument("--install-assets", default="",
                     help="把原型库与契约同时装到该 assets 目录（.onnx 留在 --out，不进 APK）")
     ap.add_argument("--opset", type=int, default=17)
@@ -100,6 +103,19 @@ def main() -> None:
                          "关掉则输出 256 维身份向量 + 单独的 prototypes.bin（老契约）")
     ap.add_argument("--torchscript", action="store_true", help="额外导一份 .ptl（备用，APK 里用不到）")
     args = ap.parse_args()
+
+    if args.install_assets and not args.force:
+        gate_path = os.path.join(os.path.dirname(os.path.abspath(args.ckpt)), "gate.json")
+        gate = {}
+        if os.path.exists(gate_path):
+            gate = json.load(open(gate_path, encoding="utf-8"))
+        h = hashlib.md5(open(args.ckpt, "rb").read()).hexdigest()
+        if not gate.get("pass") or gate.get("ckpt_md5") != h:
+            raise SystemExit(
+                "闸门没通过（或 gate.json 对应的是另一份权重），拒绝装进 assets。\n"
+                f"  先跑：~/.venvs/brick-train/bin/python eval_clf_gate.py "
+                f"--new {os.path.dirname(os.path.abspath(args.ckpt))}\n"
+                "  确认要跳过加 --force")
 
     tag = VARIANTS[args.variant]
     stem = f"brick_embedder{tag}"

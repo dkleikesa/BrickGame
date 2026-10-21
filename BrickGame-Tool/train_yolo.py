@@ -3,13 +3,15 @@
 """
 训练 board/tile 两类检测器并导出端侧模型。
 
-数据集由 make_yolo_data.py 生成（弱标注：tile 框从逐格标签反推，board 框是棋盘外框）。
-36 张图训 nano 属于"跑通链路"，不是最终精度 —— 目标是先拿到能装进 APK、能和 OpenCV
-逐帧对比的东西，再按实际失败的帧补数据重训（见 --resume）。
+数据集由 make_yolo_data.py 装配，框只有一个来源：prelabel_yolo.py 的模型预标注 +
+box_server.py 的人工删/补。**不要**再从数据集逐格标签反推框（那条路要重算像素网格，
+残局帧会被算成 191×48，实测白训一轮）。流程见 skills/brickgame-yolo-locator。
+
+数据量小时（<200 帧）用 --resume 接着上一版练，从头训会让旧皮肤漂掉。
 
 用法：
-  uv run --no-project --python 3.12 --with ultralytics python train_yolo.py
-  uv run ... python train_yolo.py --resume runs/brick/weights/last.pt --epochs 100
+  .venv-train/bin/python train_yolo.py --epochs 80
+  .venv-train/bin/python train_yolo.py --resume runs/brick/weights/last.pt --epochs 40
 """
 from __future__ import annotations
 

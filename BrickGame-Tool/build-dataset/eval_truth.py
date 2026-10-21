@@ -25,7 +25,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from tile_recognizer import INSET, detect_grid  # noqa: E402
+import yolo_grid  # noqa: E402
 
 
 def read_truth(path: str) -> list[dict]:
@@ -70,9 +70,8 @@ def main() -> None:
             print(f"[skip] 找不到原图 {frame}")
             continue
         img = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
-        try:
-            g = detect_grid(img, args.min_pitch, INSET, verbose=False)
-        except (SystemExit, Exception):
+        g = yolo_grid.locate(img)
+        if g is None:
             misses.append(frame)
             continue
         xl, yl = np.asarray(g["xlines"]), np.asarray(g["ylines"])

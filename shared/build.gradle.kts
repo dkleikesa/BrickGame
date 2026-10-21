@@ -34,8 +34,6 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.compose.uiTooling)
-            // 棋盘标定/裁格用 OpenCV（仅 Android 目标；commonMain 只保留纯数学）
-            api(libs.opencv)
         }
         commonMain.dependencies {
             implementation(libs.compose.runtime)

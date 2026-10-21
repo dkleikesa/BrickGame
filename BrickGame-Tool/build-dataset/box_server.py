@@ -27,11 +27,29 @@ sys.path.insert(0, HERE)
 YOLO = os.path.join(HERE, "yolo")
 HTML = os.path.join(HERE, "box_tool.html")
 PORT = 8771
-SPLIT = "train"
+REVIEWED = os.path.join(YOLO, "reviewed.json")
 
 
 def label_path(base: str) -> str:
-    return os.path.join(YOLO, "labels", SPLIT, base + ".txt")
+    """帧的框文件在 train 还是 val 里都可能（split 会变），按实际存在的那个改。"""
+    for split in ("train", "val"):
+        p = os.path.join(YOLO, "labels", split, base + ".txt")
+        if os.path.exists(p):
+            return p
+    return os.path.join(YOLO, "labels", "train", base + ".txt")
+
+
+def mark_reviewed(bases) -> None:
+    """记下"人看过了"。make_yolo_data 用它算未确认帧，页面用它决定还展示哪些帧。"""
+    frames = set()
+    if os.path.exists(REVIEWED):
+        try:
+            frames = set(json.load(open(REVIEWED, encoding="utf-8")).get("frames", []))
+        except (json.JSONDecodeError, OSError):
+            frames = set()
+    frames.update(bases)
+    with open(REVIEWED, "w", encoding="utf-8") as fh:
+        json.dump({"frames": sorted(frames)}, fh, ensure_ascii=False, indent=1)
 
 
 def restore(bases) -> None:
@@ -108,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
         snapshot(bases)   # 首次保存先留底
         restore(bases)    # 每次从原始版本重算，避免重复叠加
         deleted, added = apply(fixes)
+        mark_reviewed(bases)
         body = json.dumps({"ok": True, "frames": len(bases), "deleted": deleted, "added": added},
                           ensure_ascii=False).encode()
         self._send(200, body, "application/json")

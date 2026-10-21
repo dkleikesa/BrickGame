@@ -9,7 +9,7 @@ import kotlin.math.roundToInt
  * `BrickGame-Tool/tile_recognizer.py` 里"纯数学"部分的 Kotlin 等价实现：把一维投影信号解成网格。
  *
  * 放在 commonMain 而不是 androidMain，是为了这些数值逻辑能在 JVM 上直接单测
- * （OpenCV 只在 androidMain 里做灰度/Sobel/缩放这些像素操作，见 `OpenCvBoardScanner`）。
+ * （像素操作在 androidMain：定位由 YOLO 出网格，裁格走纯 Kotlin 的重采样）。
  *
  * 与 Python 版逐句对应：`detrend` / `fundamental_pitch` / `lattice_phase` / `longest_run` /
  * `refine_lines` / `trim_board_extent`。所有边界行为（取首个极值、`win|1` 强制奇数等）都保留。

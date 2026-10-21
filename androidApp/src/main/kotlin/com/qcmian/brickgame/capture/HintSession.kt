@@ -11,9 +11,6 @@ import com.qcmian.brickgame.HintUiBus
 import com.qcmian.brickgame.HintUiState
 import com.qcmian.brickgame.algorithm.AutoSolver
 import com.qcmian.brickgame.algorithm.BrickGameTipHelper
-import com.qcmian.brickgame.ml.Locator
-import com.qcmian.brickgame.ml.LocatorChoice
-import com.qcmian.brickgame.ml.ModelChoice
 import com.qcmian.brickgame.ml.YoloBoardDetector
 import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.overlay.ControlBarView
@@ -23,7 +20,6 @@ import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.CellPoint
 import com.qcmian.brickgame.vision.HintEngine
 import com.qcmian.brickgame.vision.HintPipeline
-import com.qcmian.brickgame.vision.OpenCvBoardScanner
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -57,7 +53,7 @@ fun interface ScreenshotProvider {
  *
  * 线程分工：
  *  - 主线程：发起截屏（API 要求）、更新悬浮窗；
- *  - `brick-hint-worker`：OpenCV 标定 + 模型推理是纯 CPU/GPU 活，不能占主线程。
+ *  - `brick-hint-worker`：YOLO 定位 + 模型推理是纯 CPU/GPU 活，不能占主线程。
  *
  * 分析**不设超时**：一帧识别本来就要几秒（真机实测 7~8s），卡死上限反而把好帧丢掉。
  * 只保留截屏回调的兜底（[CAPTURE_TIMEOUT_MS]：`takeScreenshot` 的回调有时永远不回来，
@@ -85,7 +81,6 @@ class HintSession(
      * 上的任务调用）：换模型与"跑一帧"排队在同一条 HandlerThread 上，于是"关掉旧解释器"永远
      * 发生在当前这一帧算完之后 —— 不会 close 一个正在推理的解释器。
      */
-    private var loadedVariant: ModelVariant? = null
     private var loaded: TileClassifier? = null
 
     /** YOLO 定位器（10MB 模型 + 解释器）。同 [loaded] 一样只在 worker 线程构造/关闭。 */
@@ -314,29 +309,6 @@ class HintSession(
         captureFrame()
     }
 
-    /**
-     * 切换识别模型。**不动正在跑的那一帧**：重建排进同一条 worker 队列，一定落在当前
-     * `analyze` 之后（那时旧解释器已经没人用了，可以安全关）。
-     *
-     * 换完**不自动重跑**：点开关时前台就是 App 自己的界面，这时候截图只会截到 App、
-     * 标定必然失败，看着像"一换模型就坏了"。所以只把模型换好（顺带在控制条上说一句），
-     * 等用户回到游戏点「刷新」。
-     */
-    fun selectModel(variant: ModelVariant) {
-        ModelChoice.save(context, variant)
-        worker.post {
-            val ready = runCatching { acquireClassifier() }
-            if (!running.get()) return@post
-            main.post {
-                updateBar(
-                    if (ready.isSuccess) "已切到 ${variant.label}，回到游戏点「刷新」"
-                    else "切到 ${variant.label} 失败：${ready.exceptionOrNull()?.message}",
-                    "",
-                )
-            }
-        }
-    }
-
     fun release() {
         stop()
         // 关闭也要排在 worker 上：主线程直接关会打断正在跑的那一帧。
@@ -347,32 +319,21 @@ class HintSession(
         dumpExecutor.shutdown()
     }
 
-    /**
-     * 取当前该用的识别器；变体变了就换一份（旧的在这里关掉）。
-     *
-     * 当前变体从 [ModelChoice] 读而不是从字段读：界面切了模型、服务这边还没重建时，
-     * 下一次跑帧就能自己纠正过来。
-     */
+    /** 取识别器（只有一个变体，加载过就直接复用）。 */
     private fun acquireClassifier(): TileClassifier {
-        val want = ModelChoice.current(context)
-        loaded?.takeIf { loadedVariant == want }?.let { return it }
+        loaded?.let { return it }
         closeClassifier()
+        val want = ModelVariant.DEFAULT
         Log.i(TAG, "加载识别模型：${want.label}（${want.graphAsset}）")
-        return classifierProvider(want).also {
-            loaded = it
-            loadedVariant = want
-        }
+        return classifierProvider(want).also { loaded = it }
     }
 
-    /** 按落盘的选择走 OpenCV 或 YOLO；YOLO 模型加载失败就退回 OpenCV，不让整帧不可用。 */
+    /** 只走 YOLO：模型加载失败或判不出可信网格就返回 null，这一帧直接跳过。 */
     private fun localize(frame: Bitmap): BoardScan? {
-        val picked = LocatorChoice.current(context)
-        Log.i(TAG, "定位算法=$picked")
-        if (picked != Locator.Yolo) return OpenCvBoardScanner.scan(frame)
         val detector = yolo ?: runCatching { YoloBoardDetector(context).also { yolo = it } }
             .onFailure { Log.w(TAG, "YOLO 模型加载失败", it) }
             .getOrNull()
-            ?: return OpenCvBoardScanner.scan(frame)
+            ?: return null
         return runCatching { detector.scan(frame) }
             .onFailure { Log.w(TAG, "YOLO 定位异常", it) }
             .getOrNull()
@@ -383,7 +344,6 @@ class HintSession(
         yolo?.let { runCatching { it.close() } }
         yolo = null
         loaded = null
-        loadedVariant = null
     }
 
     private fun captureFrame() {

@@ -84,27 +84,20 @@ def cut_tile(img: np.ndarray, cx: float, cy: float, side: int) -> np.ndarray:
                       else cv2.INTER_CUBIC)
 
 
-def frame_cells(img: np.ndarray, min_pitch: int, locator: str = "yolo") -> dict | None:
+def frame_cells(img: np.ndarray) -> dict | None:
     """一帧 → 每格的裁切图 + 伪标签 + 元信息。
 
-    定位默认走 YOLO：残局/空盘时 detect_grid 的投影没有周期可数，会把 14 行算成 13 行，
-    格线整体错一格；board/tile 检测在这类画面上仍然稳。OpenCV 保留为兜底。
+    定位**只走 YOLO**。残局/空盘时 OpenCV 的自相关投影没有周期可数，会把 14 行算成 13 行、
+    格线整体错一格；这条兜底路径已经从代码里删掉，判不出就跳过，别退回投影法。
     """
     g = None
-    if locator == "yolo":
-        got = yolo_grid.grid_of(img)
-        if got is not None:
-            xl, yl, _, _ = got
-            # 网格定好了，后续裁格/判空/特征提取仍复用 OpenCV 那套（与训练完全对齐）
-            g = T.grid_from_lines(img, xl, yl, T.INSET)
-    if g is None and locator == "opencv":
-        try:
-            g = T.detect_grid(img, min_pitch, T.INSET, verbose=False)
-        except SystemExit:
-            return None
+    got = yolo_grid.grid_of(img)
+    if got is not None:
+        xl, yl, _, _ = got
+        # 网格定好了，后续裁格/判空/特征提取复用同一套（与识别训练对齐）
+        g = T.grid_from_lines(img, xl, yl, T.INSET)
     if g is None:
         # YOLO 都判不出（砖块 < 2，多在半空/空盘）：这一帧直接跳过。
-        # 不能退回 OpenCV —— 那正是之前把这些帧切歪的原因。
         return None
     holes = (g["score"] < g["score_thr"]).ravel()
     idx = np.where(~holes)[0]
@@ -205,8 +198,6 @@ def main() -> None:
     ap.add_argument("--keep-labels", action="store_true",
                     help="重跑时保留旧 index.csv 里的 class_id 标注（人工改过的不会被清掉）")
     # ---- 后两步：模型识别 + 标注界面（都可单独关掉）----
-    ap.add_argument("--locator", default="yolo", choices=["yolo", "opencv"],
-                    help="棋盘定位：yolo（默认，残局更稳）或 opencv（旧的自相关投影）")
     ap.add_argument("--backbone", default=auto_classify.DEFAULT_BACKBONE,
                     choices=["resnet18", "resnet50", "mobilenet_v3_small",
                              "mobilenet_v3_large", "dinov2_vits14"],
@@ -287,7 +278,7 @@ def main() -> None:
     used = {r["frame"] for r in ledger} | {r["source_file"] for r in ledger}
     for name in new_names:
         img = T.load_image(os.path.join(args.samples, name))
-        r = frame_cells(img, args.min_pitch, args.locator)
+        r = frame_cells(img)
         if r is None:
             print(f"  跳过 {name}（标定失败）")
             continue

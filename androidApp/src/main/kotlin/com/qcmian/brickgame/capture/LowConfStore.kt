@@ -89,7 +89,7 @@ object LowConfStore {
      * 为什么要单独留这一份：识别失败以前在磁盘上是**完全看不见**的 —— 只有界面上一句
      * "未识别到棋盘"，调标定只能靠猜。成功帧有低置信度留档，失败帧一张不落，于是每次
      * 都是"用户说 50% 失败、手上没有一张失败图"。文件名前缀同 lowconf_ + 时间戳，
-     * 与同刻的 logcat（OpenCvBoardScanner 那条 标定/丢弃 诊断）按时间对上即可定位原因。
+     * 与同刻的 logcat（YoloBoardDetector 那条 定位/残差 诊断）按时间对上即可定位原因。
      */
     fun saveScanFail(context: Context, bitmap: Bitmap) {
         val dir = ensureDir(context, SCAN_FAIL_DIR) ?: return

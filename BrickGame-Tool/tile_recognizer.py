@@ -4,8 +4,9 @@
 共享底层库：棋盘标定 + 裁格 + 图标特征 + 帧内聚类。**不做训练，也不写数据集。**
 
 三个环节（全部自动，不依赖机型/分辨率/皮肤）：
-  1. 定位棋盘网格：梯度图行/列投影 → 自相关求格子周期 pitch → 相位锁定求网格线
-                   → 取最长连续的一段 = 棋盘 → 得到行数/列数/每格矩形（`detect_grid`）
+  1. 定位棋盘网格：由 `build-dataset/yolo_grid.py`（board/tile 检测）给出网格线，
+                   本文件只负责 `grid_from_lines`：按给定网格线裁格、算特征、标空位。
+                   投影/自相关那套 OpenCV 标定已删除（残局会给出 191×48 这种网格）。
   2. 特征与空位：每格裁切 → 缩放 → 去底板 → 图标特征；接近纯底色的格子判为空位（`icon_features`）
   3. 帧内聚类：特征两两算距离（带 ±3px 平移对齐，`aligned_distance_matrix`）→
                偶数约束下的等价类（`cluster_by_parity` / `merge_similar`）
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -405,86 +407,6 @@ def estimate_lattice_from_blobs(img: np.ndarray, pitch: float = 0.0,
     }
 
 
-def detect_grid(img: np.ndarray, min_pitch: int, inset: float = INSET,
-                verbose: bool = True) -> dict:
-    """求周期/相位 → 精调网格线 → 定棋盘范围 → 裁格、算图标特征、标空位。
-
-    两个信号分工明确（实测各自单独用都会出错）：
-      - **棋盘范围**用环带四边最小值：它能顶住进度条/按钮这类横贯画面的 UI；
-      - **空位判定**用图标对比度：空格子相对底板几乎没有偏差，
-        而其它信号会把"选中高亮"的砖块误判成空格。
-    """
-    g = edge_profile(img)
-    row_prof = g.sum(axis=1)
-    col_prof = g.sum(axis=0)
-
-    h, w = g.shape
-    pitch_y, ac_y = fundamental_pitch(row_prof, min_pitch, int(h * 0.25))
-    pitch_x, ac_x = fundamental_pitch(col_prof, min_pitch, int(w * 0.25))
-
-    # 砖块是正方形的 → x/y 周期必然接近。差得远 / 测不到都是自相关取歪了，实测三种：
-    #  - 取到 2/3 倍谐波：行周期 307 = 3×102，棋盘被切成左上角 5×10（低置信度留档 14 帧里 12 帧）
-    #  - 整轴**没测到**周期（周期=min_pitch）：残局只剩几十块砖，该轴投影已经没有周期结构
-    #    （真机第 1 层实测 x=102 / y=12，整帧被丢掉）
-    #  - 被"天空/马路/UI 边缘"带偏：残局截图给 x23/y94（真值 110/110），砖块切成半块
-    # 前两种按方形先验处理（除回基波 / 借另一个轴的周期），最后一种用棋盘底色外框反推。
-    fallback = None
-    xlines = ylines = None
-    found_x, found_y = pitch_x > 2 * min_pitch, pitch_y > 2 * min_pitch
-    fx, fy = reconcile_pitches(pitch_x, pitch_y)
-    if (fx, fy) != (pitch_x, pitch_y) and MIN_COLS <= w // fx <= MAX_COLS:
-        if verbose:
-            print(f"x/y 周期不一致（{pitch_x}/{pitch_y}）→ 按方形砖块先验做谐波修正 {fx}/{fy}")
-        pitch_x, pitch_y = fx, fy
-    elif not (found_x and found_y):
-        # 单轴或双轴失锁（残局常见）：借测到的那个当格距，棋盘范围交给底板外框。
-        # 两轴都失锁时 good=0，格距从"砖块色块中心间距"与"底板能铺成整格"两个判据里选。
-        good = int(pitch_x if found_x else (pitch_y if found_y else 0))
-        lat = estimate_lattice_from_blobs(img, pitch=good, col_prof=col_prof, row_prof=row_prof)
-        if lat is not None:
-            if verbose:
-                print(f"自相关失锁（x{pitch_x}/y{pitch_y}，借格距 {good or '色块间距'}）"
-                      f" → 棋盘底色外框定界 {len(lat['xlines']) - 1} 列 x {len(lat['ylines']) - 1} 行")
-            fallback = lat["source"]
-            xlines, ylines = lat["xlines"], lat["ylines"]
-            pitch_x, pitch_y = lat["pitch_x"], lat["pitch_y"]
-
-    if fallback is None:
-        xlines = refine_lines(col_prof, np.arange(lattice_phase(col_prof, pitch_x), w, pitch_x), pitch_x)
-        ylines = refine_lines(row_prof, np.arange(lattice_phase(row_prof, pitch_y), h, pitch_y), pitch_y)
-        if max(pitch_x, pitch_y) > 1.35 * max(1, min(pitch_x, pitch_y)):
-            lat = estimate_lattice_from_blobs(img)
-            if lat is not None:
-                if verbose:
-                    print(f"自相关不可信（x 周期{pitch_x} / y 周期{pitch_y} 相差过大）"
-                          f" → 用棋盘底色反推 {len(lat['xlines']) - 1} 列 x {len(lat['ylines']) - 1} 行"
-                          f"（格距 ~{lat['pitch_x']}px）")
-                fallback = lat["source"]
-                xlines, ylines = lat["xlines"], lat["ylines"]
-                pitch_x, pitch_y = lat["pitch_x"], lat["pitch_y"]
-
-    ring = cell_ring_score(img, xlines, ylines)
-    if fallback is None:
-        # 自相关路径：网格线会溢出棋盘，用"砖块成排"的密度裁掉两端多余的行/列。
-        tile = ring >= 0.25 * float(np.percentile(ring, 95))
-        r0, r1 = trim_board_extent(tile, axis=0)
-        c0, c1 = trim_board_extent(tile, axis=1)
-        if r1 - r0 < 2 or c1 - c0 < 2:
-            raise SystemExit("网格定位失败：没找到成排的格子，检查截图或调小 --min-pitch")
-        xlines, ylines = xlines[c0:c1 + 1], ylines[r0:r1 + 1]
-    # 反推路径不裁：棋盘外框已是实测值，而 trim 用的是"最长连续段"，
-    # 残局里中间若干行全空，会把 10x14 的棋盘截成左上角那一小簇（2x3）。
-    out = grid_from_lines(img, xlines, ylines, inset)
-    out.update({"pitch_x": int(pitch_x), "pitch_y": int(pitch_y), "src": fallback or "autocorr",
-                "row_prof": row_prof, "col_prof": col_prof, "ac_x": ac_x, "ac_y": ac_y})
-    if verbose:
-        print(f"网格: x 周期{pitch_x} ({len(xlines) - 1}列) / y 周期{pitch_y} ({len(ylines) - 1}行)"
-              f"{'（棋盘底色反推）' if fallback else ''}")
-        print(f"  每行砖块数: " + " ".join(str(int(v)) for v in (out["score"] >= out["score_thr"]).sum(axis=1)))
-        print(f"  每列砖块数: " + " ".join(str(int(v)) for v in (out["score"] >= out["score_thr"]).sum(axis=0)))
-    return out
-
-
 def cell_flatness(patches: np.ndarray, margin: float = 0.18) -> np.ndarray:
     """每格"内部有没有东西"：格子内部（去掉外圈 margin）的 Sobel 边缘能量。
 
@@ -716,20 +638,32 @@ def draw_debug(img: np.ndarray, grid: dict, labels: np.ndarray, empty: np.ndarra
 
 # ---------------------------------------------------------------- 单独调试
 def main() -> None:
-    """只跑标定并输出调试图 —— 用来确认新截图的网格定位对不对（不产数据集）。"""
-    ap = argparse.ArgumentParser(description="单张截图 → 棋盘标定 + 调试图")
+    """只跑定位并输出调试图 —— 用来确认新截图的网格对不对（不产数据集）。
+
+    网格来自 YOLO（与裁格、训练完全同一条路）；`yolo_grid` 依赖 ultralytics，
+    所以只在 main 里 import，识别链的环境不需要装它。
+    """
+    ap = argparse.ArgumentParser(description="单张截图 → 棋盘定位 + 调试图")
     ap.add_argument("image", help="游戏截图路径")
     ap.add_argument("--out", default="out", help="调试图输出目录")
-    ap.add_argument("--min-pitch", type=int, default=12, help="格子最小像素间距")
     ap.add_argument("--inset", type=float, default=INSET, help="裁切内缩比例")
     args = ap.parse_args()
 
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-dataset"))
+    import yolo_grid  # noqa: PLC0415
+
     img = load_image(args.image)
     print(f"图片: {img.shape[1]}x{img.shape[0]}")
-    g = detect_grid(img, args.min_pitch, args.inset)
+    got = yolo_grid.grid_of(img)
+    if got is None:
+        raise SystemExit("定位失败：砖块太少或残差过大（残局/空盘请人工确认）")
+    xl, yl, _, _ = got
+    g = grid_from_lines(img, xl, yl, args.inset)
     holes = (g["score"] < g["score_thr"]).ravel()
+    px = float(np.median(np.diff(xl)))
+    py = float(np.median(np.diff(yl)))
     print(f"网格: {g['cols']} 列 x {g['rows']} 行 = {holes.size} 格，"
-          f"其中空位 {int(holes.sum())} 格；周期 x={g['pitch_x']} y={g['pitch_y']}px")
+          f"其中空位 {int(holes.sum())} 格；格距 x={px:.1f} y={py:.1f}px")
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, "debug_lattice.png")
     cv2.imwrite(path, draw_debug(img, g, np.zeros(holes.size, np.int32), holes))

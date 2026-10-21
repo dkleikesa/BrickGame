@@ -60,12 +60,8 @@ import androidx.core.content.FileProvider
 import com.qcmian.brickgame.capture.BrickGameAccessibilityService
 import com.qcmian.brickgame.capture.AutoContinue
 import com.qcmian.brickgame.capture.LowConfStore
-import com.qcmian.brickgame.ml.Locator
-import com.qcmian.brickgame.ml.LocatorChoice
-import com.qcmian.brickgame.ml.ModelChoice
 import com.qcmian.brickgame.ml.ModelVariant
 import com.qcmian.brickgame.ml.TfliteTileClassifier
-import com.qcmian.brickgame.vision.OpenCvBoardScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -94,11 +90,8 @@ fun HintApp() {
         var labelsOn by remember { mutableStateOf(HintUiBus.showLabels) }
         var confirmDelete by remember { mutableStateOf(false) }
         var showSettings by remember { mutableStateOf(false) }
-        // 定位算法：默认 YOLO；切回 OpenCV 只用来做对照
-        var yoloOn by remember { mutableStateOf(LocatorChoice.current(context) == Locator.Yolo) }
         // 放大看的哪张留档（null = 没开大图）
         var zoom by remember { mutableStateOf<File?>(null) }
-        var openCvReady by remember { mutableStateOf<Boolean?>(null) }
         // 实际跑在哪条后端上由 TfliteTileClassifier 决定（GPU delegate 对这个模型不划算，已关）
         val backend = remember { TfliteTileClassifier.backendDescription() }
 
@@ -109,16 +102,9 @@ fun HintApp() {
                 delay(800)
             }
         }
-        LaunchedEffect(Unit) {
-            openCvReady = withContext(Dispatchers.Default) { OpenCvBoardScanner.ensureNativeLoaded() }
-        }
         // 已经有多少低置信度留档：列一次目录（之后服务每存/删一次自己刷新，见 LowConfStore）
         LaunchedEffect(Unit) {
             withContext(Dispatchers.IO) { LowConfStore.refresh(context) }
-        }
-        // 当前选用的模型：真来源是落盘那份（服务与界面共用），启动时同步到界面状态
-        LaunchedEffect(Unit) {
-            HintUiBus.variant = withContext(Dispatchers.IO) { ModelChoice.current(context) }
         }
 
         Box(Modifier.fillMaxSize()) {
@@ -148,7 +134,6 @@ fun HintApp() {
                             else -> "未开启"
                         },
                     )
-                    StatusLine("OpenCV", when (openCvReady) { null -> "加载中…"; true -> "已加载"; false -> "加载失败" })
                     StatusLine("识别实现", "TFLite · $backend")
                     StatusLine("运行状态", if (ui.running) "提示中（第 ${ui.frames} 帧）" else "已停止")
                     StatusLine(
@@ -311,13 +296,8 @@ fun HintApp() {
             exit = slideOutHorizontally(tween(200)) { it },
         ) {
             SettingsPage(
-                yoloOn = yoloOn,
                 gridOn = gridOn,
                 labelsOn = labelsOn,
-                onYolo = {
-                    yoloOn = it
-                    LocatorChoice.save(context, if (it) Locator.Yolo else Locator.OpenCV)
-                },
                 onGrid = {
                     gridOn = it
                     HintUiBus.showGrid = it
@@ -342,10 +322,8 @@ fun HintApp() {
  */
 @Composable
 private fun SettingsPage(
-    yoloOn: Boolean,
     gridOn: Boolean,
     labelsOn: Boolean,
-    onYolo: (Boolean) -> Unit,
     onGrid: (Boolean) -> Unit,
     onLabels: (Boolean) -> Unit,
     onBack: () -> Unit,
@@ -382,54 +360,15 @@ private fun SettingsPage(
         GroupTitle("识别模型")
         SettingsCard(cardBg) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-                Text("MobileNet", fontSize = 16.sp)
-                Spacer(Modifier.height(8.dp))
-                // 分段控件单独占一行、三等分：跟着文字宽度排会一宽一窄，很难看
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFFE9E9EB))
-                        .padding(2.dp),
-                ) {
-                    ModelVariant.entries.forEach { variant ->
-                        val selected = HintUiBus.variant == variant
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (selected) Color.White else Color.Transparent)
-                                .clickable {
-                                    if (!selected) {
-                                        HintUiBus.variant = variant
-                                        BrickGameAccessibilityService.selectModel(variant)
-                                    }
-                                }
-                                .padding(vertical = 6.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                variant.label,
-                                fontSize = 13.sp,
-                                textAlign = TextAlign.Center,
-                                color = if (selected) Color.Black else secondary,
-                            )
-                        }
-                    }
-                }
+                Text("MobileNetV2（V2）", fontSize = 16.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "精度与端上性能综合最好，已是唯一内置模型",
+                    fontSize = 13.sp,
+                    color = secondary,
+                )
             }
         }
-
-        GroupTitle("定位")
-        SettingsCard(cardBg) {
-            SettingsRow("用 YOLO 定位", yoloOn, onYolo)
-        }
-        Text(
-            "关掉则用 OpenCV 的几何算法做对照",
-            fontSize = 13.sp,
-            color = secondary,
-            modifier = Modifier.padding(start = 32.dp, top = 6.dp),
-        )
 
         GroupTitle("调试显示")
         SettingsCard(cardBg) {

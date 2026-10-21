@@ -24,7 +24,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from tile_recognizer import INSET, detect_grid  # noqa: E402
+import yolo_grid  # noqa: E402
 
 OUT_DIR = os.path.join(HERE, "samples-sparse")
 
@@ -65,9 +65,8 @@ def main() -> None:
         img = cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
-        try:
-            g = detect_grid(img, 12, INSET, verbose=False)
-        except (SystemExit, Exception):
+        g = yolo_grid.locate(img)
+        if g is None:
             continue
         rows, cols = g["score"].shape
         empty = int((g["score"] < g["score_thr"]).sum())
@@ -98,8 +97,8 @@ def main() -> None:
                 name = f"{stem}_k{k}_s{seed}"
                 cv2.imencode(".png", sparse)[1].tofile(os.path.join(OUT_DIR, name + ".png"))
 
-                try:
-                    got = detect_grid(sparse, 12, INSET, verbose=False)
+                got = yolo_grid.locate(sparse)
+                if got is not None:
                     ok = True
                     got_rows, got_cols = got["score"].shape
                     got_px = int(got["pitch_x"])
@@ -107,11 +106,11 @@ def main() -> None:
                     exact = (got_rows == rows and got_cols == cols and abs(got_px - truth["pitch"]) <= 5
                              and err < 0.35)
                     src, note = str(got.get("src", "")), ""
-                except (SystemExit, Exception) as e:
+                else:
                     ok = exact = False
                     got_rows = got_cols = got_px = 0
                     err = float("nan")
-                    src, note = "", str(e)[:40]
+                    src, note = "", "定位失败"
                 recs.append({"name": name, "base": stem, "k": k, "seed": seed,
                              "ok": int(ok), "exact": int(exact),
                              "rows": got_rows, "cols": got_cols, "pitch": got_px,

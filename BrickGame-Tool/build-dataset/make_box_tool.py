@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-生成 YOLO 框标注页（box_tool.html），只放"模型预标注"的那批帧。
+生成 YOLO 框标注页（box_tool.html），只放"还没人工确认"的帧。
 
-为什么要人工过一遍：预标注是当前模型自己出的框，漏检的砖在训练里等于"这里没有砖"，
+为什么必须人工过一遍：预标注是当前模型自己出的框，漏检的砖在训练里等于"这里没有砖"，
 错误会被固化。逐格点 140 个框不现实，所以这里只做两件事：删掉误检、补上漏检。
+保存后该帧写进 yolo/reviewed.json，页面不再展示它。
 
 用法：
   cd BrickGame-Tool && .venv-train/bin/python build-dataset/make_box_tool.py
@@ -214,10 +215,22 @@ boot();
 </script></body></html>"""
 
 
+def reviewed_frames() -> set:
+    """box_server 保存过的帧（人工确认完毕）—— 这些不用再铺到页面上。"""
+    p = os.path.join(YOLO, "reviewed.json")
+    if not os.path.exists(p):
+        return set()
+    try:
+        return set(json.load(open(p, encoding="utf-8")).get("frames", []))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
 def build_data() -> list:
-    """把"预标注的那批帧"打包成页面要的 JSON（服务每次请求现算，页面本身不变）。"""
+    """把"还没人工确认的帧"打包成页面要的 JSON（服务每次请求现算，页面本身不变）。"""
     meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
-    frames = [m for m in meta if m.get("labels_from") == "prelabel"]
+    done = reviewed_frames()
+    frames = [m for m in meta if m.get("file") not in done]
     data = []
     for m in frames:
         split, base = m["split"], m["file"]

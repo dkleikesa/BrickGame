@@ -38,15 +38,6 @@ object HintUiBus {
 
     var showLabels by mutableStateOf(false)
 
-    /**
-     * 当前选用的识别模型（主页上的选择器读它重组）。
-     *
-     * **真来源是落盘那份**（`ml/ModelChoice`）：无障碍服务与界面是同进程的两个入口，服务在
-     * 界面没打开时也要知道该加载哪个模型。这里只是给 Compose 看的即时状态，
-     * 切换请走 `BrickGameAccessibilityService.selectModel`（它同时写存档、更新这里、并让会话重建）。
-     */
-    var variant by mutableStateOf(ModelVariant.DEFAULT)
-
     /** 实际生效的悬浮窗窗口类型（2032=无障碍专属 / 2038=应用上层），null=还没挂上。 */
     var overlayWindowType by mutableStateOf<Int?>(null)
 

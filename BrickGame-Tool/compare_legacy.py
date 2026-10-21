@@ -47,7 +47,7 @@ def row(name: str, m: dict) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="现模型 vs legacy 闭集 softmax 的对照表")
-    ap.add_argument("--e", default=os.path.join(_HERE, "out/clf_real/metrics.json"),
+    ap.add_argument("--e", default=os.path.join(_HERE, "out/clf_v2/metrics.json"),
                     help="现模型（train_classifier.py）的 metrics.json")
     ap.add_argument("--l1", default=os.path.join(_HERE, "out/legacy_softmax/L1/metrics.json"))
     ap.add_argument("--l2", default=os.path.join(_HERE, "out/legacy_softmax/L2/metrics.json"))

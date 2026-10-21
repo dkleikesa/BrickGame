@@ -16,7 +16,6 @@ ONNX 只留在这边当转换源和数值基准 —— 12.8MB 的 .onnx 不往 A
 
 用法：
   ~/.venvs/brick-tflite/bin/python export_tflite.py                     # large → assets/brick_embedder.tflite
-  ~/.venvs/brick-tflite/bin/python export_tflite.py --variant small     # small → assets/brick_embedder_small.tflite
   ~/.venvs/brick-tflite/bin/python export_tflite.py --onnx out/brick_embedder.onnx
 """
 from __future__ import annotations
@@ -38,7 +37,7 @@ _ASSETS = os.path.join(os.path.dirname(_HERE), "androidApp", "src", "main", "ass
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="ONNX → TFLite（Android 侧实际跑的模型）")
-    ap.add_argument("--variant", default="large", choices=sorted(VARIANTS),
+    ap.add_argument("--variant", default="v2", choices=sorted(VARIANTS),
                     help="转换哪一个模型（决定输入 ONNX 与输出 tflite 的文件名）")
     ap.add_argument("--onnx", default="", help="留空 = 按 --variant 自动找")
     ap.add_argument("--out", default="", help="留空 = 按 --variant 写进 assets")

@@ -1,159 +1,168 @@
 ---
 name: brickgame-yolo-locator
-description: BrickGame 棋盘定位（board + tile 检测器）的工业级补数据闭环：App 自动留档 → 导出 → 去重入库 → 模型预标注 → 装配数据集 → 增量训练 → 放行闸门 → 导出 TFLite → 打进 APK → 实机回归。当用户说"又攒了一批截图/失败帧，重训定位模型"、"补数据优化 YOLO/定位"、"定位不准/残局切错"、"把新模型打进 APK 对比"、"OpenCV 和 YOLO 哪个准"时使用。This skill covers the on-device board localizer (board/tile YOLO), not the 2370-class tile classifier (that is brickgame-vision-retrain).
+description: BrickGame 棋盘定位（board + tile 检测器）的补数据闭环：App 留档 → 去重入库 → 模型预标注 → 人工确认框 → 装配 → 增量训练 → 放行闸门 → 导出 TFLite → 打进 APK → 实机回归。当用户说"又攒了一批截图/失败帧，重训定位模型"、"补数据优化 YOLO/定位"、"定位不准/残局切错"、"把新模型打进 APK 对比"时使用。This skill covers the on-device board localizer (board/tile YOLO), not the 2369-class tile classifier (that is brickgame-vision-retrain).
 ---
 
 # BrickGame 定位模型：补数据闭环
 
-定位只回答三件事：**几行几列、每格在哪、哪格是空的**。识别（2370 类）是另一条链，见
+定位只回答三件事：**几行几列、每格在哪、哪格是空的**。识别（2369 类）是另一条链，见
 `brickgame-vision-retrain`。两条链共用截图与 APK，但训练互不影响。
 
-工作目录：`<repo>/BrickGame-Tool`。YOLO 相关一律用仓库内 `.venv-train/bin/python`
-（torch + ultralytics + tensorflow/litert）；识别模型用 `~/.venvs/brick-train`。
+工作目录一律 `<repo>/BrickGame-Tool`，YOLO 相关一律用仓库内 `.venv-train/bin/python`。
+
+## 铁律（违反就是白训一轮）
+
+1. **标注唯一来源 = 模型预标注 + 人工确认**。禁止用 `dataset/index.csv` 的逐格标签反推框。
+2. **OpenCV 定位已经从代码里删干净**（Python 和 Android 都没有了）。残局/空盘实测会被算成
+   191×48、15×10 算成 16×10；Python 侧定位只走 `build-dataset/yolo_grid.py`，
+   端侧只走 `ml/YoloBoardDetector`，判不出就跳过这一帧。
+3. **没有人工确认的帧不许进训练**。`make_yolo_data.py` 会打印未确认帧数，必须为 0。
+4. **val 划分一次定终身**（`yolo/split.json`）。新帧只进 train，只有换代才 `--rebalance`。
+
+## 环境（新机器 / venv 丢了先做）
+
+```bash
+cd BrickGame-Tool
+uv venv .venv-train --python 3.12
+uv pip install --python .venv-train/bin/python --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+  ultralytics 'litert-torch>=0.9.0' 'ai-edge-litert>=2.1.4'
+```
+
+- 导出 TFLite 走 LiteRT：缺 `litert_torch` 会直接报 `No module named 'litert_torch'`。
+- 识别链是两个独立 venv（`~/.venvs/brick-train` 训练、`~/.venvs/brick-tflite` 转 TFLite），
+  转 TFLite 需要 `tensorflow + onnx2tf + ai-edge-litert`；`export_mobile.py` 在 torch≥2.6 上
+  还需要 `onnxscript`（requirements.txt 没写，单独装）。
+- 没有 `runs/brick/weights/best.pt` 时，`yolo_grid` 会自动用
+  `androidApp/src/main/assets/brick_yolo.tflite` 兜底，所以新克隆也能切新截图。
 
 ## 0. 采集：App 自己留档，不要手动截图
 
-App 里两个目录，出错就会写：
-
 | 目录（`Android/data/com.qcmian.brickgame/files/debug-frames/`） | 触发条件 | 内容 |
 |---|---|---|
-| `low-conf/` | 定位成功但识别器对某些格没把握 | `*.png` + 同名 `*.txt`（整盘矩阵、可疑格、pitch、行列） |
+| `low-conf/` | 定位成功但识别器没把握 | `*.png` + 同名 `*.txt`（整盘矩阵、可疑格、pitch、行列） |
 | `scan-fail/` | **定位失败**（返回 null） | 只有 `*.png` |
-
-导出（两种都行，ZIP 已包含两个目录）：
 
 ```bash
 export PATH=$PATH:~/Library/Android/sdk/platform-tools
 adb pull /sdcard/Android/data/com.qcmian.brickgame/files/debug-frames ./dumps
-# 或 App 主页「分享」按钮，解压后同样是 low-conf/ 与 scan-fail/ 两个子目录
 ```
 
-**采集判据**：目标是"每种皮肤 × 每种布局 ≥ 20 帧"，其中至少 5 帧是残局（剩 <15 块砖）。
-一个皮肤没凑够就不要训——样本进得去，泛化出不来。
+**采集判据**：每种皮肤 × 每种布局 ≥ 20 帧，其中至少 5 帧残局（剩 <15 块砖）。
+一个皮肤没凑够就不要训 —— 样本进得去，泛化出不来。
 
-## 1. 入库：去重 + 分目录
+## 1. 入库：去重
 
 ```bash
 cd BrickGame-Tool/build-dataset
-cp dumps/low-conf/*.png dumps/scan-fail/*.png samples/     # 同名冲突时保留先到的
+cp dumps/low-conf/*.png dumps/scan-fail/*.png samples/
 ```
 
-去重按内容 md5，别按文件名（手机时间戳会重）：
+去重按内容 md5（手机时间戳会重）：
 
 ```bash
 ~/.venvs/brick-train/bin/python - <<'PY'
 import hashlib, os
 seen = {}
 for f in sorted(os.listdir("samples")):
-    p = os.path.join("samples", f)
-    h = hashlib.md5(open(p, "rb").read()).hexdigest()
-    if h in seen:
-        os.remove(p); print("重复删除", f, "=", seen[h])
-    else:
-        seen[h] = f
+    h = hashlib.md5(open(os.path.join("samples", f), "rb").read()).hexdigest()
+    if h in seen: os.remove(os.path.join("samples", f)); print("重复删除", f, "=", seen[h])
+    else: seen[h] = f
 PY
 ```
 
-### 分类标注也要跑一遍（补进来的帧，类别还没标）
+分类标注是另一条链（`build_dataset.py` → `annotate.html`），补进来的帧也要过一遍；
+它现在**只走 YOLO 定位**，判不出就跳过，不会退回 OpenCV。
 
-定位和分类是两条链：**定位**学"哪格是砖"，**分类**学"这块砖是什么"。补进来的帧两条都得过。
-
-```bash
-cd BrickGame-Tool/build-dataset
-../.venv-train/bin/python build_dataset.py              # 裁格 + 自动识别 + 出标注页
-../.venv-train/bin/python embed_features.py             # 刷特征缓存（标完再跑一次）
-../.venv-train/bin/python annotate_server.py --no-open  # :8770 分类标注
-open http://127.0.0.1:8770/build-dataset/annotate.html
-```
-
-**裁格定位必须用 YOLO**：`build_dataset.py` 默认 `--locator yolo`。残局/空盘时 OpenCV 的
-detect_grid 没有周期可数，会把 14 行算成 13 行、格线整体错一格 —— 用它切出来的格子本身
-就是歪的，标注等于白标。YOLO 判不出的帧（砖块 < 2，多是空盘）直接跳过，**不**退回 OpenCV。
-
-### 清理页：删重复 / 无用图
-
-```bash
-../.venv-train/bin/python review_server.py --purge       # :8765
-open http://127.0.0.1:8765/build-dataset/review.html
-```
-
-按 class_id 铺开，**拖拽框选**批量标删（要整张图都在框里才算选中；悬停不放大，否则和框选冲突）。
-点 ✎ 改类别会**直接写回 index.csv**，且不再整页刷新（原来每改一格就 reload，标注没法连续做），
-右上角有「刷新页面」按钮手动归位。
-
-**服务要用后台任务托管启动**，别用 `(cmd &)` —— 父 shell 一退出子进程就被回收，页面会突然 404（踩过好几次）。
-
-## 2. 预标注：模型先出框，人只删改
+## 2. 预标注：模型先出框
 
 ```bash
 cd BrickGame-Tool
-.venv-train/bin/python build-dataset/prelabel_yolo.py            # 只处理 index.csv 里没有的帧
+.venv-train/bin/python build-dataset/prelabel_yolo.py          # 只补没有预标注的帧
+.venv-train/bin/python build-dataset/prelabel_yolo.py --all    # 换了模型，全部重刷
 ```
 
-产物 `build-dataset/yolo/prelabel/<帧名>.txt`（YOLO 格式，含 board 与 tile）。
+产物 `build-dataset/yolo/prelabel/<帧名>.txt`。脚本保证**一帧只有一个 board 框**
+（多出来的按置信度裁掉），tile 框每边内缩 6%（宽 = 0.88 格）。
 
-**必须人工过一遍**：预标注是当前模型自己出的框，漏检在训练里等于"这里没有砖"，会被固化。
-逐格点 140 个框不现实，所以只做两件事：删误检、补漏检。页面数据由 `GET /data` 现算
-（HTML 是静态的，不用每次重新生成），`POST /save` 直接写回 `yolo/labels`：
+## 3. 人工确认（不许跳过）
 
 ```bash
 cd BrickGame-Tool/build-dataset
-../.venv-train/bin/python box_server.py                  # :8771，自动开浏览器
-open http://127.0.0.1:8771/
+../.venv-train/bin/python box_server.py      # :8771，自动开浏览器
 ```
 
-- **蓝色 = 砖块**（点一下 = 删掉它，再点一次恢复）、**白色 = 棋盘**（一般不动）
-- **空白处拖拽** = 补一个漏检的砖（黄框，点一下可撤掉）
-- 保存幂等：首次保存前备份 `.orig`，之后每次从备份重算再叠加，反复保存不会重复加框
-- 改完再跑 `make_yolo_data.py` 装配，然后 `train_yolo.py --resume`
+- 页面**只列还没确认的帧**；保存后该帧写入 `yolo/reviewed.json`，刷新即消失。
+- **蓝色 = 砖块**（点一下删）、**白色 = 棋盘**（一般不动）、**空白拖拽 = 补漏检**。
+- 保存幂等：首次保存前备份 `.orig`，之后从备份重算再叠加，反复保存不会重复加框。
+- 只做两件事：删误检、补漏检。漏检在训练里等于"这里没有砖"，会被固化。
 
-## 3. 装配数据集（划分持久化）
+确认进度看 `make_yolo_data.py` 的告警，或：
 
 ```bash
+python3 -c "import json;m=json.load(open('yolo/meta.json'));print(sum(1 for x in m if not x['reviewed']),'/',len(m),'未确认')"
+```
+
+## 4. 装配数据集
+
+```bash
+cd BrickGame-Tool
 .venv-train/bin/python build-dataset/make_yolo_data.py
 ```
 
-- 有 `dataset/index.csv` 逐格标注的帧 → **弱标注**（tile 框由格子和类别反推，最准）
-- 没有的帧 → 用第 2 步的**预标注**
-- `yolo/split.json` 锁定 train/val：**新帧一律进 train**，val 永远不重新抽
-  （重抽 = 指标失去可比性 + 悄悄把评测集喂进训练）。真要重划才加 `--rebalance`。
+- **只搬框，不生成框**：`yolo/labels/` 优先（人工确认过的），没有才用 `prelabel/`。
+- 文件名是 `f + md5(帧名)[:8]`，**不是序号** —— 加新截图不会让旧 labels 串帧。
+- 已存在的 labels 一律不覆盖（人工改过的保住）；`--refresh-prelabel` 只覆盖未确认帧。
+- 没有任何框的帧会跳过并打印原因（`无预标注` / `缺 board 框` / `没有 tile 框`）。
 
-## 4. 增量训练
+## 5. 增量训练
 
 ```bash
-.venv-train/bin/python train_yolo.py --epochs 80                        # 从头训
-.venv-train/bin/python train_yolo.py --resume runs/brick/weights/last.pt --epochs 40   # 接着练
+.venv-train/bin/python train_yolo.py --epochs 80
+.venv-train/bin/python train_yolo.py --resume runs/brick/weights/last.pt --epochs 40
 ```
 
-数据少（<200 帧）时用 `--resume`，别从头训——36 帧从头训出来的模型对旧皮肤会漂。
+数据少（<200 帧）**必须 `--resume`**，从头训会让旧皮肤漂掉。新数据进 train 后
+early-stop 通常在第 30~60 轮就停，属正常。
 
-## 5. 放行闸门（不许跳过）
+## 6. 放行闸门（不许跳过）
 
 ```bash
 .venv-train/bin/python build-dataset/eval_gate.py --update
 ```
 
-硬门槛：board 命中 ≥ 95%、tile 召回 ≥ 95%、精确率不低于基线 3 个点。不达标就 exit 1。
-基线存在 `runs/brick/metrics.json`，只有 `--update` 或 `--force` 才覆盖。
-**精确率别单看**：标注不完整时它会虚低（没标的砖被算成误检），先看逐帧明细再决定。
+硬门槛：board 命中 ≥ 95%、tile 召回 ≥ 95%、精确率不低于基线 3 个点，不过就 exit 1。
+基线在 `runs/brick/metrics.json`，只有 `--update`/`--force` 才覆盖。
 
-## 6. 导出 TFLite 并进 assets
+闸门会先检查 val 帧是否人工确认过：**val 里还是预标注时指标必然虚高**（模型给自己的框
+打分，实测三项全 100%），这时 `--update` 会被拒绝，必须先把 val 过一遍。
+换了标注口径也要把旧基线挪走，否则精确率会跟旧口径比：
 
 ```bash
-cd BrickGame-Tool
+mv runs/brick/metrics.json runs/brick/metrics_weak_labels.json
+```
+
+**精确率别单看**：标注不完整时它会虚低（没标的砖算误检）。先算覆盖率：
+`已标注格 / (rows×cols)`。实测 60% 覆盖时精确率只有 73%，召回仍 100% —— 这是标注问题，
+不是模型问题。要提精确率就回去补第 3 步，别调阈值。
+
+## 7. 导出 TFLite 进 assets
+
+```bash
 .venv-train/bin/python -c "from ultralytics import YOLO; print(YOLO('runs/brick/weights/best.pt').export(format='tflite', imgsz=640, int8=False, nms=False))"
 cp runs/brick/weights/best.tflite ../androidApp/src/main/assets/brick_yolo.tflite
 ```
 
-导出依赖 `litert-torch` + `ai-edge-litert`（ultralytics 8.4 起走 LiteRT 后端）。缺了会报
-`No module named 'litert_torch'`，用清华源补：
+导出后先核对 IO，再进 APK：
 
 ```bash
-uv pip install --python .venv-train/bin/python --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-  'litert-torch>=0.9.0' 'ai-edge-litert>=2.1.4' pip
+.venv-train/bin/python - <<'PY'
+from ai_edge_litert.interpreter import Interpreter
+it = Interpreter(model_path='runs/brick/weights/best.tflite'); it.allocate_tensors()
+print(it.get_input_details()[0]['shape'], it.get_output_details()[0]['shape'])  # 期望 [1,3,640,640] / [1,6,8400]
+PY
 ```
 
-## 7. 构建 + 实机回归
+## 8. 构建 + 实机回归
 
 ```bash
 cd <repo>
@@ -161,8 +170,11 @@ JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradle
 adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
 ```
 
-控制条最左边是 `YOLO` 开关（选择存 `SharedPreferences` 的 `board_locator`），切完点「刷新」。
-验证看 logcat：
+Gradle 报 `Remote host terminated the handshake`（dl.google.com TLS）先原样重试一次，
+通常是瞬时网络问题，不是配置错。
+
+定位只有 YOLO 一条路（OpenCV 的实现、开关、依赖都已删除，APK 里不再有 `libopencv_java4.so`）。
+判不出可信网格时这一帧直接跳过，不会退回投影法。
 
 ```bash
 adb logcat -s YoloBoardDetector OpenCvBoardScanner HintSession
@@ -171,7 +183,7 @@ adb logcat -s YoloBoardDetector OpenCvBoardScanner HintSession
 
 **残差 > 8px 就是网格偏了**，不要只看行列数对不对。
 
-## 关键契约（改模型/改代码必须同步）
+## 契约（改模型/改代码必须同步）
 
 | 项 | 值 | 不同步的后果 |
 |---|---|---|
@@ -180,15 +192,22 @@ adb logcat -s YoloBoardDetector OpenCvBoardScanner HintSession
 | 输出 | `[1,6,8400]`，4 框 + 2 类分数，**坐标归一化 0..1** | 按 640 像素解会把格距算成 0.06px |
 | 类别 | 0=board，1=tile | 棋盘当砖块 |
 | tile 框 | 每边内缩 6% → 宽 = **0.88 格** | 除 0.94 会把 6 列算成 7 列（残局必现） |
-| board 框 | **中心点 + 宽高**（不是左上角） | 板框整体偏半个棋盘，IoU 0.45 |
+| board 框 | **中心点 + 宽高**，一帧只有一个 | 板框偏半个棋盘，IoU 0.45 |
 
 ## 已踩过的坑
 
-1. **别用 board 框直接铺网格**：它是整片区域的回归，边缘常差 15~20px。用 tile 中心做一次最小二乘
-   （`fitAxis`），残差能从 20px 降到 2px。
-2. **标注不完整会让指标失真**：`index.csv` 每帧只覆盖 24~135 格（棋盘 90~150 格），没标的砖
-   在训练里是"背景"。精确率 60%~70% 先怀疑标注，别急着调阈值。
-3. **残局是两条路的分水岭**：同一张只剩 6 块砖的图，OpenCV 给 7 行、YOLO 给 6 行。
-   回归测试必须包含残局帧，否则等于没测。
-4. **留档文件名带毫秒**（`MMdd-HHmmss-SSS`）：只到秒时同一秒两帧会互相覆盖。
-5. **ZIP 现在同时打 `low-conf/` 和 `scan-fail/`**：定位失败帧以前根本导不出来，补数据时缺的就是它。
+1. **弱标注 + OpenCV 反推已删除**（2026-10-21）。实测 47 帧里 5 帧网格对不上：2 帧多/少一行，
+   3 帧残局被算成 191×48。整轮训练等于部分白做，别再走这条路。
+2. **标注覆盖率才是精度上限**：`index.csv` 只覆盖 3047/5050 = 60% 的格子，早期帧甚至只有
+   6%（8/140）。精确率低先查这个。
+3. **残局/空盘是分水岭**：同一张只剩 6 块砖的图，投影法给 7 行、YOLO 给 6 行。YOLO 判不出
+   （砖 < 2）就跳过，**不要退回 OpenCV**。
+4. **15 行关卡的最后一整行（r14）会被 App 悬浮窗盖住**，真值是空位；别把带黑边的格当样本。
+5. **留档文件名带毫秒**（`MMdd-HHmmss-SSS`）：只到秒同一秒两帧会互相覆盖。
+6. **ZIP 同时打 `low-conf/` 和 `scan-fail/`**：定位失败帧以前根本导不出来，补数据缺的就是它。
+7. **labels 文件名绝不能按序号**：中途加帧会让编号整体后移，人工改过的框串到别的帧上。
+8. **端侧裁格已换纯 Kotlin**（`ml/CellCropper` + `vision/CellResampler`）：区域平均/双线性
+   替代 `INTER_AREA/INTER_LINEAR`，逐像素差 ≤1 级灰阶、embedding 余弦 ≥0.9993（150 格实测），
+   远小于命中阈值（0.0385）。性能：整帧只 `getPixels` 一次 + 12/8 位定点权重表，
+   JVM 单线程 135 格约 14ms/帧（旧浮点实现 23ms）；`CellResamplerTest` 里有对拍和基准，
+   改缩放核必须重跑。

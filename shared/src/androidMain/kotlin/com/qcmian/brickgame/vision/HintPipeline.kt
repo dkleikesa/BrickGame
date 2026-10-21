@@ -61,15 +61,13 @@ object HintPipeline {
     }
 
     /**
-     * @param minPitch 格子最小像素间距，分辨率越低越要调大（默认 12，与 Python 一致）。
+     * @param localize 定位实现（App 里传 YOLO 检测器；见 `YoloBoardDetector`）。
      * @return 定位失败返回 null。
      */
     fun analyze(
         frame: Bitmap,
         classifier: TileClassifier,
-        minPitch: Int = OpenCvBoardScanner.MIN_PITCH,
-        /** 定位实现；默认走 OpenCV。换 YOLO 只是换这一个 lambda。 */
-        localize: BoardLocalizer = BoardLocalizer { OpenCvBoardScanner.scan(it, minPitch) },
+        localize: BoardLocalizer,
     ): Result? {
         val start = System.nanoTime()
         return try {

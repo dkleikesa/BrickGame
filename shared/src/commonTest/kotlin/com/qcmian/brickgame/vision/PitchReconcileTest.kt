@@ -33,14 +33,14 @@ class PitchReconcileTest {
 
     @Test
     fun irreconcilablePitchesAreReturnedAsIs() {
-        // 110 和 23：除 2/3/4 都回不到 110 → 原样返回，交给调用方走 BlobLattice 反推
+        // 110 和 23：除 2/3/4 都回不到 110 → 原样返回，交给调用方按行列数范围拦一道
         assertEquals(110 to 23, LatticeMath.reconcilePitches(110, 23))
     }
 
     @Test
     fun divisibleButImplausibleCorrectionIsLeftToCaller() {
         // 残局的 x23/y94：94/4 = 23 确实"除得回去"，但那样一屏会有 40+ 列，不是棋盘。
-        // 函数只做数学；合理性由调用方再用列数范围拦一道（见 OpenCvBoardScanner）。
+        // 函数只做数学；合理性由调用方再用列数范围拦一道（见 YoloBoardDetector）。
         assertEquals(23 to 23, LatticeMath.reconcilePitches(23, 94))
     }
 }
