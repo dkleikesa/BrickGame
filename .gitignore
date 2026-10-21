@@ -30,7 +30,14 @@ __pycache__/
 BrickGame-Tool/.venv-train/
 BrickGame-Tool/runs/
 BrickGame-Tool/yolo11n.pt
-BrickGame-Tool/build-dataset/yolo/
+# YOLO 产物：人工标注的框/确认记录/val 划分要入库（丢了等于白标一轮），
+# 图、预标注、缓存、data.yaml（含本机绝对路径）都是可重建的，不入库
+BrickGame-Tool/build-dataset/yolo/images/
+BrickGame-Tool/build-dataset/yolo/prelabel/
+BrickGame-Tool/build-dataset/yolo/data.yaml
+BrickGame-Tool/build-dataset/yolo/meta.json
+BrickGame-Tool/build-dataset/yolo/**/*.orig
+BrickGame-Tool/build-dataset/yolo/**/*.cache
 BrickGame-Tool/build-dataset/samples-sparse/
 BrickGame-Tool/build-dataset/samples-fail/
 BrickGame-Tool/build-dataset/eval_*.csv
