@@ -19,6 +19,7 @@ import com.qcmian.brickgame.overlay.OverlayController
 import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.CellPoint
 import com.qcmian.brickgame.vision.HintEngine
+import com.qcmian.brickgame.vision.BoardState
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.concurrent.ExecutorService
@@ -714,14 +715,22 @@ class HintSession(
 
         val inPlace = fr == tr && fc == tc
         val from = scan.rectOf(CellPoint(fr, fc))
-        // 直消：第一下点起点那块砖、第二下点配对砖（两块都点，消掉"一块砖可配两块"的歧义）；
-        // 滑动：起点滑到落点格中心。
-        val target = if (inPlace) scan.rectOf(CellPoint(pr, pc)) else scan.rectOf(CellPoint(tr, tc))
+        val pairRect = scan.rectOf(CellPoint(pr, pc))
+        val toRect = scan.rectOf(CellPoint(tr, tc))
+        // 滑完之后那块砖是否同时对齐两块同款砖：是的话游戏会让玩家二选一，
+        // 只在落点松手什么都不会消（真机实测：反复"滑动没生效"）。
+        val ambiguous = !inPlace && ambiguousAfterMove(result.state, fr, fc, tr, tc)
+        // 直消：第一下点起点、第二下点配对砖；滑动：起点滑到落点格中心。
+        val target = if (inPlace) pairRect else toRect
         val x1 = from.centerX.toFloat()
         val y1 = from.centerY.toFloat()
         val x2 = target.centerX.toFloat()
         val y2 = target.centerY.toFloat()
-        val gestureMs = if (inPlace) TAP_MS * 2 + TAP_GAP_MS else SWIPE_MS
+        val gestureMs = when {
+            inPlace -> TAP_MS * 2 + TAP_GAP_MS
+            ambiguous -> SWIPE_MS + TAP_GAP_MS + TAP_MS
+            else -> SWIPE_MS
+        }
 
         val gen = generation.get()
         // 记下配对砖那一格：下一帧 [autoAdvance] 拿它复检这一步有没有真的落地
@@ -749,6 +758,13 @@ class HintSession(
             gestures.tapPair(x1, y1, x2, y2, TAP_MS, TAP_GAP_MS) { ok ->
                 settle(ok, if (ok) "已点击" else "点击被取消/派发失败")
             }
+        } else if (ambiguous) {
+            Log.i(TAG, "二选一：滑到 ($tr,$tc) 后多块同款可配，补点配对砖 ($pr,$pc)")
+            gestures.swipeThenTap(
+                x1, y1, x2, y2,
+                pairRect.centerX.toFloat(), pairRect.centerY.toFloat(),
+                SWIPE_MS, TAP_MS, TAP_GAP_MS,
+            ) { ok -> settle(ok, if (ok) "已滑动+补点" else "滑动/补点被取消") }
         } else {
             gestures.swipe(x1, y1, x2, y2, SWIPE_MS) { ok ->
                 settle(ok, if (ok) "已滑动" else "滑动被取消/派发失败")
@@ -756,6 +772,50 @@ class HintSession(
         }
         // 看门狗：回调迟迟不来也别把闭环停死（复检不符的兜底会拦住"反复空推"）
         main.postDelayed({ settle(false, "回调超时") }, gestureMs + GESTURE_TIMEOUT_MS)
+    }
+
+    /**
+     * 这一步滑完之后，落点那块砖是否会同时对齐 ≥2 块同款砖。
+     *
+     * 判定与算法（[com.qcmian.brickgame.algorithm.BrickGameTipHelper]）一致：同行/同列、
+     * 中间没有别的砖。≥2 时游戏要求玩家点一下指定消哪一对，光松手不会消。
+     */
+    private fun ambiguousAfterMove(state: BoardState, fr: Int, fc: Int, tr: Int, tc: Int): Boolean {
+        val grid = state.asGrid()
+        if (tr !in grid.indices || tc !in grid[0].indices) return false
+        val cls = grid[fr][fc]
+        if (cls <= 0) return false
+        grid[fr][fc] = 0
+        grid[tr][tc] = cls
+        return linePartners(grid, tr, tc, cls) >= 2
+    }
+
+    /** 同行/同列、中间无砖的第一个非空格如果是同款，就算一个可配对象。 */
+    private fun linePartners(grid: Array<IntArray>, row: Int, col: Int, cls: Int): Int {
+        val rows = grid.size
+        val cols = grid[0].size
+        var n = 0
+        var c = col - 1
+        while (c >= 0) {
+            if (grid[row][c] != 0) { if (grid[row][c] == cls) n++; break }
+            c--
+        }
+        c = col + 1
+        while (c < cols) {
+            if (grid[row][c] != 0) { if (grid[row][c] == cls) n++; break }
+            c++
+        }
+        var r = row - 1
+        while (r >= 0) {
+            if (grid[r][col] != 0) { if (grid[r][col] == cls) n++; break }
+            r--
+        }
+        r = row + 1
+        while (r < rows) {
+            if (grid[r][col] != 0) { if (grid[r][col] == cls) n++; break }
+            r++
+        }
+        return n
     }
 
     /** 自动运行的心跳：一步走完了再来一帧。 */

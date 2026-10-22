@@ -194,6 +194,28 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
     }
 
     /**
+     * 滑到落点后再点一下配对砖：滑完那块砖同时对齐两块同款砖时，游戏会让玩家二选一。
+     */
+    override fun swipeThenTap(
+        x1: Float, y1: Float, x2: Float, y2: Float,
+        tapX: Float, tapY: Float,
+        durationMs: Long, tapMs: Long, gapMs: Long, onDone: (Boolean) -> Unit,
+    ) {
+        val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        val tap = Path().apply { moveTo(tapX, tapY) }
+        val swipeMs = durationMs.coerceAtLeast(1L)
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, swipeMs))
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    tap, swipeMs + gapMs.coerceAtLeast(1L), tapMs.coerceAtLeast(1L),
+                ),
+            )
+            .build()
+        dispatch(gesture, "滑动($x1,$y1 → $x2,$y2)+点($tapX,$tapY)", onDone)
+    }
+
+    /**
      * 自动运行的手势出口：`dispatchGesture` 合成一次滑动。
      *
      * 用于"两块没有对齐"的情况：把一块砖滑到落点，靠游戏自己判定对齐后消除。
