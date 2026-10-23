@@ -18,6 +18,8 @@ description: BrickGame 棋盘定位（board + tile 检测器）的补数据闭�
    端侧只走 `ml/YoloBoardDetector`，判不出就跳过这一帧。
 3. **没有人工确认的帧不许进训练**。`make_yolo_data.py` 会打印未确认帧数，必须为 0。
 4. **val 划分一次定终身**（`yolo/split.json`）。新帧只进 train，只有换代才 `--rebalance`。
+5. **`samples/` 是原图的唯一来源**。`yolo/images/` 只是装配产物（长边已缩到 640），
+   看框、标框、要重切高分辨率都得回 `samples/`；它不入库，本地删了就没了（见「入库策略」）。
 
 ## 环境（新机器 / venv 丢了先做）
 
@@ -60,7 +62,7 @@ cp dumps/low-conf/*.png dumps/scan-fail/*.png samples/
 去重按内容 md5（手机时间戳会重）：
 
 ```bash
-~/.venvs/brick-train/bin/python - <<'PY'
+../.venv-train/bin/python - <<'PY'
 import hashlib, os
 seen = {}
 for f in sorted(os.listdir("samples")):
@@ -83,6 +85,10 @@ cd BrickGame-Tool
 
 产物 `build-dataset/yolo/prelabel/<帧名>.txt`。脚本保证**一帧只有一个 board 框**
 （多出来的按置信度裁掉），tile 框每边内缩 6%（宽 = 0.88 格）。
+
+新帧要先装配一次才会出现在标注页 —— `box_server.py` 的列表来自 `yolo/meta.json`，
+而 meta 只有 `make_yolo_data.py` 写。所以真实顺序是
+**预标注 → 装配（第 4 步）→ 人工确认 → 再装配 → 训练**，第 3、4 步要走两趟。
 
 ## 3. 人工确认（不许跳过）
 
@@ -115,6 +121,10 @@ cd BrickGame-Tool
 - 文件名是 `f + md5(帧名)[:8]`，**不是序号** —— 加新截图不会让旧 labels 串帧。
 - 已存在的 labels 一律不覆盖（人工改过的保住）；`--refresh-prelabel` 只覆盖未确认帧。
 - 没有任何框的帧会跳过并打印原因（`无预标注` / `缺 board 框` / `没有 tile 框`）。
+- 图按 `MAX_SIDE=640` 等比缩小后才入库（1080x2400 → 288x640）。训练和推理的 `imgsz` 本来就是
+  640，原图那 3.75 倍线性冗余模型永远看不到；255 帧从 240M 降到 63M。
+- `samples/` 里找不到原图的帧不会被装配：**人工确认过的 label 原地保留并告警**，未确认的挪进
+  `yolo/_trash/`。不再 `os.remove`（旧版会连确认过的标注一起删）。
 
 ## 5. 增量训练
 
@@ -177,6 +187,29 @@ Gradle 报 `Remote host terminated the handshake`（dl.google.com TLS）先原�
 
 定位只有 YOLO 一条路（OpenCV 的实现、开关、依赖都已删除，APK 里不再有 `libopencv_java4.so`）。
 判不出可信网格时这一帧直接跳过，不会退回投影法。
+
+## 仓库入库策略
+
+| 入库 | 不入库 |
+|---|---|
+| `yolo/images`（缩到 640 的训练图）、`yolo/labels`、`meta.json`、`split.json`、`reviewed.json` | `samples/`（原图留档）、`yolo/prelabel*`、`yolo/_trash`、`yolo/data.yaml`（写的是本机绝对路径） |
+| `dataset/images/frame`（64x64 分类图）、`dataset/*.csv` | `dataset/deleted/`、`cache/`、`dumps-new/`、`*_*.bak-*.csv`、`__pycache__` |
+
+`data.yaml` 里的 `path` 是绝对路径，换机器 / 换克隆目录都会失效，重跑一次
+`make_yolo_data.py` 即可重新生成。
+
+`samples/` 不入库等于**没有备份**，几百 M 只在本机。定期冷备（脚本落在
+`build-dataset/backup_samples.sh`，产物在 `~/BrickGame-backups/`）：
+
+```bash
+./build-dataset/backup_samples.sh
+```
+
+`train_yolo.py` 每次训练前会按当前仓库位置重写 `data.yaml` 的 `path`，
+所以换机器 / 换克隆目录不用重新装配。
+
+`yolo/prelabel_hold/` 已废弃 —— 预标注统一落 `yolo/prelabel/`，临时想屏蔽某批帧就
+`mv` 出 `samples/`，别造平行目录（流程只认 `prelabel/`）。
 
 ```bash
 adb logcat -s YoloBoardDetector OpenCvBoardScanner HintSession

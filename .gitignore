@@ -33,7 +33,7 @@ BrickGame-Tool/yolo11n.pt
 # YOLO 产物：人工标注的框/确认记录/val 划分要入库（丢了等于白标一轮），
 # 图已入库（samples 不入库后，整屏原图只剩这一份）；data.yaml 含本机绝对路径，仍不入库
 BrickGame-Tool/build-dataset/yolo/prelabel/
-BrickGame-Tool/build-dataset/yolo/prelabel_hold/
+BrickGame-Tool/build-dataset/yolo/_trash/
 BrickGame-Tool/build-dataset/yolo/data.yaml
 BrickGame-Tool/build-dataset/yolo/**/*.orig
 BrickGame-Tool/build-dataset/yolo/**/*.cache

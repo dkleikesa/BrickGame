@@ -888,8 +888,13 @@ class HintSession(
          */
         const val TAP_GAP_MS = 140L
 
-        /** 消掉一对之后等游戏把动画播完再截下一帧。 */
-        const val STEP_SETTLE_MS = 700L
+        /**
+         * 消掉一对之后等消除动画播完再截下一帧。
+         *
+         * 消除动画本身 0.7 秒，取 1 秒留余量：截早了会截到"半消"的中间态 ——
+         * 那一帧的格子既不像原物也不像空位，分类相似度整体被拉低。
+         */
+        const val STEP_SETTLE_MS = 1000L
 
         /** 无解继续模式下，一步都走不动时的重试间隔。 */
         const val UNSOLVABLE_RETRY_MS = 3000L

@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 YOLO = os.path.join(HERE, "yolo")
+SAMPLES = os.path.join(HERE, "samples")
 OUT = os.path.join(HERE, "box_tool.html")
 WIDTH = 460
 TEMPLATE = r"""<!doctype html>
@@ -281,12 +282,20 @@ def build_data() -> list:
     data = []
     for m in frames:
         split, base = m["split"], m["file"]
+        # 优先取 samples 原图：yolo/images 已按 imgsz 缩到 640，拿它画 460 宽的预览
+        # 等于反向放大，tile 边缘会糊，人工补框看不准。
         img_path = None
         for ext in (".jpg", ".png", ".jpeg"):
-            p = os.path.join(YOLO, "images", split, base + ext)
+            p = os.path.join(SAMPLES, m["src"] + ext)
             if os.path.exists(p):
                 img_path = p
                 break
+        if not img_path:
+            for ext in (".jpg", ".png", ".jpeg"):
+                p = os.path.join(YOLO, "images", split, base + ext)
+                if os.path.exists(p):
+                    img_path = p
+                    break
         if not img_path:
             continue
         img = cv2.imdecode(np.fromfile(img_path, np.uint8), cv2.IMREAD_COLOR)

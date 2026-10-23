@@ -26,6 +26,20 @@ DATA = os.path.join(HERE, "build-dataset", "yolo", "data.yaml")
 PROJECT = os.path.join(HERE, "runs")
 
 
+def ensure_data_yaml() -> None:
+    """按当前仓库位置重写 data.yaml 的 path。
+
+    yaml 里存的是绝对路径，换机器或换克隆目录后 train/val 会指到不存在的地方；
+    装配阶段写的那份只对生成它的机器有效。
+    """
+    yolo = os.path.dirname(DATA)
+    if not os.path.isdir(os.path.join(yolo, "images", "train")):
+        raise SystemExit(f"没找到装配好的数据集：{yolo}\n先跑 build-dataset/make_yolo_data.py")
+    with open(DATA, "w", encoding="utf-8") as fh:
+        fh.write(f"path: {yolo}\ntrain: images/train\nval: images/val\n"
+                 "names:\n  0: board\n  1: tile\n")
+
+
 def pick_device() -> str:
     try:
         import torch
@@ -44,6 +58,7 @@ def main() -> None:
     ap.add_argument("--export", action="store_true", help="训练完导出 TFLite")
     args = ap.parse_args()
 
+    ensure_data_yaml()
     model = YOLO(args.resume or args.model)
     device = pick_device()
     print(f"训练设备 {device}，数据 {DATA}")

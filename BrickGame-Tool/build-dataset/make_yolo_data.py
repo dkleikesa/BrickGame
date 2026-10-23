@@ -33,12 +33,36 @@ import csv
 import hashlib
 import json
 import os
-import shutil
+
+from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "yolo")
 REVIEWED = os.path.join(OUT, "reviewed.json")
 PRELABEL = os.path.join(OUT, "prelabel")
+MAX_SIDE = 640          # ultralytics imgsz；超过它的像素训练/推理都看不到
+
+
+def copy_image(src: str, dst: str) -> None:
+    """复制帧图，长边超过 MAX_SIDE 的按比例缩到 MAX_SIDE。
+
+    训练和推理都在 imgsz=640 下做，1080x2400 原图等于存了 3.75 倍线性冗余
+    （约 14 倍像素）；图库体积 99M -> 11M，模型输入不变。
+    """
+    if os.path.exists(dst):
+        with Image.open(dst) as done:
+            if max(done.size) <= MAX_SIDE:
+                return      # 已装配过：重复 open+save 会让 JPG 每跑一次再压一代
+    with Image.open(src) as im:
+        w, h = im.size
+        longest = max(w, h)
+        if longest > MAX_SIDE:
+            im = im.resize((round(w * MAX_SIDE / longest), round(h * MAX_SIDE / longest)),
+                           Image.LANCZOS)
+        if dst.lower().endswith((".jpg", ".jpeg")):
+            im.convert("RGB").save(dst, "JPEG", quality=90, subsampling=0)
+        else:
+            im.save(dst, "PNG", optimize=True)
 
 
 def base_of(stem: str) -> str:
@@ -97,6 +121,38 @@ def ledger_shapes() -> dict[str, tuple[int, int]]:
         return {}
     with open(path, newline="", encoding="utf-8") as f:
         return {r["frame"]: (int(r["rows"]), int(r["cols"])) for r in csv.DictReader(f)}
+
+
+def archive_stale(keep_images: set[str], keep_labels: set[str], reviewed: set[str]) -> tuple[list[str], int, int]:
+    """把本次没装配到的图/框挪进 _trash，不再直接删。
+
+    旧版无条件 os.remove：samples 少一帧，脚本就会把这一帧人工确认过的 label 一起删掉
+    （实测一次丢了 47 个）。现在已确认的原地保留并告警，其余进 _trash 可捞回。
+    """
+    trash = os.path.join(OUT, "_trash")
+    orphaned, n_img, n_lab = [], 0, 0
+    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
+        d = os.path.join(OUT, sub)
+        for name in os.listdir(d):
+            full = os.path.join(d, name)
+            if not os.path.isfile(full):
+                continue
+            if sub.startswith("images"):
+                if f"{sub[7:]}/{name}" in keep_images:
+                    continue
+                n_img += 1
+            else:
+                if not name.endswith(".txt") or name in keep_labels:
+                    continue
+                base = os.path.splitext(name)[0]
+                if base in reviewed:
+                    orphaned.append(base)      # 人工确认过的框，宁可留着也不动
+                    continue
+                n_lab += 1
+            dest = os.path.join(trash, sub, name)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.replace(full, dest)
+    return orphaned, n_img, n_lab
 
 
 def main() -> None:
@@ -182,22 +238,17 @@ def main() -> None:
 
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
         os.makedirs(os.path.join(OUT, sub), exist_ok=True)
-    for sub in ("images/train", "images/val"):
-        for old in os.listdir(os.path.join(OUT, sub)):
-            os.remove(os.path.join(OUT, sub, old))
-
     keep = {base_of(f["stem"]) + ".txt" for f in frames}
-    for s in ("train", "val"):
-        for old in os.listdir(label_dir(s)):
-            if old.endswith(".txt") and old not in keep:
-                os.remove(os.path.join(label_dir(s), old))
+    keep_images: set[str] = set()
 
     meta = []
     for f in frames:
         stem, split_of = f["stem"], split[f["stem"]]
         base = base_of(stem)
-        shutil.copyfile(os.path.join(args.samples, f["file"]),
-                        os.path.join(OUT, "images", split_of, base + os.path.splitext(f["file"])[1]))
+        img_name = base + os.path.splitext(f["file"])[1]
+        copy_image(os.path.join(args.samples, f["file"]),
+                   os.path.join(OUT, "images", split_of, img_name))
+        keep_images.add(f"{split_of}/{img_name}")
 
         target = os.path.join(label_dir(split_of), base + ".txt")
         old_path, _ = find_label(stem)
@@ -215,9 +266,15 @@ def main() -> None:
                     for cls, cx, cy, bw, bh in f["labels"]:
                         fh.write(f"{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
 
+        # labels_from 要反映框的真实来源：未确认帧即便上次已落盘成 labels/*.txt，
+        # 框还是模型给的，不能记成人工标注（否则第二次装配后全部洗白成 labels）。
+        is_rev = base_of(stem) in reviewed
+        from_src = f["src"] if (f["src"] != "labels" or is_rev) else "prelabel"
         meta.append({"file": base, "src": stem, "split": split_of, "rows": f["rows"],
                      "cols": f["cols"], "tiles": f["tiles"],
-                     "labels_from": f["src"], "reviewed": base_of(stem) in reviewed})
+                     "labels_from": from_src, "reviewed": is_rev})
+
+    orphaned, n_trash_img, n_trash_lab = archive_stale(keep_images, keep, reviewed)
 
     with open(os.path.join(OUT, "data.yaml"), "w") as fh:
         fh.write(f"path: {OUT}\ntrain: images/train\nval: images/val\n")
@@ -246,6 +303,13 @@ def main() -> None:
         print(f"\n⚠ {n_unreviewed}/{len(meta)} 帧还没人工确认（模型预标注直接进了训练集）。\n"
               f"  训练前先过一遍：.venv-train/bin/python build-dataset/box_server.py\n"
               f"  确认完重新跑本脚本，再 train_yolo.py。")
+    if n_trash_img or n_trash_lab:
+        print(f"\n归档到 yolo/_trash：{n_trash_img} 张图、{n_trash_lab} 个未确认框"
+              f"（samples 里已没有对应原图）")
+    if orphaned:
+        print(f"\n⚠ {len(orphaned)} 个人工确认过的框对应原图不在 samples，已原地保留："
+              f"{', '.join(orphaned[:5])}{' ...' if len(orphaned) > 5 else ''}\n"
+              f"  这些帧不会进本次训练集，把原图放回 samples 再重跑本脚本即可恢复。")
     print(f"输出 → {OUT}")
 
 

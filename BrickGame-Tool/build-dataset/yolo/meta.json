@@ -1,0 +1,2552 @@
+[
+ {
+  "file": "f1b3328c0",
+  "src": "lowconf_1016-010431",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 126,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f66670c26",
+  "src": "lowconf_1016-010433",
+  "split": "val",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 124,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f19281880",
+  "src": "lowconf_1016-010437",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 120,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f6f4f979a",
+  "src": "lowconf_1016-010441",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 116,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f1079b56e",
+  "src": "lowconf_1016-010443",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 114,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f9bd3a01b",
+  "src": "lowconf_1016-010445",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 112,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f6db7f5ff",
+  "src": "lowconf_1016-010447",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 110,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fd55586eb",
+  "src": "lowconf_1016-010449",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 109,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fd2ebf3a7",
+  "src": "lowconf_1016-010453",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 104,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f6c3ec3bc",
+  "src": "lowconf_1016-010455",
+  "split": "val",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 102,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f27a7a187",
+  "src": "lowconf_1016-010457",
+  "split": "train",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 100,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f2ef1194e",
+  "src": "lowconf_1016-010459",
+  "split": "val",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 98,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fb62d6f95",
+  "src": "lowconf_1016-010501",
+  "split": "train",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 96,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f66b9a81b",
+  "src": "lowconf_1016-010503",
+  "split": "train",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 94,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f389d1f82",
+  "src": "lowconf_1016-010505",
+  "split": "train",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 92,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fee49e471",
+  "src": "lowconf_1016-010507",
+  "split": "train",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 90,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f8485ed6a",
+  "src": "lowconf_1021-004952-840",
+  "split": "val",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 94,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fa69b94d9",
+  "src": "lowconf_1021-012038-304",
+  "split": "train",
+  "rows": 15,
+  "cols": 10,
+  "tiles": 63,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fd76b20e2",
+  "src": "lowconf_1021-012222-050",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 134,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f0ab335a6",
+  "src": "lowconf_1021-012230-350",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 129,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f668d33bc",
+  "src": "lowconf_1021-012423-159",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 56,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fdd7aa26f",
+  "src": "lowconf_1021-012722-624",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 44,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fde44fc8c",
+  "src": "lowconf_1021-012810-795",
+  "split": "train",
+  "rows": 13,
+  "cols": 10,
+  "tiles": 2,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f8e749e72",
+  "src": "lowconf_1021-014739-372",
+  "split": "train",
+  "rows": 13,
+  "cols": 9,
+  "tiles": 2,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fac3e88bd",
+  "src": "lowconf_1021-014839-169",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 120,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f192f2870",
+  "src": "lowconf_1021-015124-649",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 110,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f5133aaf1",
+  "src": "lowconf_1021-015550-086",
+  "split": "train",
+  "rows": 13,
+  "cols": 9,
+  "tiles": 2,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f8e7b7789",
+  "src": "lowconf_1022-005847-565",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 115,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f32544b24",
+  "src": "lowconf_1022-005848-850",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 113,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4b0936e6",
+  "src": "lowconf_1022-005850-126",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 111,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4ab746a4",
+  "src": "lowconf_1022-005851-436",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 109,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f9034ce3c",
+  "src": "lowconf_1022-005852-718",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 108,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f24688cbb",
+  "src": "lowconf_1022-005854-005",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 106,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f56ee42d5",
+  "src": "lowconf_1022-005855-498",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 104,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f98b2bb14",
+  "src": "lowconf_1022-005904-959",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 102,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f337f729d",
+  "src": "lowconf_1022-005914-366",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 100,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ffc536aa4",
+  "src": "lowconf_1022-005923-935",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 98,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f0400d9cd",
+  "src": "lowconf_1022-005933-259",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 95,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f212be29a",
+  "src": "lowconf_1022-010058-095",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 81,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2f7d399a",
+  "src": "lowconf_1022-010138-032",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 73,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd9604003",
+  "src": "lowconf_1022-010215-662",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 64,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc70e06c8",
+  "src": "lowconf_1022-010243-703",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 58,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f02107f6e",
+  "src": "lowconf_1022-065229-909",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 48,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff6953071",
+  "src": "lowconf_1022-065232-448",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 44,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f3ed5722f",
+  "src": "lowconf_1022-065312-566",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 38,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc2cb351f",
+  "src": "lowconf_1022-065324-488",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 18,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff4ad51f9",
+  "src": "lowconf_1022-065329-150",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 10,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f618092d0",
+  "src": "lowconf_1022-065346-446",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 2,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f8608ed5d",
+  "src": "lowconf_1022-065358-731",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fbec0d2c9",
+  "src": "lowconf_1022-065400-075",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 138,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa534d6dc",
+  "src": "lowconf_1022-065401-443",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 136,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f72bd0219",
+  "src": "lowconf_1022-065402-789",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 134,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f259607a2",
+  "src": "lowconf_1022-065404-138",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 132,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fee669794",
+  "src": "lowconf_1022-065405-481",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 130,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fae64d245",
+  "src": "lowconf_1022-065406-809",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 128,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f80b8d99b",
+  "src": "lowconf_1022-065408-121",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 126,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f9773b025",
+  "src": "lowconf_1022-065410-104",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 124,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f826f02f6",
+  "src": "lowconf_1022-065411-408",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 122,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f152d6589",
+  "src": "lowconf_1022-065412-738",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 120,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f77ecfed5",
+  "src": "lowconf_1022-065414-015",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 118,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f39187e27",
+  "src": "lowconf_1022-065415-299",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 116,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4a751088",
+  "src": "lowconf_1022-065416-564",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 114,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd903d901",
+  "src": "lowconf_1022-065418-779",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 112,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f5049d02d",
+  "src": "lowconf_1022-065422-581",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 106,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f50b6b081",
+  "src": "lowconf_1022-065423-862",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 104,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa6daa33f",
+  "src": "lowconf_1022-065425-122",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 102,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fed1a0663",
+  "src": "lowconf_1022-065442-675",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 75,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fb78b8dce",
+  "src": "lowconf_1022-065457-355",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 51,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe2b8e3f4",
+  "src": "lowconf_1022-065515-300",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 20,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fb90c6e81",
+  "src": "lowconf_1022-065520-026",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 12,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2baf2561",
+  "src": "lowconf_1022-065545-352",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4d009589",
+  "src": "lowconf_1022-065547-377",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 138,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "feb426b4b",
+  "src": "lowconf_1022-065548-890",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 136,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f53dba44b",
+  "src": "lowconf_1022-065550-361",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 134,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f205c4a72",
+  "src": "lowconf_1022-065551-699",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 132,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f6942d6aa",
+  "src": "lowconf_1022-065553-445",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 131,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe49448cd",
+  "src": "lowconf_1022-065554-857",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 129,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f88a10fcf",
+  "src": "lowconf_1022-065556-204",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 127,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f5e4e1a48",
+  "src": "lowconf_1022-065557-490",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 125,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f68d3f2e1",
+  "src": "lowconf_1022-065558-834",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 123,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc619c5a4",
+  "src": "lowconf_1022-065600-166",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 121,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f51ca6f6f",
+  "src": "lowconf_1022-065601-454",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 119,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f13c809a4",
+  "src": "lowconf_1022-065602-757",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 118,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc7a5d18b",
+  "src": "lowconf_1022-065607-947",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 118,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2ead026c",
+  "src": "lowconf_1022-065609-229",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 116,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f1070474e",
+  "src": "lowconf_1022-065610-528",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 114,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f638667ff",
+  "src": "lowconf_1022-065611-830",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 112,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fff147726",
+  "src": "lowconf_1022-065613-170",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 110,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fab439235",
+  "src": "lowconf_1022-065614-442",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 108,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd2a8b4f3",
+  "src": "lowconf_1022-065615-747",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 106,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f09a73f88",
+  "src": "lowconf_1022-065620-191",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 104,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "facede661",
+  "src": "lowconf_1022-065621-449",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 102,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f141fc4d5",
+  "src": "lowconf_1022-065622-680",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 100,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f03f24561",
+  "src": "lowconf_1022-065623-963",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 98,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f197bc516",
+  "src": "lowconf_1022-065625-217",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 96,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fb86770b5",
+  "src": "lowconf_1022-065626-469",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 94,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fff5558e8",
+  "src": "lowconf_1022-065627-709",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 92,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f001895bd",
+  "src": "lowconf_1022-065628-932",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 90,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fb4d70d42",
+  "src": "lowconf_1022-065630-152",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 89,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f3597f372",
+  "src": "lowconf_1022-065631-388",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 86,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f0e096eb2",
+  "src": "lowconf_1022-065632-614",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 84,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fdfa6e1bf",
+  "src": "lowconf_1022-065633-859",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 81,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f1478f030",
+  "src": "lowconf_1022-065635-118",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 79,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff483577d",
+  "src": "lowconf_1022-065636-358",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 77,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc4f6c988",
+  "src": "lowconf_1022-065637-593",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 74,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f711cb84f",
+  "src": "lowconf_1022-065638-834",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 72,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe2a639cc",
+  "src": "lowconf_1022-065640-118",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 70,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f300f6a39",
+  "src": "lowconf_1022-065641-333",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 68,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f739d64c8",
+  "src": "lowconf_1022-065642-614",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 66,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f367f1d2c",
+  "src": "lowconf_1022-065643-835",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 64,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc21e77a0",
+  "src": "lowconf_1022-065645-058",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 62,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fbfde358c",
+  "src": "lowconf_1022-065646-310",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 60,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f07d363d5",
+  "src": "lowconf_1022-065647-524",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 58,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f839a7406",
+  "src": "lowconf_1022-065648-748",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 56,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f371bbecd",
+  "src": "lowconf_1022-065649-992",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 54,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc2d53006",
+  "src": "lowconf_1022-065651-209",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 52,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa87ccb22",
+  "src": "lowconf_1022-065652-417",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 50,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fbaeecf59",
+  "src": "lowconf_1022-065653-618",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 48,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f1d30d66e",
+  "src": "lowconf_1022-065654-825",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 46,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa20463fc",
+  "src": "lowconf_1022-065656-036",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 44,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc7bf0779",
+  "src": "lowconf_1022-065657-240",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 42,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc033e4c4",
+  "src": "lowconf_1022-065658-473",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 40,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f1656c79d",
+  "src": "lowconf_1022-065659-686",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 38,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2b365fd7",
+  "src": "lowconf_1022-065700-937",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 36,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fef7f18c5",
+  "src": "lowconf_1022-065702-134",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 34,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f0d2e192e",
+  "src": "lowconf_1022-065703-325",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 32,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff8c5f509",
+  "src": "lowconf_1022-065704-510",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 30,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f10490344",
+  "src": "lowconf_1022-065705-682",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 28,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fef699724",
+  "src": "lowconf_1022-065706-877",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 26,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa27157ab",
+  "src": "lowconf_1022-065708-037",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 24,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f475865ee",
+  "src": "lowconf_1022-065709-212",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 22,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f581e2df4",
+  "src": "lowconf_1022-065710-425",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 20,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f92c1250a",
+  "src": "lowconf_1022-065711-599",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 18,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f55193be7",
+  "src": "lowconf_1022-065712-773",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 16,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f10d47fe1",
+  "src": "lowconf_1022-065713-946",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 14,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f12a005ba",
+  "src": "lowconf_1022-065715-111",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 12,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f28d1184c",
+  "src": "lowconf_1022-065716-323",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 10,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa6643c89",
+  "src": "lowconf_1022-065738-011",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4c302054",
+  "src": "lowconf_1022-065747-835",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 138,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fb69156d6",
+  "src": "lowconf_1022-065757-688",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 137,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f27e8fafa",
+  "src": "lowconf_1022-065807-723",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 135,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fcdebad0b",
+  "src": "lowconf_1022-065817-165",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 133,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa635e656",
+  "src": "lowconf_1022-065826-860",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 131,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc57e7b40",
+  "src": "lowconf_1022-065836-229",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 129,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f34ad6dc0",
+  "src": "lowconf_1022-065844-603",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 127,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fcc98d7d1",
+  "src": "lowconf_1022-065849-035",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 125,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4d30cf1e",
+  "src": "lowconf_1022-065853-240",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 124,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f35fea048",
+  "src": "lowconf_1022-065855-764",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 121,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2acf90cf",
+  "src": "lowconf_1022-065857-811",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 119,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f0c400eb4",
+  "src": "lowconf_1022-065859-319",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 117,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fdbc11086",
+  "src": "lowconf_1022-065903-236",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 117,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f25a96cf5",
+  "src": "lowconf_1022-065904-880",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 115,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f62c75cd0",
+  "src": "lowconf_1022-065906-338",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 113,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4f438aa1",
+  "src": "lowconf_1022-065907-740",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 111,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f87a7b5fb",
+  "src": "lowconf_1022-065909-132",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 109,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f8a201e5d",
+  "src": "lowconf_1022-065910-419",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 107,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f064f4e18",
+  "src": "lowconf_1022-065912-377",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 105,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fb44e2458",
+  "src": "lowconf_1022-065913-847",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 103,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f85601119",
+  "src": "lowconf_1022-065915-144",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 101,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff9bc659b",
+  "src": "lowconf_1022-065916-445",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 99,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f119c8f5c",
+  "src": "lowconf_1022-065917-715",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 97,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f939e2d6d",
+  "src": "lowconf_1022-065919-012",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 95,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe78fbb97",
+  "src": "lowconf_1022-065920-311",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 93,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f3dad3cd9",
+  "src": "lowconf_1022-065921-541",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 91,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fef3da303",
+  "src": "lowconf_1022-065922-813",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 89,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f6dd16d2c",
+  "src": "lowconf_1022-065924-041",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 87,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f7766b8f8",
+  "src": "lowconf_1022-065925-284",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 86,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f9d1f06b2",
+  "src": "lowconf_1022-065926-511",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 85,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f88bd8026",
+  "src": "lowconf_1022-065927-806",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 82,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f82adf3e2",
+  "src": "lowconf_1022-065929-021",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 80,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f61a28139",
+  "src": "lowconf_1022-065930-289",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 79,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f7065adf5",
+  "src": "lowconf_1022-065931-516",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 77,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd81d9fdc",
+  "src": "lowconf_1022-065932-759",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 76,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f719c3aaf",
+  "src": "lowconf_1022-065933-998",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 73,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f758328b6",
+  "src": "lowconf_1022-065935-271",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 71,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f3c61d791",
+  "src": "lowconf_1022-065936-515",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 69,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f47579158",
+  "src": "lowconf_1022-065937-753",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 66,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe80cc23a",
+  "src": "lowconf_1022-065938-987",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 64,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd2906533",
+  "src": "lowconf_1022-065940-193",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 62,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f64bbb012",
+  "src": "lowconf_1022-065941-439",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 60,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2337e87a",
+  "src": "lowconf_1022-065942-624",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 58,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff066640d",
+  "src": "lowconf_1022-065943-856",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 56,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe8b7aac4",
+  "src": "lowconf_1022-065945-077",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 54,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2b3fa2a4",
+  "src": "lowconf_1022-065954-809",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 37,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa3321f2c",
+  "src": "lowconf_1022-070001-931",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 24,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4e8d0144",
+  "src": "lowconf_1022-070004-278",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 20,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f7d1b26eb",
+  "src": "lowconf_1022-070014-855",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 2,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fce2da2ac",
+  "src": "lowconf_1022-070043-641",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fa3b0285a",
+  "src": "lowconf_1022-070045-018",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 138,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f0133de70",
+  "src": "lowconf_1022-070046-338",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 137,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fbafd07a2",
+  "src": "lowconf_1022-070047-701",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 135,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc5d641a5",
+  "src": "lowconf_1022-070049-017",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 133,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fddf82034",
+  "src": "lowconf_1022-070050-400",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 131,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f3e1ed8f9",
+  "src": "lowconf_1022-070051-716",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 129,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ffbfe8431",
+  "src": "lowconf_1022-070053-058",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 127,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f95d29cb8",
+  "src": "lowconf_1022-070054-391",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 125,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fe2df4504",
+  "src": "lowconf_1022-070055-756",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 123,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f655caa59",
+  "src": "lowconf_1022-070057-085",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 121,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f67341b08",
+  "src": "lowconf_1022-070058-394",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 119,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f636bc418",
+  "src": "lowconf_1022-070059-684",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 117,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f03dffbaf",
+  "src": "lowconf_1022-070116-510",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 117,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f95e550a4",
+  "src": "lowconf_1022-070117-858",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 115,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc2a66f2e",
+  "src": "lowconf_1022-070119-124",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 115,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f1bb4b31c",
+  "src": "lowconf_1023-213127-074",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 64,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fbc174334",
+  "src": "lowconf_1023-213136-344",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 64,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2aebb8ec",
+  "src": "lowconf_1023-213145-675",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 64,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f52764dda",
+  "src": "lowconf_1023-213225-359",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 132,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fc36053c2",
+  "src": "lowconf_1023-213311-944",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 92,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f33ddfb62",
+  "src": "lowconf_1023-213319-197",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 81,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd3de80a3",
+  "src": "lowconf_1023-213320-445",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 79,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f9d1bfe4a",
+  "src": "lowconf_1023-213322-953",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 75,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f6d9cdbba",
+  "src": "lowconf_1023-213326-763",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 68,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f7585289d",
+  "src": "lowconf_1023-213330-517",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 63,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f1c82d673",
+  "src": "lowconf_1023-213359-622",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 14,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f4949c47f",
+  "src": "lowconf_1023-213409-779",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 2,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd305391c",
+  "src": "lowconf_1023-213500-500",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 122,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f3701a972",
+  "src": "lowconf_1023-213509-527",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 108,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2f8414cb",
+  "src": "lowconf_1023-213524-991",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 84,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f75a4e069",
+  "src": "lowconf_1023-213531-281",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 74,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f8f45effe",
+  "src": "lowconf_1023-213534-987",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 68,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f6b3d920a",
+  "src": "lowconf_1023-213542-334",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 58,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ffb55e9d0",
+  "src": "lowconf_1023-213549-579",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 45,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff2a9c995",
+  "src": "lowconf_1023-213556-916",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 33,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ff9b6c2c3",
+  "src": "lowconf_1023-213613-506",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 5,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fabfddb05",
+  "src": "scanfail_1021-132622",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 136,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f5e199bb7",
+  "src": "scanfail_1021-132623",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 136,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f501ef9d5",
+  "src": "scanfail_1021-132624",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 136,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f7dc22c55",
+  "src": "scanfail_1022-001918",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 121,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "fd2b38e28",
+  "src": "scanfail_1022-002204",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 28,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f8dc6e021",
+  "src": "scanfail_1022-002708",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 112,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "faecc86ed",
+  "src": "scanfail_1022-003040",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 136,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f2f348f28",
+  "src": "scanfail_1022-004734",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 119,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f937972cd",
+  "src": "scanfail_1022-004943",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 85,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "ffe9682bc",
+  "src": "scanfail_1022-065417",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 114,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f16183d40",
+  "src": "scanfail_1023-213314",
+  "split": "train",
+  "rows": 0,
+  "cols": 0,
+  "tiles": 88,
+  "labels_from": "prelabel",
+  "reviewed": false
+ },
+ {
+  "file": "f06cf8ec6",
+  "src": "screenshot_01",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f331290f2",
+  "src": "微信图片_20261012124713_3_2",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 122,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f43028a8e",
+  "src": "微信图片_20261012124715_4_2",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f589ed08e",
+  "src": "微信图片_20261012124719_5_2",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f83ae84ad",
+  "src": "微信图片_20261012124720_6_2",
+  "split": "train",
+  "rows": 8,
+  "cols": 6,
+  "tiles": 36,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f9469e96a",
+  "src": "微信图片_20261012124721_7_2",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 26,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f5bdf7578",
+  "src": "微信图片_20261012124722_8_2",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 36,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fe4a4e458",
+  "src": "微信图片_20261012124722_9_2",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 36,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f187f3f00",
+  "src": "微信图片_20261012124723_10_2",
+  "split": "val",
+  "rows": 8,
+  "cols": 6,
+  "tiles": 48,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f1694a8f4",
+  "src": "微信图片_20261012124724_11_2",
+  "split": "train",
+  "rows": 8,
+  "cols": 6,
+  "tiles": 36,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "ffc82ce5a",
+  "src": "微信图片_20261012124724_12_2",
+  "split": "val",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 30,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f56ba427d",
+  "src": "微信图片_20261012124725_13_2",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 36,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fc5bb7487",
+  "src": "微信图片_20261012124726_14_2",
+  "split": "train",
+  "rows": 8,
+  "cols": 6,
+  "tiles": 48,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fbac394ae",
+  "src": "微信图片_20261012125234_115_32",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 14,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "fc149f1f1",
+  "src": "微信图片_20261012125739_15_2",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 122,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f2deee205",
+  "src": "微信图片_20261014023734_9_307",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 140,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "ff423ceea",
+  "src": "微信图片_20261014023752_10_307",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 32,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f51f8c3e2",
+  "src": "微信图片_20261014023756_11_307",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 32,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f567edad6",
+  "src": "微信图片_20261014023757_12_307",
+  "split": "train",
+  "rows": 6,
+  "cols": 6,
+  "tiles": 36,
+  "labels_from": "labels",
+  "reviewed": true
+ },
+ {
+  "file": "f2d0a4f37",
+  "src": "微信图片_20261014023758_13_307",
+  "split": "train",
+  "rows": 14,
+  "cols": 10,
+  "tiles": 132,
+  "labels_from": "labels",
+  "reviewed": true
+ }
+]
