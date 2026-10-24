@@ -332,14 +332,32 @@ def coverage(boxes: list, m: dict) -> float | None:
     return (tiles / board) if board else None
 
 
+def audit_suspects() -> set:
+    """模型复检出的疑似漏标帧（audit_labels.py 生成）。
+
+    不用覆盖率判断：残局帧覆盖率天然低，模型也只检出两三块，那是对的。
+    真正的漏标是"模型能检出、标签里没有"。
+    """
+    p = os.path.join(YOLO, "audit.json")
+    if not os.path.exists(p):
+        return set()
+    try:
+        a = json.load(open(p, encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return set()
+    gap = a.get("gap", 10)
+    return {b for b, v in a.get("frames", {}).items() if v["model"] - v["label"] >= gap}
+
+
 def build_data() -> list:
     """待标帧 + 复查帧打包成页面要的 JSON（服务每次请求现算，页面本身不变）。
 
-    已确认但覆盖率 <50% 的帧也会拉回来（recheck=True），排在最前面 ——
+    已确认但被 `audit_labels.py` 判为漏标的帧也会拉回来（recheck=True），排在前面 ——
     点过确认不等于标全了，那批漏检会在下一轮变成负样本。
     """
     meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
     done = reviewed_frames()
+    suspects = audit_suspects()
     # 先按 label 算覆盖率，决定哪些帧要上页面（图片编码很贵，只处理入选的）
     need = []
     for m in meta:
@@ -354,8 +372,8 @@ def build_data() -> list:
                 boxes.append([int(q[0])] + [round(float(v), 6) for v in q[1:5]])
         cov = coverage(boxes, m)
         is_done = base in done
-        # 已确认且覆盖够 → 不再打扰；tiles==0 的空盘帧尊重人工判断，不反复拉回
-        if is_done and (cov is None or cov >= 0.5 or m["tiles"] == 0):
+        # 已确认的帧只在"模型能检出更多砖"时拉回复查；其余不再打扰
+        if is_done and base not in suspects:
             continue
         need.append((m, boxes, cov, is_done))
 
