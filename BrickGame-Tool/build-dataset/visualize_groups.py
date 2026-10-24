@@ -9,7 +9,7 @@
 点第 1 列的单张图 → 右侧面板：这一张的候选 / 搜索全量 class_id / 保持 / 标空位 / 标未知（单张粒度）。
 "标空位"（class_id=0，已消除格）与"标未知"（认不出，训练时忽略）是两件事，不要混用。
 
-标注存浏览器 localStorage。**写回两条路**：
+改动逐格 POST 给 annotate_server，直接落 index.csv，页面不存任何本地状态（写回一条路）：
   · `annotate_server.py` 起本地服务后打开 → 点「标完并写回」直接落 index.csv / frames.csv（推荐）；
   · 直接双击打开（file://）→ 浏览器写不了文件，只能"导出标注 JSON"再跑 apply_corrections.py。
 
@@ -203,25 +203,40 @@ tr.split td{background:#fffaf0}
 <div id="panel"><button class="close" id="pclose">关闭</button><div id="pbody"></div></div>
 <script>
 const DATA = __DATA__;
-const KEY = 'bgcls:' + DATA.dataset;
-const LS = (() => { try { localStorage.setItem('_t','1'); localStorage.removeItem('_t'); return localStorage; } catch(e) { return null; } })();
-// 写回方式：用 annotate_server.py 打开（http://127.0.0.1:8770/…）时，点「本帧标完」
-// 直接把这一帧的改动 POST 给服务端落库；直接双击打开（file://）时浏览器写不了文件，
-// 只能走"导出标注 JSON → apply_corrections.py"那条老路（按钮照旧可用）。
+// 状态只存在内存：每次改动当场 POST 给 annotate_server 落进 index.csv。
+// 页面不做本地缓存 —— 刷新后一切以台账为准，不存在"看着记住了、其实没写"。
 const SERVER = location.protocol === 'http:';
-// S.done = 本轮"本帧标完"的帧；S.edits = 逐格改动。两者都会写进导出的 JSON。
-// S.saved = 已经写回服务端的帧（服务器模式下用它显示"已写回"，语义与 S.done 不同）。
-let S = (LS && JSON.parse(LS.getItem(KEY) || 'null')) || {edits: {}};
-if (!S.edits) S.edits = {};
-if (!S.done) S.done = {};
-if (!S.saved) S.saved = {};
+let S = {edits: {}, done: {}, saved: {}};
 let THR = parseFloat(document.getElementById('thr').value) || 0.3;
 let SEL = null, SCOPE = 'one';   // 抽屉里的改动范围：one = 当前这张，g = 整组
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ENTRY = {}; DATA.refs.forEach(([cid, entry]) => ENTRY[String(cid)] = entry);
 const refSrc = cid => { const e = ENTRY[String(cid)]; return e ? DATA.tiles + e + '.png' : ''; };
 const absPath = p => DATA.root ? DATA.root + '/' + p : p;   // index.csv 里的相对路径 → 绝对路径
-const save = () => { if (LS) LS.setItem(KEY, JSON.stringify(S)); render(); renderPanel(); stats(); };
+const save = () => { render(); renderPanel(); stats(); };
+
+// 逐格改完立刻落库。失败必须报出来 —— 这和"本帧标完"走同一个接口。
+function push(paths) {
+  if (!SERVER) {
+    flash('当前是 file:// 打开，浏览器写不了文件：请用 annotate_server.py 起服务', true);
+    return Promise.resolve(false);
+  }
+  const corrections = paths.map(p => {
+    const e = S.edits[p];
+    return e ? (e.unknown ? {path: p, unknown: true} : {path: p, class_id: e.class_id}) : null;
+  }).filter(Boolean);
+  if (!corrections.length) return Promise.resolve(true);
+  return fetch('api/corrections', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({frames: [], corrections}),
+  }).then(r => r.json().then(j => ({ok: r.ok, j}))).then(({ok, j}) => {
+    if (!ok || !j.ok) { flash('落库失败：' + (j.error || '未知错误'), true); return false; }
+    flash(`已落库 ${j.n_set} 格`
+      + (j.n_unk ? ` / 未知 ${j.n_unk}` : '')
+      + (j.n_missing ? ` / 无效 ${j.n_missing}` : ''));
+    return true;
+  }).catch(e => { flash('落库失败：' + e, true); return false; });
+}
 
 // 复制文本：优先 Clipboard API；file:// 下老浏览器没有它，退回 textarea + execCommand。
 // 成功后在按钮上闪一下"已复制"，不然点了没有任何反馈。
@@ -449,16 +464,20 @@ function renderPanel() {
     <input id="q" placeholder="如 1428 / p010" style="width:100%">
     <div class="grid" id="all" style="margin-top:8px"></div>`;
   const one = cid => {
-    targets().forEach(x => S.edits[x.path] = {class_id: cid, unknown: false});
-    save(); closePanel();
+    const ps = targets().map(x => x.path);
+    ps.forEach(x => S.edits[x] = {class_id: cid, unknown: false});
+    save(); push(ps); closePanel();
   };
   p.querySelector('#sc1').onclick = () => { SCOPE = 'one'; renderPanel(); };
   p.querySelector('#scg').onclick = () => { SCOPE = 'g'; renderPanel(); };
   p.querySelector('#keep').onclick = () => {
-    targets().forEach(x => delete S.edits[x.path]); save(); closePanel();
+    // 改动逐格落库了，本地删掉不会退回：要恢复就重新指派
+    flash('改动已落库，撤销请重新指派', true); closePanel();
   };
   p.querySelector('#unk').onclick = () => {
-    targets().forEach(x => S.edits[x.path] = {unknown: true}); save(); closePanel();
+    const ps = targets().map(x => x.path);
+    ps.forEach(x => S.edits[x] = {unknown: true});
+    save(); push(ps); closePanel();
   };
   // 空位虽然是正式类别（class_id=0），但在图鉴里排在 2368 个物品之后 —— 那条懒加载网格
   // 翻到底都找不到，所以单独给一个按钮；和"标未知"的区别是它会被当成背景类的训练样本收下
@@ -516,8 +535,9 @@ document.getElementById('list').addEventListener('click', ev => {
   const cand = ev.target.closest('.cand');
   if (cand) {                                   // 第 3 列：整组指派
     const tr = cand.closest('tr'), g = BYKEY[tr.dataset.key];
-    g.members.forEach(m => S.edits[m.path] = {class_id: +cand.dataset.cid, unknown: false});
-    save(); return;
+    const ps = g.members.map(m => m.path);
+    ps.forEach(p => S.edits[p] = {class_id: +cand.dataset.cid, unknown: false});
+    save(); push(ps); return;
   }
   const mem = ev.target.closest('.mem');
   if (!mem) return;

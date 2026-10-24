@@ -37,6 +37,24 @@ import apply_corrections                                    # noqa: E402  落库
 import visualize_groups                                     # noqa: E402  重出页面
 
 REGEN_LOCK = threading.Lock()
+_regen_timer: threading.Timer | None = None
+_timer_lock = threading.Lock()
+
+
+def schedule_regen(html: str, dataset: str, catalog: str, samples: str, quiet: bool) -> None:
+    """防抖 1.2s 后重出页面。
+
+    页面现在每改一格就落库一次，直接每次都重出会把 CPU 打满；合并成一次即可，
+    重出的目的只是让"刷新后能看到最新台账"。
+    """
+    global _regen_timer
+    with _timer_lock:
+        if _regen_timer is not None:
+            _regen_timer.cancel()
+        _regen_timer = threading.Timer(1.2, regen,
+                                       args=(html, dataset, catalog, samples, quiet))
+        _regen_timer.daemon = True
+        _regen_timer.start()
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -85,9 +103,8 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"  写回: 指派 {res['n_set']} / 标未知 {res['n_unk']} / 无变化 {res['n_same']} / "
                   f"无效 {res['n_missing']}；标完 {len(res['done'])} 帧"
                   f"{'（' + '、'.join(res['done']) + '）' if res['done'] else ''}")
-        # 后台重出页面：写回本身很快，重出分组要几秒，别让浏览器等着
-        threading.Thread(target=regen, args=(self.html, self.dataset, self.catalog,
-                                            self.samples, self.quiet), daemon=True).start()
+        # 防抖重出：连续改格子只会触发一次重建，刷新页面时才是最新台账
+        schedule_regen(self.html, self.dataset, self.catalog, self.samples, self.quiet)
 
     def log_message(self, fmt: str, *args) -> None:
         if not self.quiet:
