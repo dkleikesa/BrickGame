@@ -46,11 +46,18 @@ def check_labels_ready(allow_unreviewed: bool) -> None:
     预标注的漏检会被写成"这里没有砖"，训完再拿去预标注下一批，错误只累积不自愈。
     """
     import json
-    meta_path = os.path.join(HERE, "build-dataset", "yolo", "meta.json")
+    ydir = os.path.join(HERE, "build-dataset", "yolo")
+    meta_path = os.path.join(ydir, "meta.json")
+    rev_path = os.path.join(ydir, "reviewed.json")
     if not os.path.exists(meta_path):
         raise SystemExit(f"找不到 {meta_path}，先跑 make_yolo_data.py")
     meta = json.load(open(meta_path, encoding="utf-8"))
-    bad = [m for m in meta if not m.get("reviewed")]
+    # 以 reviewed.json 为准：meta 里的 reviewed 是上次装配时的快照，
+    # 用户之后点的确认只有重跑装配才会进去，拿它判断会误拒。
+    reviewed = set()
+    if os.path.exists(rev_path):
+        reviewed = set(json.load(open(rev_path, encoding="utf-8")).get("frames", []))
+    bad = [m for m in meta if m["file"] not in reviewed]
     if not bad:
         return
     print(f"⚠ {len(bad)}/{len(meta)} 帧未人工确认："

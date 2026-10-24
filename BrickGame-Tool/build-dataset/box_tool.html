@@ -22,21 +22,31 @@
   <b>砖块框标注</b>
   <span class="hint">蓝色 = 砖块（点一下 = 删掉它）；拖空白 = 补漏检；棋盘偏了点卡片上的「重画棋盘」再拖一个框</span>
   <span id="prog" class="hint"></span>
+  <a id="allbtn" class="hint" style="cursor:pointer;text-decoration:underline"></a>
   <button class="primary" id="export">保存到训练集</button>
   <button id="resetall">清空修改</button>
 </header>
 <div id="grid"></div>
 <script>
-let DATA = [], REVIEWED = 0, TOTAL = 0;
+let DATA = [], REVIEWED = 0, TOTAL = 0, AUDIT = null, SHOWALL = false;
 async function boot(){
   try {
-    const r = await fetch('/data');
+    const r = await fetch('/data' + location.search);
     const j = await r.json();
     DATA = j.frames; REVIEWED = j.reviewed; TOTAL = j.total;
+    AUDIT = j.audit; SHOWALL = j.show_all;
   } catch (e) {
     document.getElementById('grid').innerHTML =
       '<p style="padding:20px;color:#c00">请通过本地服务打开：先运行 box_server.py，再访问 http://127.0.0.1:8771/</p>';
     return;
+  }
+  const ab = document.getElementById('allbtn');
+  ab.textContent = SHOWALL ? '只看待办' : '查看全部 ' + TOTAL + ' 帧';
+  ab.onclick = () => { location.href = SHOWALL ? '/' : '/?all=1'; };
+  if (AUDIT && AUDIT.stale) {
+    const el = document.getElementById('prog');
+    el.style.color = '#b42318';
+    el.textContent = '⚠ 复检未生效：' + AUDIT.why + ' ｜ 列表为空不代表标签正确';
   }
   build();
 }

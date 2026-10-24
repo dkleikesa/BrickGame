@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import base64
+import time
 import json
 import os
 
@@ -51,21 +52,31 @@ TEMPLATE = r"""<!doctype html>
   <b>砖块框标注</b>
   <span class="hint">蓝色 = 砖块（点一下 = 删掉它）；拖空白 = 补漏检；棋盘偏了点卡片上的「重画棋盘」再拖一个框</span>
   <span id="prog" class="hint"></span>
+  <a id="allbtn" class="hint" style="cursor:pointer;text-decoration:underline"></a>
   <button class="primary" id="export">保存到训练集</button>
   <button id="resetall">清空修改</button>
 </header>
 <div id="grid"></div>
 <script>
-let DATA = [], REVIEWED = 0, TOTAL = 0;
+let DATA = [], REVIEWED = 0, TOTAL = 0, AUDIT = null, SHOWALL = false;
 async function boot(){
   try {
-    const r = await fetch('/data');
+    const r = await fetch('/data' + location.search);
     const j = await r.json();
     DATA = j.frames; REVIEWED = j.reviewed; TOTAL = j.total;
+    AUDIT = j.audit; SHOWALL = j.show_all;
   } catch (e) {
     document.getElementById('grid').innerHTML =
       '<p style="padding:20px;color:#c00">请通过本地服务打开：先运行 box_server.py，再访问 http://127.0.0.1:8771/</p>';
     return;
+  }
+  const ab = document.getElementById('allbtn');
+  ab.textContent = SHOWALL ? '只看待办' : '查看全部 ' + TOTAL + ' 帧';
+  ab.onclick = () => { location.href = SHOWALL ? '/' : '/?all=1'; };
+  if (AUDIT && AUDIT.stale) {
+    const el = document.getElementById('prog');
+    el.style.color = '#b42318';
+    el.textContent = '⚠ 复检未生效：' + AUDIT.why + ' ｜ 列表为空不代表标签正确';
   }
   build();
 }
@@ -338,38 +349,57 @@ def coverage(boxes: list, m: dict) -> float | None:
     return (tiles / board) if board else None
 
 
-def audit_suspects() -> set:
-    """模型复检出的疑似漏标帧（audit_labels.py 生成）。
+def audit_frames() -> dict:
+    """audit_labels.py 写下的逐帧复检结果（按 base 索引）。"""
+    p = os.path.join(YOLO, "audit.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        return json.load(open(p, encoding="utf-8")).get("frames", {})
+    except (json.JSONDecodeError, OSError):
+        return {}
 
-    不用覆盖率判断：残局帧覆盖率天然低，模型也只检出两三块，那是对的。
-    真正的漏标是"模型能检出、标签里没有"。
+
+def is_suspect(v: dict, gap: int) -> bool:
+    """这一帧当时是否被判为疑似漏标。
+
+    判据以结构性缺失为主（整行/整列），散点用格子差兜底 —— 只看框数会被
+    模型对同一格的重复检出带偏。
+    """
+    if v.get("reason"):
+        return True
+    extra = v.get("extra_cells")
+    if extra is not None:
+        return extra >= gap
+    if v["model"] - v["label"] < gap:      # 无台账：退回数量差
+        return False
+    cells = v.get("cells") or 0
+    return not (cells and v["label"] >= cells * 0.95)
+
+
+def audit_state() -> dict:
+    """复检结果是否还可用。
+
+    文件缺失/损坏时退回空集合，页面会变成"全部确认完毕"—— 那是最容易骗人的状态，
+    所以这里把状态显式带出去，前端必须提示。
     """
     p = os.path.join(YOLO, "audit.json")
     if not os.path.exists(p):
-        return set()
+        return {"stale": True, "why": "还没跑过 audit_labels.py"}
     try:
         a = json.load(open(p, encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return set()
-    gap = a.get("gap", 10)
-    out = set()
-    for b, v in a.get("frames", {}).items():
-        extra = v.get("extra_cells")
-        if extra is not None:          # 能按格子比就以格子为准（框数会被重复检测带偏）
-            if extra >= gap:
-                out.add(b)
-            continue
-        # 没有 rows/cols 的帧只能退回数量差，且标签满盘时不算漏标
-        if v["model"] - v["label"] < gap:
-            continue
-        cells = v.get("cells") or 0
-        if cells and v["label"] >= cells * 0.95:
-            continue
-        out.add(b)
-    return out
+        return {"stale": True, "why": "audit.json 损坏"}
+    best = os.path.join(os.path.dirname(HERE), "runs", "brick", "weights", "best.pt")
+    if os.path.exists(best) and a.get("weights") != os.path.basename(best):
+        return {"stale": True, "why": "模型已更换，复检结果过期"}
+    age = time.time() - os.path.getmtime(p)
+    if age > 7 * 86400:
+        return {"stale": True, "why": f"复检已 {int(age // 86400)} 天未更新"}
+    return {"stale": False, "why": "", "at": a.get("at")}
 
 
-def build_data() -> list:
+def build_data(show_all: bool = False) -> list:
     """待标帧 + 复查帧打包成页面要的 JSON（服务每次请求现算，页面本身不变）。
 
     已确认但被 `audit_labels.py` 判为漏标的帧也会拉回来（recheck=True），排在前面 ——
@@ -377,7 +407,9 @@ def build_data() -> list:
     """
     meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
     done = reviewed_frames()
-    suspects = audit_suspects()
+    recs = audit_frames()
+    gap = 10
+    suspects = {b for b, v in recs.items() if is_suspect(v, gap)}
     # 先按 label 算覆盖率，决定哪些帧要上页面（图片编码很贵，只处理入选的）
     need = []
     for m in meta:
@@ -392,9 +424,15 @@ def build_data() -> list:
                 boxes.append([int(q[0])] + [round(float(v), 6) for v in q[1:5]])
         cov = coverage(boxes, m)
         is_done = base in done
-        # 已确认的帧只在"模型能检出更多砖"时拉回复查；其余不再打扰
-        if is_done and base not in suspects:
+        # 已确认的帧只在"模型能检出更多砖"时拉回复查；show_all 时全部列出供回看
+        if is_done and base not in suspects and not show_all:
             continue
+        if is_done and base in suspects:
+            # 补过框就当场撤出复查列表，不用等重跑 audit（后者要几分钟）
+            rec = recs.get(base) or {}
+            n_tile_now = sum(1 for b in boxes if b[0] == 1)
+            if n_tile_now > rec.get("label", 0) + 2:
+                continue
         need.append((m, boxes, cov, is_done))
 
     data = []

@@ -17,7 +17,7 @@ description: BrickGame 棋盘定位（board + tile 检测器）的补数据闭�
 | 1 | 收图 | adb pull + cp | `samples/` 原图 | 每皮肤×布局 ≥20 帧，≥5 残局 |
 | 2 | 预标注 | `prelabel_yolo.py` | `yolo/prelabel/*.txt` | 每帧 1 个 board |
 | 3 | 装配① | `make_yolo_data.py` | `yolo/images`+`labels`+`meta.json` | 帧数对得上，新帧出现在标注页 |
-| 4 | 标注 | `box_server.py` | `labels/*.txt`+`reviewed.json` | 页面显示"已确认，服务端已记录" |
+| 4 | 标注 | `audit_labels.py` → `box_server.py` | `labels/*.txt`+`reviewed.json` | 复检疑似漏标 0 帧 + 页面显示"已确认，服务端已记录" |
 | 5 | 装配② | `make_yolo_data.py` | 刷新的 `meta.json` | **未确认数 = 0** |
 | 6 | 训练 | `train_yolo.py` | `runs/brick/weights/best.pt` | 正常收敛，不漏皮肤 |
 | 7 | 闸门 | `eval_gate.py --update` | `runs/brick/metrics.json` | board≥95%、tile 召回≥95%、精确率不掉 3 点 |

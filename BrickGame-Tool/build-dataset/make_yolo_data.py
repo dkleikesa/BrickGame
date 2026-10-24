@@ -150,20 +150,13 @@ def audit(meta: list[dict]) -> None:
         elif board > 0:
             no_layout += 1
             by_area.append((m, tiles / board))
-    print("\n— 标注覆盖率 —")
-    for name, rows in (("按格数", by_cell), ("按面积(无台账帧)", by_area)):
-        if not rows:
-            continue
-        vals = [c for _, c in rows]
-        low = [(m, c) for m, c in rows if c < 0.5]
-        print(f"  {name}: {len(rows)} 帧，中位 {st.median(vals):.0%}，"
-              f"<50% 的 {len(low)} 帧（已确认 {sum(1 for m, _ in low if m['reviewed'])}）")
-        for m, c in low[:3]:
-            print(f"    {c:.0%} {m['src']} ({m['tiles']} 框"
-                  f"{'/'+str(m['rows']*m['cols']) if m['rows'] else ''}"
-                  f"{'，已确认' if m['reviewed'] else '，未确认'})")
-    if no_layout:
-        print(f"  其中 {no_layout} 帧没有 rows/cols（frames.csv 没登记），只能按面积估")
+    # 覆盖率只作参考：残局帧天然低（2 块砖 = 1.4%），拿它判漏标会大面积误报。
+    # 真要查漏标跑 audit_labels.py（按格子集合比）。
+    if by_cell:
+        vals = [c for _, c in by_cell]
+        low = sum(1 for _, c in by_cell if c < 0.5)
+        print(f"\n标注覆盖：{len(vals)} 帧有台账，中位 {st.median(vals):.0%}，<50% 的 {low} 帧"
+              f"（残局天然低，漏标请用 audit_labels.py 判）")
     if weird:
         print(f"  ⚠ {len(weird)} 个 tile 框边长 >50%（多半是把半块棋盘框成了砖）：{weird[:3]}")
 

@@ -48,7 +48,7 @@ def main() -> None:
             continue
         rows_raw = [line.split() for line in open(lab, encoding="utf-8") if line.split()]
         lab_t = [list(map(float, q[1:5])) for q in rows_raw if q[0] == "1"]
-        lab_b = [[list(map(float, q[1:5])) for q in rows_raw if q[0] == "0"]]
+        lab_b = [list(map(float, q[1:5])) for q in rows_raw if q[0] == "0"]
         res = model.predict(img, imgsz=640, conf=args.conf, iou=0.45, verbose=False)[0]
         H, W = res.orig_shape
         mod_t = [[(x1 + x2) / 2 / W, (y1 + y2) / 2 / H, (x2 - x1) / W, (y2 - y1) / H]
@@ -57,10 +57,10 @@ def main() -> None:
 
         # 一格最多一块砖：先把框映射成格子集合再比，否则模型对同一格重复输出
         # 会被当成"多检出"，把正常标签误判成漏标（实测 12 帧全是这么来的）。
-        extra = None
+        extra, reason = None, None
         if m["rows"] and m["cols"] and lab_b:
             def cells(boxes):
-                bx, by, bw, bh = lab_b[0][0]
+                bx, by, bw, bh = lab_b[0]
                 x0, y0 = bx - bw / 2, by - bh / 2
                 got = set()
                 for cx, cy, _, _ in boxes:
@@ -68,17 +68,31 @@ def main() -> None:
                     if 0 <= r < m["rows"] and 0 <= c < m["cols"]:
                         got.add((r, c))
                 return got
-            extra = len(cells(mod_t) - cells(lab_t))
+            lab_cells, mod_cells = cells(lab_t), cells(mod_t)
+            extra = len(mod_cells - lab_cells)
+            # 结构性缺失比总量更可信：整行/整列标签全空，而模型在该行/列检出 ≥80%
+            miss_rows = [r for r in range(m["rows"])
+                         if not any(rr == r for rr, _ in lab_cells)
+                         and sum(1 for rr, _ in mod_cells if rr == r) >= 0.8 * m["cols"]]
+            miss_cols = [c for c in range(m["cols"])
+                         if not any(cc == c for _, cc in lab_cells)
+                         and sum(1 for _, cc in mod_cells if cc == c) >= 0.8 * m["rows"]]
+            if miss_rows:
+                reason = f"整行缺失 r{miss_rows[:4]}"
+            elif miss_cols:
+                reason = f"整列缺失 c{miss_cols[:4]}"
+            elif extra >= max(args.gap, (m["rows"] + 1) // 2):
+                reason = f"散点多占 {extra} 格"
 
-        cells = (m["rows"] or 0) * (m["cols"] or 0)
-        out[m["file"]] = {"label": len(lab_t), "model": len(mod_t), "cells": cells,
-                          "extra_cells": extra,
+        cells_n = (m["rows"] or 0) * (m["cols"] or 0)
+        out[m["file"]] = {"label": len(lab_t), "model": len(mod_t), "cells": cells_n,
+                          "extra_cells": extra, "reason": reason,
                           "rows": m["rows"], "cols": m["cols"], "reviewed": m["reviewed"]}
-        if extra is not None:
-            if extra >= args.gap:
-                suspects.append((m["src"], len(lab_t), len(mod_t), extra, cells))
-        elif len(mod_t) - len(lab_t) >= args.gap:
-            suspects.append((m["src"], len(lab_t), len(mod_t), len(mod_t) - len(lab_t), cells))
+        if reason:
+            suspects.append((m["src"], len(lab_t), len(mod_t), reason, cells_n))
+        elif extra is None and len(mod_t) - len(lab_t) >= args.gap:
+            suspects.append((m["src"], len(lab_t), len(mod_t),
+                             f"无台账，多检出 {len(mod_t)-len(lab_t)}", cells_n))
 
     json.dump({"weights": os.path.basename(args.weights),
                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -88,8 +102,8 @@ def main() -> None:
 
     print(f"复检 {len(out)} 帧，疑似漏标 {len(suspects)} 帧"
           f"（按格子比，模型多出 ≥{args.gap} 格才报）")
-    for src, a, b, d, cells in sorted(suspects, key=lambda x: -x[3])[:12]:
-        print(f"  标签 {a:3d} 框 / {cells or '?'} 格，模型多占 {d:3d} 格  {src}")
+    for src, a, b, d, cells in suspects[:12]:
+        print(f"  标签 {a:3d} 框 / {cells or '?'} 格  {d}  {src}")
     print(f"结果 → {os.path.join(YOLO_DIR, 'audit.json')}")
 
 

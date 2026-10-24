@@ -53,7 +53,8 @@ def labels_fp() -> str:
     """标注内容指纹：labels 改过之后，旧基线的精确率就不可比了。"""
     import hashlib
     h = hashlib.md5()
-    for p in sorted(glob.glob(os.path.join(YOLO_DIR, "labels", "*", "*.txt"))):
+    # 只看 val：train 的框怎么改都不影响这套指标，拿它算指纹会让基线白白作废
+    for p in sorted(glob.glob(os.path.join(YOLO_DIR, "labels", "val", "*.txt"))):
         h.update(os.path.basename(p).encode())
         h.update(open(p, "rb").read())
     return h.hexdigest()[:12]
