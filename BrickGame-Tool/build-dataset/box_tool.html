@@ -25,11 +25,12 @@
 </header>
 <div id="grid"></div>
 <script>
-let DATA = [];
+let DATA = [], REVIEWED = 0, TOTAL = 0;
 async function boot(){
   try {
     const r = await fetch('/data');
-    DATA = await r.json();
+    const j = await r.json();
+    DATA = j.frames; REVIEWED = j.reviewed; TOTAL = j.total;
   } catch (e) {
     document.getElementById('grid').innerHTML =
       '<p style="padding:20px;color:#c00">请通过本地服务打开：先运行 box_server.py，再访问 http://127.0.0.1:8771/</p>';
@@ -53,7 +54,8 @@ async function flushPending(){
                                     body: JSON.stringify(out)});
     const j = await r.json();
     if (!j.ok) throw new Error();
-    el.textContent = '已补交 ' + n + ' 帧，刷新中…';
+    REVIEWED = j.reviewed || REVIEWED;
+    el.textContent = '已补交 ' + n + ' 帧（服务端确认数 ' + REVIEWED + '），刷新中…';
     setTimeout(()=>location.reload(), 1200);
   } catch (e) {
     el.textContent = '本地有 ' + n + ' 帧确认记录，补交失败：需通过 http://127.0.0.1:8771 打开';
@@ -66,7 +68,8 @@ const armed = new Set();   // 哪些卡片处于"重画棋盘"模式（不落盘
 function save(){ localStorage.setItem('brick-box-tool', JSON.stringify(state)); progress(); }
 function progress(){
   const n = DATA.filter(d => { const s=state[d.file]; return s && (s.deleted.length || s.added.length || s.board || s.ok); }).length;
-  document.getElementById('prog').textContent = '已修改 ' + n + ' / ' + DATA.length;
+  document.getElementById('prog').textContent =
+    '已确认 ' + REVIEWED + '/' + TOTAL + '（本次改动 ' + n + '/' + DATA.length + '）';
 }
 function draw(d, cv, draft){
   const ctx = cv.getContext('2d');
@@ -171,10 +174,15 @@ function build(){
                                         body: JSON.stringify({[d.file]: s})});
         const j = await r.json();
         if (!j.ok) throw new Error(j.error || 'save failed');
-        msg(d);
+        // 以服务端回写的 reviewed 为准，别只信本地布尔值
+        REVIEWED = j.reviewed;
+        const landed = (j.confirmed || []).includes(d.file);
+        if (landed !== next) throw new Error('服务端未记录');
+        progress(); msg(d);
+        card.querySelector('.msg').textContent = next ? '已确认，服务端已记录' : '已取消确认';
       } catch (e) {
         s.ok = !next; paintOk(); save(); msg(d);
-        card.querySelector('.msg').textContent = '保存失败：需要通过 http://127.0.0.1:8771 打开';
+        card.querySelector('.msg').textContent = '保存失败，未写入：' + (e.message || '需要通过 127.0.0.1:8771 打开');
       }
     };
     bbtn.onclick = ()=>{
@@ -243,7 +251,10 @@ function build(){
       const r = await fetch('/save', {method:'POST', headers:{'Content-Type':'application/json'},
                                       body: JSON.stringify(out)});
       const j = await r.json();
+      REVIEWED = j.reviewed || REVIEWED;
       btn.textContent = j.ok ? ('已保存（删 '+j.deleted+' 补 '+j.added+'）') : '保存失败';
+      if (j.missing && j.missing.length) btn.textContent += '｜⚠ ' + j.missing.length + ' 帧没找到框文件';
+      progress();
     } catch (e) {
       btn.textContent = '保存失败：需要从 localhost 打开';
     }

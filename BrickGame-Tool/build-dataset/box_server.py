@@ -28,6 +28,9 @@ YOLO = os.path.join(HERE, "yolo")
 HTML = os.path.join(HERE, "box_tool.html")
 PORT = 8771
 REVIEWED = os.path.join(YOLO, "reviewed.json")
+# 页面点确认会连发好几个请求，ThreadingHTTPServer 是多线程的：
+# reviewed.json 和 labels 都是"读-改-写"，不加锁会互相覆盖，表现为"标了但没记住"。
+LOCK = threading.Lock()
 
 
 def label_path(base: str) -> str:
@@ -39,8 +42,8 @@ def label_path(base: str) -> str:
     return os.path.join(YOLO, "labels", "train", base + ".txt")
 
 
-def mark_reviewed(on, off) -> None:
-    """记下"人看过了"，取消勾选时移除。
+def mark_reviewed(on, off) -> set[str]:
+    """记下"人看过了"，取消勾选时移除。返回写入后的全集。
 
     以页面的 ok 为准：改了框但没点「确认无误」不算确认，
     否则未过目的框会跟着 reviewed 一起进训练集。
@@ -53,8 +56,11 @@ def mark_reviewed(on, off) -> None:
             frames = set()
     frames.update(on)
     frames.difference_update(off)
-    with open(REVIEWED, "w", encoding="utf-8") as fh:
+    tmp = REVIEWED + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"frames": sorted(frames)}, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, REVIEWED)      # 原子替换，中途被打断也不会留下半个 json
+    return frames
 
 
 def restore(bases) -> None:
@@ -74,15 +80,17 @@ def snapshot(bases) -> None:
                 g.write(f.read())
 
 
-def apply(fixes: dict) -> tuple[int, int]:
-    """按 fixes 重写 labels，返回（删除数, 新增数）。"""
+def apply(fixes: dict) -> tuple[int, int, list[str]]:
+    """按 fixes 重写 labels，返回（删除数, 新增数, 找不到 label 的帧）。"""
     deleted = added = 0
+    missing: list[str] = []
     for base, fix in fixes.items():
         # 只是"确认无误"（没改框）的帧不重写文件，也不留 .orig
         if not (fix.get("deleted") or fix.get("added") or fix.get("board")):
             continue
         p = label_path(base)
         if not os.path.exists(p):
+            missing.append(base)     # 有改动但没框文件：不能静默吞掉
             continue
         rows = [l for l in open(p, encoding="utf-8") if l.strip()]
         drop = set(fix.get("deleted", []))
@@ -105,7 +113,7 @@ def apply(fixes: dict) -> tuple[int, int]:
             f.writelines(keep + new)
         deleted += len(rows) - len(keep) - replaced_board
         added += len(new)
-    return deleted, added
+    return deleted, added, missing
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -125,7 +133,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/data":
             # 每次请求现算：补了新数据只要刷新页面，不用重新生成 HTML
             import make_box_tool
-            body = json.dumps(make_box_tool.build_data(), ensure_ascii=False).encode()
+            frames = make_box_tool.build_data()
+            meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
+            done = len({m["file"] for m in meta}) - len(frames)
+            body = json.dumps({"frames": frames, "reviewed": done, "total": len(meta)},
+                              ensure_ascii=False).encode()
             self._send(200, body, "application/json")
         else:
             self._send(404, b"not found", "text/plain")
@@ -143,13 +155,21 @@ class Handler(BaseHTTPRequestHandler):
         bases = list(fixes.keys())
         changed = [b for b in bases
                    if fixes[b].get("deleted") or fixes[b].get("added") or fixes[b].get("board")]
-        snapshot(changed)   # 首次保存先留底（只对真的改了框的帧）
-        restore(changed)    # 每次从原始版本重算，避免重复叠加
-        deleted, added = apply(fixes)
-        mark_reviewed([b for b in bases if fixes[b].get("ok")],
-                      [b for b in bases if not fixes[b].get("ok")])
-        body = json.dumps({"ok": True, "frames": len(bases), "deleted": deleted, "added": added},
-                          ensure_ascii=False).encode()
+        with LOCK:                              # 写盘全程串行，避免并发覆盖
+            snapshot(changed)                   # 首次保存先留底（只对真改了框的帧）
+            restore(changed)                    # 每次从原始版本重算，避免重复叠加
+            deleted, added, missing = apply(fixes)
+            frames = mark_reviewed([b for b in bases if fixes[b].get("ok")],
+                                   [b for b in bases if not fixes[b].get("ok")])
+        body = json.dumps({
+            "ok": True,
+            "frames": len(bases),
+            "deleted": deleted,
+            "added": added,
+            "missing": missing,                # 有改动但找不到 label 文件，前端要报出来
+            "reviewed": len(frames),
+            "confirmed": [b for b in bases if b in frames],   # 服务端实际记下的帧
+        }, ensure_ascii=False).encode()
         self._send(200, body, "application/json")
 
 
