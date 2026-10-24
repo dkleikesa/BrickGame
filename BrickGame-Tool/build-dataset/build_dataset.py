@@ -55,6 +55,7 @@ import hashlib
 import os
 import shutil
 import sys
+import time
 
 import numpy as np
 import cv2
@@ -181,6 +182,74 @@ def write_ledger(out: str, rows: list[dict]) -> None:
         w.writerows(rows)
 
 
+def drop_high_conf(dataset: str, frames: list[str], thr: float, quiet: bool = False) -> int:
+    """新增帧里"已经认得足够好"的格子不入库。
+
+    现有数据已经覆盖了高置信样本，重复收进来只会拖慢训练、放大类别不平衡。
+    只动两样东西：本次新增帧、cls_src=auto 的格子 —— 人工改过的和 App 上报的一律不碰。
+    """
+    if thr <= 0 or not frames:
+        return 0
+    idx_path = os.path.join(dataset, "index.csv")
+    rows = [r for r in csv.DictReader(open(idx_path, encoding="utf-8")) if r and r.get("path")]
+    want = set(frames)
+    keep, drop = [], []
+    for r in rows:
+        if r["frame"] in want and r.get("cls_src") == "auto" and (r.get("cls_dist") or "").strip():
+            try:
+                if float(r["cls_dist"]) < thr:
+                    drop.append(r)
+                    continue
+            except ValueError:
+                pass
+        keep.append(r)
+    if not drop:
+        return 0
+
+    trash = os.path.join(dataset, "deleted")
+    ts = time.strftime("%Y-%m-%d %H:%M")
+    with open(os.path.join(dataset, "deleted.csv"), "a", newline="") as f:
+        w = csv.writer(f)
+        for r in drop:
+            w.writerow([r["path"], r["frame"], r["class_id"], r["cls_dist"], r["cls_src"],
+                        ts, "highconf-skip"])
+            src = os.path.join(dataset, r["path"])
+            if os.path.exists(src):
+                dst = os.path.join(trash, r["path"])
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.move(src, dst)
+    with open(idx_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(keep[0].keys()))
+        w.writeheader()
+        w.writerows(keep)
+
+    # 台账跟着改：整帧被过滤光的，直接移出台账（否则又会变成 cells=0 的坏行）
+    by = {}
+    for r in keep:
+        by[r["frame"]] = by.get(r["frame"], 0) + 1
+    led_path = os.path.join(dataset, "frames.csv")
+    led = [r for r in csv.DictReader(open(led_path, encoding="utf-8")) if r and r.get("frame")]
+    out = []
+    for r in led:
+        if r["frame"] in want:
+            n = by.get(r["frame"], 0)
+            if n == 0:
+                continue          # 这一帧全被过滤掉 → 不留台账
+            empty = sum(1 for x in keep if x["frame"] == r["frame"] and x.get("cls_src") == "empty")
+            r["cells"], r["bricks"], r["empty"] = str(n), str(n - empty), str(empty)
+            if r.get("status") == "done" and n < int(r["rows"] or 0) * int(r["cols"] or 1) * 0.5:
+                r["status"] = "pending"      # 过滤后剩太少，重新过一遍眼
+        out.append(r)
+    with open(led_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(led[0].keys()))
+        w.writeheader()
+        w.writerows(out)
+
+    if not quiet:
+        print(f"  高置信过滤: 丢弃 {len(drop)} 格（dist < {thr}），涉及 {len({r['frame'] for r in drop})} 帧")
+    return len(drop)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="游戏截图 → 训练数据集（含底色）+ 底板库")
     ap.add_argument("--samples", default=os.path.join(_HERE, "samples"), help="截图目录")
@@ -203,6 +272,9 @@ def main() -> None:
                              "mobilenet_v3_large", "dinov2_vits14"],
                     help="预训练骨干（识别与分组的特征来源）。改 auto_classify.DEFAULT_BACKBONE 即整体切换")
     ap.add_argument("--cache", default="", help="中间产物目录（默认 数据集同级 cache/）")
+    ap.add_argument("--highconf-thr", type=float, default=0.30,
+                    help="新增帧里 top-1 距离低于它的格子视为「已经认得足够好」，不再入库（0=不过滤）")
+    ap.add_argument("--keep-highconf", action="store_true", help="不做高置信过滤（保留全部新增格）")
     ap.add_argument("--prune-empty", action="store_true",
                     help="把「台账里有、但一格都没切出来」的帧从台账剔除（下次会重切）")
     ap.add_argument("--skip-embed", action="store_true",
@@ -418,6 +490,10 @@ def main() -> None:
         print(f"② 识别: 复用已有特征 {os.path.basename(emb_path)}（本次没有新帧）")
     auto_classify.classify(args.out, args.catalog, top=args.auto_top, emb=emb_path, cache=cache,
                            frames=None if args.rebuild else new_frames)
+
+    # ---------- 2.5) 高置信样本不入库：现有数据够了，只补充"模型拿不准"的格子 ----------
+    if not args.keep_highconf:
+        drop_high_conf(args.out, [] if args.rebuild else new_frames, args.highconf_thr)
 
     # ---------- 3) 标注界面 ----------
     if args.no_html:

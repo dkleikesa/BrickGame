@@ -27,6 +27,12 @@ cp <留档目录>/*.png samples/ && ~/.venvs/brick-train/bin/python build_datase
 ~/.venvs/brick-train/bin/python visualize_groups.py                                 # 重出 annotate.html
 ```
 
+**新增帧只保留"模型拿不准"的格子**：`build_dataset.py` 识别完会把 top-1 距离
+< `--highconf-thr`（默认 0.30）的格子丢掉（记进 `deleted.csv`，reason=highconf-skip）。
+理由是现有数据已经覆盖高置信样本，重复收只会拖慢训练、加重类别不平衡。
+想全收加 `--keep-highconf`；阈值调 `--highconf-thr 0` 等于关闭。只作用于本次新增帧，
+人工改过的（manual）和 App 上报的（app）一律不动。
+
 `build_dataset.py` 里的自动识别**默认已经换成上一版 V2**（`assets/brick_embedder_v2.tflite`），
 与端上同一套预处理、同一个度量空间；没有 tflite 才退回通用骨干（v3-large 特征）或像素特征。
 显式指定用 `auto_classify.py --feature v2|emb|pixel`。
