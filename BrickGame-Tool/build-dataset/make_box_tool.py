@@ -181,6 +181,12 @@ function hitAdded(d, px, py, W, H){
 }
 function build(){
   const host = document.getElementById('grid');
+  if (!DATA.length){
+    host.innerHTML = '<p style="padding:28px;font-size:16px;color:#0a7">'
+      + '没有待标帧：全部已人工确认，模型复检也没发现漏标。<br>'
+      + '<span style="color:#666;font-size:14px">接着跑 make_yolo_data.py → train_yolo.py</span></p>';
+    return;
+  }
   DATA.forEach(d=>{
     const card = document.createElement('div');
     card.className = 'card' + (d.recheck ? ' recheck' : ''); card.id='c-'+d.file;
@@ -348,11 +354,17 @@ def audit_suspects() -> set:
     gap = a.get("gap", 10)
     out = set()
     for b, v in a.get("frames", {}).items():
+        extra = v.get("extra_cells")
+        if extra is not None:          # 能按格子比就以格子为准（框数会被重复检测带偏）
+            if extra >= gap:
+                out.add(b)
+            continue
+        # 没有 rows/cols 的帧只能退回数量差，且标签满盘时不算漏标
         if v["model"] - v["label"] < gap:
             continue
         cells = v.get("cells") or 0
         if cells and v["label"] >= cells * 0.95:
-            continue          # 标签已满盘，模型多出来的是误检，不是漏标
+            continue
         out.add(b)
     return out
 

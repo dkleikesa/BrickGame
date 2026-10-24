@@ -46,18 +46,39 @@ def main() -> None:
         lab = os.path.join(YOLO_DIR, "labels", m["split"], m["file"] + ".txt")
         if not os.path.exists(lab):
             continue
-        n_lab = sum(1 for line in open(lab, encoding="utf-8")
-                    if line.split() and line.split()[0] == "1")
+        rows_raw = [line.split() for line in open(lab, encoding="utf-8") if line.split()]
+        lab_t = [list(map(float, q[1:5])) for q in rows_raw if q[0] == "1"]
+        lab_b = [[list(map(float, q[1:5])) for q in rows_raw if q[0] == "0"]]
         res = model.predict(img, imgsz=640, conf=args.conf, verbose=False)[0]
-        n_mod = sum(1 for c in res.boxes.cls.cpu().numpy() if int(c) == 1)
+        H, W = res.orig_shape
+        mod_t = [[(x1 + x2) / 2 / W, (y1 + y2) / 2 / H, (x2 - x1) / W, (y2 - y1) / H]
+                 for (x1, y1, x2, y2), c in zip(res.boxes.xyxy.cpu().numpy(),
+                                                res.boxes.cls.cpu().numpy()) if int(c) == 1]
+
+        # 一格最多一块砖：先把框映射成格子集合再比，否则模型对同一格重复输出
+        # 会被当成"多检出"，把正常标签误判成漏标（实测 12 帧全是这么来的）。
+        extra = None
+        if m["rows"] and m["cols"] and lab_b:
+            def cells(boxes):
+                bx, by, bw, bh = lab_b[0][0]
+                x0, y0 = bx - bw / 2, by - bh / 2
+                got = set()
+                for cx, cy, _, _ in boxes:
+                    c = int((cx - x0) / (bw / m["cols"])); r = int((cy - y0) / (bh / m["rows"]))
+                    if 0 <= r < m["rows"] and 0 <= c < m["cols"]:
+                        got.add((r, c))
+                return got
+            extra = len(cells(mod_t) - cells(lab_t))
+
         cells = (m["rows"] or 0) * (m["cols"] or 0)
-        out[m["file"]] = {"label": n_lab, "model": n_mod, "cells": cells,
+        out[m["file"]] = {"label": len(lab_t), "model": len(mod_t), "cells": cells,
+                          "extra_cells": extra,
                           "rows": m["rows"], "cols": m["cols"], "reviewed": m["reviewed"]}
-        # 标签已经接近满盘时，模型多出来的只能是误检（一格最多一块砖），不算漏标
-        if cells and n_lab >= cells * 0.95:
-            continue
-        if n_mod - n_lab >= args.gap:
-            suspects.append((m["src"], n_lab, n_mod, n_mod - n_lab, cells))
+        if extra is not None:
+            if extra >= args.gap:
+                suspects.append((m["src"], len(lab_t), len(mod_t), extra, cells))
+        elif len(mod_t) - len(lab_t) >= args.gap:
+            suspects.append((m["src"], len(lab_t), len(mod_t), len(mod_t) - len(lab_t), cells))
 
     json.dump({"weights": os.path.basename(args.weights),
                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -66,9 +87,9 @@ def main() -> None:
               ensure_ascii=False, indent=1)
 
     print(f"复检 {len(out)} 帧，疑似漏标 {len(suspects)} 帧"
-          f"（模型比标签多 ≥{args.gap} 块，且标签未满盘）")
+          f"（按格子比，模型多出 ≥{args.gap} 格才报）")
     for src, a, b, d, cells in sorted(suspects, key=lambda x: -x[3])[:12]:
-        print(f"  标签 {a:3d}/{cells or '?'} 模型 {b:3d} 差 {d:3d}  {src}")
+        print(f"  标签 {a:3d} 框 / {cells or '?'} 格，模型多占 {d:3d} 格  {src}")
     print(f"结果 → {os.path.join(YOLO_DIR, 'audit.json')}")
 
 
