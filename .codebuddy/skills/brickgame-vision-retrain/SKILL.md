@@ -27,11 +27,13 @@ cp <留档目录>/*.png samples/ && ~/.venvs/brick-train/bin/python build_datase
 ~/.venvs/brick-train/bin/python visualize_groups.py                                 # 重出 annotate.html
 ```
 
-**新增帧只保留"模型拿不准"的格子**：`build_dataset.py` 识别完会把 top-1 距离
-< `--highconf-thr`（默认 0.30）的格子丢掉（记进 `deleted.csv`，reason=highconf-skip）。
-理由是现有数据已经覆盖高置信样本，重复收只会拖慢训练、加重类别不平衡。
-想全收加 `--keep-highconf`；阈值调 `--highconf-thr 0` 等于关闭。只作用于本次新增帧，
-人工改过的（manual）和 App 上报的（app）一律不动。
+**新增帧只保留"模型拿不准"的格子**：`build_dataset.py` 识别完，按**本批自身的距离分布**
+留最难的 `--keep-quantile`（默认 0.3）比例，其余丢掉（记 `deleted.csv`，reason=highconf-skip）。
+不要用固定阈值：auto 组的 cls_dist 中位只有 0.118，拿 app 换算的 0.30 当线会丢掉 98%（实测 1778/1805）。
+
+- 整帧被过滤光 → 写进 `dataset/rejected.txt`，否则台账行没了、md5 也不在台账，下次又当新帧重切
+- 只作用于本次新增帧；manual / app / empty 一律不动
+- `--keep-highconf` 全收；`--highconf-thr` 只是额外的绝对下限（0=只用分位）
 
 `build_dataset.py` 里的自动识别**默认已经换成上一版 V2**（`assets/brick_embedder_v2.tflite`），
 与端上同一套预处理、同一个度量空间；没有 tflite 才退回通用骨干（v3-large 特征）或像素特征。
@@ -57,6 +59,12 @@ cd BrickGame-Tool && ~/.venvs/brick-train/bin/python train_classifier.py \
 ```
 
 `--img 160` 必须显式给（默认 224，和端上输入尺寸不一致就白训）。
+
+评测口径默认是**整帧留出**（`--val-frames 12` + `--val-cls-ratio 0`）。旧的默认是
+每类随机抽 15%，同一张截图的相邻格会同时出现在 train/val，top1 永远 1.000，测不出任何问题。
+要复现旧口径得显式传 `--val-cls-ratio 0.15 --val-frames 0`，但那个数字不可信。
+
+开训前会自动把上一版 `best.pt`/`last.pt` 备份成 `best_<时间>.pt`（闸门要能重跑上一版）。
 
 ## ⑤ 放行闸门（不许跳过）
 

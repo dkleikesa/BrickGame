@@ -182,27 +182,40 @@ def write_ledger(out: str, rows: list[dict]) -> None:
         w.writerows(rows)
 
 
-def drop_high_conf(dataset: str, frames: list[str], thr: float, quiet: bool = False) -> int:
-    """新增帧里"已经认得足够好"的格子不入库。
+def drop_high_conf(dataset: str, frames: list[str], keep_quantile: float,
+                   abs_thr: float = 0.0, quiet: bool = False) -> int:
+    """新增帧里只留"模型最不确定"的那部分格子。
 
-    现有数据已经覆盖了高置信样本，重复收进来只会拖慢训练、放大类别不平衡。
-    只动两样东西：本次新增帧、cls_src=auto 的格子 —— 人工改过的和 App 上报的一律不碰。
+    不用固定阈值：auto 组的 cls_dist 中位才 0.118，拿 app 换算出来的 0.30 当线
+    会丢掉 98% 的格子（实测 1805 格里 1778 个 < 0.30）。改按本批自身分布取分位：
+    keep_quantile=0.3 → 保留距离最大的 30%（即最难的样本）。
+
+    整帧被过滤光时写进 rejected.txt，否则台账行没了、md5 也不在台账里，
+    下次又会被当新帧重切，无限循环还一直往 deleted.csv 追加。
     """
-    if thr <= 0 or not frames:
+    if not frames:
         return 0
     idx_path = os.path.join(dataset, "index.csv")
     rows = [r for r in csv.DictReader(open(idx_path, encoding="utf-8")) if r and r.get("path")]
     want = set(frames)
-    keep, drop = [], []
+    cand = []
     for r in rows:
         if r["frame"] in want and r.get("cls_src") == "auto" and (r.get("cls_dist") or "").strip():
             try:
-                if float(r["cls_dist"]) < thr:
-                    drop.append(r)
-                    continue
+                cand.append((r, float(r["cls_dist"])))
             except ValueError:
                 pass
-        keep.append(r)
+    if not cand:
+        return 0
+
+    vals = sorted(d for _, d in cand)
+    k = int(len(vals) * (1.0 - keep_quantile))
+    k = min(max(k, 0), len(vals) - 1)
+    cut = vals[k]
+    if abs_thr > 0:
+        cut = max(cut, abs_thr)
+
+    drop = [r for r, d in cand if d < cut]
     if not drop:
         return 0
 
@@ -218,35 +231,45 @@ def drop_high_conf(dataset: str, frames: list[str], thr: float, quiet: bool = Fa
                 dst = os.path.join(trash, r["path"])
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.move(src, dst)
+
+    drop_paths = {r["path"] for r in drop}
+    keep = [r for r in rows if r["path"] not in drop_paths]
     with open(idx_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(keep[0].keys()))
         w.writeheader()
         w.writerows(keep)
 
-    # 台账跟着改：整帧被过滤光的，直接移出台账（否则又会变成 cells=0 的坏行）
     by = {}
     for r in keep:
         by[r["frame"]] = by.get(r["frame"], 0) + 1
     led_path = os.path.join(dataset, "frames.csv")
     led = [r for r in csv.DictReader(open(led_path, encoding="utf-8")) if r and r.get("frame")]
-    out = []
+    out, gone = [], []
     for r in led:
         if r["frame"] in want:
             n = by.get(r["frame"], 0)
             if n == 0:
-                continue          # 这一帧全被过滤掉 → 不留台账
+                gone.append(r["frame"])
+                continue
             empty = sum(1 for x in keep if x["frame"] == r["frame"] and x.get("cls_src") == "empty")
             r["cells"], r["bricks"], r["empty"] = str(n), str(n - empty), str(empty)
-            if r.get("status") == "done" and n < int(r["rows"] or 0) * int(r["cols"] or 1) * 0.5:
-                r["status"] = "pending"      # 过滤后剩太少，重新过一遍眼
         out.append(r)
     with open(led_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(led[0].keys()))
         w.writeheader()
         w.writerows(out)
 
+    if gone:
+        rej = os.path.join(dataset, "rejected.txt")
+        old = {ln.strip() for ln in open(rej, encoding="utf-8")} if os.path.exists(rej) else set()
+        with open(rej, "w", encoding="utf-8") as f:
+            f.write("\n".join(sorted(old | set(gone))) + "\n")
+        if not quiet:
+            print(f"  {len(gone)} 帧全被过滤光，已写入 rejected.txt（不会再重切）")
+
     if not quiet:
-        print(f"  高置信过滤: 丢弃 {len(drop)} 格（dist < {thr}），涉及 {len({r['frame'] for r in drop})} 帧")
+        print(f"  高置信过滤: 丢弃 {len(drop)}/{len(cand)} 格"
+              f"（保留距离最大的 {int(keep_quantile * 100)}%，cutoff {cut:.3f}）")
     return len(drop)
 
 
@@ -272,8 +295,10 @@ def main() -> None:
                              "mobilenet_v3_large", "dinov2_vits14"],
                     help="预训练骨干（识别与分组的特征来源）。改 auto_classify.DEFAULT_BACKBONE 即整体切换")
     ap.add_argument("--cache", default="", help="中间产物目录（默认 数据集同级 cache/）")
-    ap.add_argument("--highconf-thr", type=float, default=0.30,
-                    help="新增帧里 top-1 距离低于它的格子视为「已经认得足够好」，不再入库（0=不过滤）")
+    ap.add_argument("--keep-quantile", type=float, default=0.30,
+                    help="新增帧里只保留距离最大的这个比例（0.3=留下最难的 30%%，1=全留）")
+    ap.add_argument("--highconf-thr", type=float, default=0.0,
+                    help="额外的绝对下限（0=只用分位）。别再用 0.30：auto 组中位才 0.118")
     ap.add_argument("--keep-highconf", action="store_true", help="不做高置信过滤（保留全部新增格）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印会切哪些新帧，不写任何文件")
@@ -509,7 +534,8 @@ def main() -> None:
     # 存量数据里高置信的样本是训练集的主体，删了模型就没法学了。
     # 别把这里改成"全库扫描"。
     if not args.keep_highconf:
-        drop_high_conf(args.out, [] if args.rebuild else new_frames, args.highconf_thr)
+        drop_high_conf(args.out, [] if args.rebuild else new_frames,
+                       args.keep_quantile, args.highconf_thr)
 
     # ---------- 3) 标注界面 ----------
     if args.no_html:

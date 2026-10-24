@@ -720,16 +720,21 @@ def run_real(args, dev: str) -> None:
           f"增广 {'light' if args.aug == 'light' else '无'}")
 
     def save_ckpt(path: str, ep: int) -> None:
-        # 覆盖前先留一份带时间戳的：闸门要能重跑"上一版 vs 新一版"，
-        # 旧 best.pt 被直接覆盖就没法复现基线了（YOLO 侧也是这么做的）。
-        if os.path.exists(path) and ep == 0:
-            import time as _t
-            bak = path.replace(".pt", f"_{_t.strftime('%Y%m%d-%H%M')}.pt")
-            if not os.path.exists(bak):
-                import shutil as _sh
-                _sh.copyfile(path, bak)
-                print(f"  旧权重已备份 → {os.path.basename(bak)}")
         torch.save(ckpt_dict(model, args, ep, cat), path)
+
+    # 开训前备份上一版权重：闸门要能重跑"上一版 vs 新一版"，best.pt 被直接
+    # 覆盖就没法复现基线了。放循环外，别用"ep==0"判断（调用点传的是 ep+1）。
+    if not args.eval_only:
+        for name in ("best.pt", "last.pt"):
+            p = os.path.join(args.out, name)
+            if os.path.exists(p):
+                import time as _t
+                import shutil as _sh
+                bak = p.replace(".pt", f"_{_t.strftime('%Y%m%d-%H%M')}.pt")
+                if not os.path.exists(bak):
+                    _sh.copyfile(p, bak)
+                    print(f"  旧权重已备份 → {name.replace('.pt', '')}_"
+                          f"{_t.strftime('%Y%m%d-%H%M')}.pt")
 
     start = 0
     if args.resume:
@@ -812,10 +817,10 @@ def parse_args() -> argparse.Namespace:
                     help="--data real 用的截图数据集目录（含 index.csv 与 images/）")
     ap.add_argument("--real-ratio", type=float, default=0.6,
                     help="每个 batch 从\"有真实格的类\"里抽的比例，其余从全类抽（只当负样本）")
-    ap.add_argument("--val-frames", type=int, default=0,
+    ap.add_argument("--val-frames", type=int, default=12,
                     help="--data real 用：整帧留出做验证，这些帧的格子完全不参与训练（默认 0=关）。"
                          "与 --val-cls-ratio 叠加时，评测集是两者的并集")
-    ap.add_argument("--val-cls-ratio", type=float, default=0.15,
+    ap.add_argument("--val-cls-ratio", type=float, default=0.0,
                     help="--data real 用：每类随机抽这个比例的格进评测，**最少 1 张**"
                          "（默认 0.15，保证每类都有评测样本）。同帧近重复会让指标偏高，"
                          "要干净的\"新物品\"口径就改用 --holdout-cls-ratio")
