@@ -453,16 +453,11 @@ def main() -> None:
         have[r["frame"]] = have.get(r["frame"], 0) + 1
     all_ledger = ledger + ledger_rows
     bad = [r["frame"] for r in all_ledger if have.get(r["frame"], 0) == 0]
-    if bad:
-        print(f"\n  ⚠ {len(bad)} 帧台账在、但一格都没有（目录不存在 / index 无行）")
-        print("     " + "、".join(bad[:5]) + ("…" if len(bad) > 5 else ""))
-        if args.prune_empty:
-            # 剔掉后台账里没有它们的 md5，下次会当新帧重切。默认不做：
-            # 这些帧原图里往往有砖（实测 101~115 块），静默重切等于复活已清理的数据。
-            print(f"     --prune-empty：从台账剔除 {len(bad)} 帧（下次运行会重切）")
-            all_ledger = [r for r in all_ledger if have.get(r["frame"], 0) > 0]
-        else:
-            print("     未处理。要重切加 --prune-empty；要丢弃就把原图移出 samples/")
+    if bad and args.prune_empty:
+        # 默认完全静默：这些帧是已经处理完的历史批次（刻意不收高置信样本），
+        # 反复提醒只会让人白花时间复查。要清理时显式 --prune-empty。
+        print(f"\n  --prune-empty：从台账剔除 {len(bad)} 帧（一格都没有）")
+        all_ledger = [r for r in all_ledger if have.get(r["frame"], 0) > 0]
     write_ledger(args.out, all_ledger)
     n_empty = sum(1 for r in total_rows if r.get("cls_src") == "empty")
     n_pending = sum(1 for r in all_ledger if r.get("status") != "done")
