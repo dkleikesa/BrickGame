@@ -130,7 +130,7 @@ def audit(meta: list[dict]) -> None:
     （frames.csv 台账没覆盖）用 tile 面积和 / board 面积估算，不让它们从报表里消失。
     """
     import statistics as st
-    by_cell, by_area, weird, no_layout = [], [], [], 0
+    by_cell, weird = [], []
     dup_frames, dup_total = [], 0
     for m in meta:
         p = os.path.join(OUT, "labels", m["split"], m["file"] + ".txt")
@@ -161,9 +161,6 @@ def audit(meta: list[dict]) -> None:
             dup_total += n_dup
         if m["rows"] and m["cols"]:
             by_cell.append((m, m["tiles"] / (m["rows"] * m["cols"])))
-        elif board > 0:
-            no_layout += 1
-            by_area.append((m, tiles / board))
     # 覆盖率只作参考：残局帧天然低（2 块砖 = 1.4%），拿它判漏标会大面积误报。
     # 真要查漏标跑 audit_labels.py（按格子集合比）。
     if by_cell:
