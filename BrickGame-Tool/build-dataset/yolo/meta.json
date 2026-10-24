@@ -133,7 +133,7 @@
   "file": "f66b9a81b",
   "src": "lowconf_1016-010503",
   "split": "train",
-  "rows": 15,
+  "rows": 14,
   "cols": 10,
   "tiles": 94,
   "labels_from": "labels",
