@@ -131,20 +131,34 @@ def audit(meta: list[dict]) -> None:
     """
     import statistics as st
     by_cell, by_area, weird, no_layout = [], [], [], 0
+    dup_frames, dup_total = [], 0
     for m in meta:
         p = os.path.join(OUT, "labels", m["split"], m["file"] + ".txt")
         board = tiles = 0.0
+        board_box = None
+        cell_hit: dict[tuple, int] = {}
         for line in open(p, encoding="utf-8"):
             q = line.split()
             if len(q) < 5:
                 continue
-            c, w, h = int(q[0]), float(q[3]), float(q[4])
+            c, cx, cy, w, h = int(q[0]), float(q[1]), float(q[2]), float(q[3]), float(q[4])
             if c == 0:
-                board = max(board, w * h)
+                if w * h > board:
+                    board, board_box = w * h, (cx, cy, w, h)
             elif c == 1:
                 tiles += w * h
                 if w > 0.5 or h > 0.5:
                     weird.append((m["src"], round(w, 2), round(h, 2)))
+                # 同格多框：旧 NMS 0.7 生成的预标注会带进来，一格两块砖会把格距算大
+                if m["rows"] and m["cols"] and board_box:
+                    bx, by, bw, bh = board_box
+                    bc = int((cx - (bx - bw / 2)) / (bw / m["cols"]))
+                    br = int((cy - (by - bh / 2)) / (bh / m["rows"]))
+                    cell_hit[(br, bc)] = cell_hit.get((br, bc), 0) + 1
+        n_dup = sum(v - 1 for v in cell_hit.values() if v > 1)
+        if n_dup:
+            dup_frames.append((m["src"], n_dup))
+            dup_total += n_dup
         if m["rows"] and m["cols"]:
             by_cell.append((m, m["tiles"] / (m["rows"] * m["cols"])))
         elif board > 0:
@@ -159,6 +173,9 @@ def audit(meta: list[dict]) -> None:
               f"（残局天然低，漏标请用 audit_labels.py 判）")
     if weird:
         print(f"  ⚠ {len(weird)} 个 tile 框边长 >50%（多半是把半块棋盘框成了砖）：{weird[:3]}")
+    if dup_total:
+        print(f"  ⚠ {len(dup_frames)} 帧存在同格多框（共 {dup_total} 个）：{dup_frames[:3]}"
+              f"\n    一格最多一块砖，重复框会把格距算大，建议删掉多出来的")
 
 
 def archive_stale(keep_images: set[str], keep_labels: set[str], reviewed: set[str]) -> tuple[list[str], int, int]:

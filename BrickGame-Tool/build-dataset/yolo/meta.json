@@ -75,7 +75,7 @@
   "split": "train",
   "rows": 14,
   "cols": 10,
-  "tiles": 109,
+  "tiles": 108,
   "labels_from": "labels",
   "reviewed": true
  },
@@ -175,7 +175,7 @@
   "split": "train",
   "rows": 15,
   "cols": 10,
-  "tiles": 63,
+  "tiles": 62,
   "labels_from": "labels",
   "reviewed": true
  },
@@ -2495,7 +2495,7 @@
   "split": "train",
   "rows": 14,
   "cols": 10,
-  "tiles": 122,
+  "tiles": 117,
   "labels_from": "labels",
   "reviewed": true
  },

@@ -133,13 +133,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/data"):
             # 每次请求现算：补了新数据只要刷新页面，不用重新生成 HTML
             import make_box_tool
-            show_all = "all=1" in self.path
-            frames = make_box_tool.build_data(show_all=show_all)
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            show_all = q.get("all", ["0"])[0] == "1"
+            offset = int(q.get("offset", ["0"])[0] or 0)
+            batch = int(q.get("batch", ["0"])[0] or 0) or None
+            frames, total_need = make_box_tool.build_data(show_all, offset, batch)
             meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
             # build_data 现在还会返回低覆盖的复查帧，不能再拿 len(frames) 反推已确认数
             bases = {m["file"] for m in meta}
             done = len(make_box_tool.reviewed_frames() & bases)
             body = json.dumps({"frames": frames, "reviewed": done, "total": len(meta),
+                               "need": total_need, "offset": offset,
                                "audit": make_box_tool.audit_state(), "show_all": show_all},
                               ensure_ascii=False).encode()
             self._send(200, body, "application/json")

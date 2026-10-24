@@ -58,13 +58,14 @@ TEMPLATE = r"""<!doctype html>
 </header>
 <div id="grid"></div>
 <script>
-let DATA = [], REVIEWED = 0, TOTAL = 0, AUDIT = null, SHOWALL = false;
+let DATA = [], REVIEWED = 0, TOTAL = 0, AUDIT = null, SHOWALL = false, NEED = 0;
 async function boot(){
   try {
-    const r = await fetch('/data' + location.search);
+    const q = new URLSearchParams(location.search); q.set('batch', '40');
+    const r = await fetch('/data?' + q.toString());
     const j = await r.json();
     DATA = j.frames; REVIEWED = j.reviewed; TOTAL = j.total;
-    AUDIT = j.audit; SHOWALL = j.show_all;
+    AUDIT = j.audit; SHOWALL = j.show_all; NEED = j.need;
   } catch (e) {
     document.getElementById('grid').innerHTML =
       '<p style="padding:20px;color:#c00">请通过本地服务打开：先运行 box_server.py，再访问 http://127.0.0.1:8771/</p>';
@@ -79,6 +80,30 @@ async function boot(){
     el.textContent = '⚠ 复检未生效：' + AUDIT.why + ' ｜ 列表为空不代表标签正确';
   }
   build();
+  updateMore();
+}
+
+// 一次只拉 40 帧：255 帧的 base64 图加起来 48MB，一口气返回浏览器直接卡死
+function updateMore(){
+  const box = document.getElementById('more');
+  if (!NEED || DATA.length >= NEED) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  document.getElementById('morebtn').textContent = '加载更多（' + DATA.length + '/' + NEED + '）';
+  document.getElementById('morebtn').onclick = async () => {
+    const btn = document.getElementById('morebtn');
+    btn.disabled = true; btn.textContent = '加载中…';
+    const q = new URLSearchParams(location.search); q.set('batch', '40'); q.set('offset', DATA.length);
+    try {
+      const r = await fetch('/data?' + q.toString());
+      const j = await r.json();
+      NEED = j.need;
+      const from = DATA.length;
+      DATA = DATA.concat(j.frames);
+      build(from); updateMore(); progress();
+    } catch (e) {
+      btn.textContent = '加载失败，点这里重试'; btn.disabled = false;
+    }
+  };
 }
 // 只存在内存里：浏览器不存任何标注状态，所有改动一律当场写回服务端。
 // 之前用 localStorage 当缓存，页面看着"记住了"，服务端其实没收到，刷新即丢。
@@ -190,7 +215,7 @@ function hitAdded(d, px, py, W, H){
   }
   return -1;
 }
-function build(){
+function build(from = 0){
   const host = document.getElementById('grid');
   if (!DATA.length){
     host.innerHTML = '<p style="padding:28px;font-size:16px;color:#0a7">'
@@ -198,7 +223,7 @@ function build(){
       + '<span style="color:#666;font-size:14px">接着跑 make_yolo_data.py → train_yolo.py</span></p>';
     return;
   }
-  DATA.forEach(d=>{
+  DATA.slice(from).forEach(d=>{
     const card = document.createElement('div');
     card.className = 'card' + (d.recheck ? ' recheck' : ''); card.id='c-'+d.file;
     const w = Math.round(d.w*d.scale), h = Math.round(d.h*d.scale);
@@ -360,6 +385,51 @@ def audit_frames() -> dict:
         return {}
 
 
+def audit_gap() -> int:
+    """复检用的阈值，页面必须与它一致，否则两边筛出来的帧不一样。"""
+    p = os.path.join(YOLO, "audit.json")
+    try:
+        return int(json.load(open(p, encoding="utf-8")).get("gap", 10))
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return 10
+
+
+def _cells(boxes: list, board: list, rows: int, cols: int) -> set:
+    """框 → 占用格子集合。boxes 每项是 [cls, cx, cy, w, h]（归一化）。"""
+    _, bx, by, bw, bh = board
+    x0, y0 = bx - bw / 2, by - bh / 2
+    got = set()
+    for _, cx, cy, _, _ in boxes:
+        c = int((cx - x0) / (bw / cols)); r = int((cy - y0) / (bh / rows))
+        if 0 <= r < rows and 0 <= c < cols:
+            got.add((r, c))
+    return got
+
+
+def solved(rec: dict, boxes: list, m: dict) -> bool:
+    """复查帧是否已经修好 —— 按当初报的原因重算。
+
+    不能用"框数比之前多"来判断：整行缺 10 块、补 2 块也会变多，
+    那一行还缺 8 块。整行/整列要查那行现在是否有框，散点才退回数量。
+    """
+    import re
+    reason = rec.get("reason") or ""
+    if not reason:
+        return False
+    tiles = [b for b in boxes if b[0] == 1]
+    boards = [b for b in boxes if b[0] == 0]
+    if not (m["rows"] and m["cols"] and boards):
+        return len(tiles) >= rec.get("model", 0) - 2
+    lab = _cells(tiles, boards[0], m["rows"], m["cols"])
+    if reason.startswith("整行缺失"):
+        want = [int(x) for x in re.findall(r"\d+", reason)]
+        return bool(want) and all(any(rr == r for rr, _ in lab) for r in want)
+    if reason.startswith("整列缺失"):
+        want = [int(x) for x in re.findall(r"\d+", reason)]
+        return bool(want) and all(any(cc == c for _, cc in lab) for c in want)
+    return len(tiles) >= rec.get("model", 0) - 2
+
+
 def is_suspect(v: dict, gap: int) -> bool:
     """这一帧当时是否被判为疑似漏标。
 
@@ -391,15 +461,16 @@ def audit_state() -> dict:
     except (json.JSONDecodeError, OSError):
         return {"stale": True, "why": "audit.json 损坏"}
     best = os.path.join(os.path.dirname(HERE), "runs", "brick", "weights", "best.pt")
-    if os.path.exists(best) and a.get("weights") != os.path.basename(best):
-        return {"stale": True, "why": "模型已更换，复检结果过期"}
+    # 文件名永远是 best.pt，重训只是覆盖内容 —— 只能比 mtime
+    if os.path.exists(best) and os.path.getmtime(best) > os.path.getmtime(p):
+        return {"stale": True, "why": "模型比复检结果新，需要重跑 audit_labels.py"}
     age = time.time() - os.path.getmtime(p)
     if age > 7 * 86400:
         return {"stale": True, "why": f"复检已 {int(age // 86400)} 天未更新"}
     return {"stale": False, "why": "", "at": a.get("at")}
 
 
-def build_data(show_all: bool = False) -> list:
+def build_data(show_all: bool = False, offset: int = 0, limit: int | None = None) -> tuple[list, int]:
     """待标帧 + 复查帧打包成页面要的 JSON（服务每次请求现算，页面本身不变）。
 
     已确认但被 `audit_labels.py` 判为漏标的帧也会拉回来（recheck=True），排在前面 ——
@@ -408,10 +479,10 @@ def build_data(show_all: bool = False) -> list:
     meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
     done = reviewed_frames()
     recs = audit_frames()
-    gap = 10
+    gap = audit_gap()
     suspects = {b for b, v in recs.items() if is_suspect(v, gap)}
     # 先按 label 算覆盖率，决定哪些帧要上页面（图片编码很贵，只处理入选的）
-    need = []
+    need: list[tuple] = []
     for m in meta:
         base = m["file"]
         lab = os.path.join(YOLO, "labels", m["split"], base + ".txt")
@@ -427,16 +498,20 @@ def build_data(show_all: bool = False) -> list:
         # 已确认的帧只在"模型能检出更多砖"时拉回复查；show_all 时全部列出供回看
         if is_done and base not in suspects and not show_all:
             continue
-        if is_done and base in suspects:
-            # 补过框就当场撤出复查列表，不用等重跑 audit（后者要几分钟）
-            rec = recs.get(base) or {}
-            n_tile_now = sum(1 for b in boxes if b[0] == 1)
-            if n_tile_now > rec.get("label", 0) + 2:
+        if is_done and base in suspects and not show_all:
+            # 补过框就当场撤出复查列表；show_all 时不撤，否则"查看全部"会少帧
+            if solved(recs.get(base) or {}, boxes, m):
                 continue
         need.append((m, boxes, cov, is_done))
 
+    # 复查帧优先，其余按覆盖率从低到高：最容易出错的最先看到。
+    # 排序要在切片之前，否则分页顺序会乱。
+    need.sort(key=lambda t: (not t[3], t[2] if t[2] is not None else 1.0))
+    total = len(need)
+    page = need[offset: (offset + limit) if limit else None]
+
     data = []
-    for m, boxes, cov, is_done in need:
+    for m, boxes, cov, is_done in page:
         split, base = m["split"], m["file"]
         # 优先取 samples 原图：yolo/images 已按 imgsz 缩到 640，拿它画 460 宽的预览
         # 等于反向放大，tile 边缘会糊，人工补框看不准。
@@ -487,9 +562,7 @@ def build_data(show_all: bool = False) -> list:
             "cov": cov, "recheck": is_done,
         })
 
-    # 复查帧优先，其余按覆盖率从低到高：最容易出错的最先看到
-    data.sort(key=lambda d: (not d["recheck"], d["cov"] if d["cov"] is not None else 1.0))
-    return data
+    return data, total
 
 
 def main() -> None:

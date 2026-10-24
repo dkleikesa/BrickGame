@@ -28,13 +28,14 @@
 </header>
 <div id="grid"></div>
 <script>
-let DATA = [], REVIEWED = 0, TOTAL = 0, AUDIT = null, SHOWALL = false;
+let DATA = [], REVIEWED = 0, TOTAL = 0, AUDIT = null, SHOWALL = false, NEED = 0;
 async function boot(){
   try {
-    const r = await fetch('/data' + location.search);
+    const q = new URLSearchParams(location.search); q.set('batch', '40');
+    const r = await fetch('/data?' + q.toString());
     const j = await r.json();
     DATA = j.frames; REVIEWED = j.reviewed; TOTAL = j.total;
-    AUDIT = j.audit; SHOWALL = j.show_all;
+    AUDIT = j.audit; SHOWALL = j.show_all; NEED = j.need;
   } catch (e) {
     document.getElementById('grid').innerHTML =
       '<p style="padding:20px;color:#c00">请通过本地服务打开：先运行 box_server.py，再访问 http://127.0.0.1:8771/</p>';
@@ -49,6 +50,30 @@ async function boot(){
     el.textContent = '⚠ 复检未生效：' + AUDIT.why + ' ｜ 列表为空不代表标签正确';
   }
   build();
+  updateMore();
+}
+
+// 一次只拉 40 帧：255 帧的 base64 图加起来 48MB，一口气返回浏览器直接卡死
+function updateMore(){
+  const box = document.getElementById('more');
+  if (!NEED || DATA.length >= NEED) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  document.getElementById('morebtn').textContent = '加载更多（' + DATA.length + '/' + NEED + '）';
+  document.getElementById('morebtn').onclick = async () => {
+    const btn = document.getElementById('morebtn');
+    btn.disabled = true; btn.textContent = '加载中…';
+    const q = new URLSearchParams(location.search); q.set('batch', '40'); q.set('offset', DATA.length);
+    try {
+      const r = await fetch('/data?' + q.toString());
+      const j = await r.json();
+      NEED = j.need;
+      const from = DATA.length;
+      DATA = DATA.concat(j.frames);
+      build(from); updateMore(); progress();
+    } catch (e) {
+      btn.textContent = '加载失败，点这里重试'; btn.disabled = false;
+    }
+  };
 }
 // 只存在内存里：浏览器不存任何标注状态，所有改动一律当场写回服务端。
 // 之前用 localStorage 当缓存，页面看着"记住了"，服务端其实没收到，刷新即丢。
@@ -160,7 +185,7 @@ function hitAdded(d, px, py, W, H){
   }
   return -1;
 }
-function build(){
+function build(from = 0){
   const host = document.getElementById('grid');
   if (!DATA.length){
     host.innerHTML = '<p style="padding:28px;font-size:16px;color:#0a7">'
@@ -168,7 +193,7 @@ function build(){
       + '<span style="color:#666;font-size:14px">接着跑 make_yolo_data.py → train_yolo.py</span></p>';
     return;
   }
-  DATA.forEach(d=>{
+  DATA.slice(from).forEach(d=>{
     const card = document.createElement('div');
     card.className = 'card' + (d.recheck ? ' recheck' : ''); card.id='c-'+d.file;
     const w = Math.round(d.w*d.scale), h = Math.round(d.h*d.scale);
