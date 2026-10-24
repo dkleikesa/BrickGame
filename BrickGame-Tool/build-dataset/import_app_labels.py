@@ -38,7 +38,9 @@ sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 
 THR = 85            # 与 TfliteTileClassifier.DUMP_SIMILARITY 一致：低于它才进"没把握"清单
-DIST_OK = 0.15      # 采信格子的 cls_dist：低于标注界面默认阈值 0.30，不落进低置信筛选
+# 采信格子的 cls_dist：低于标注界面默认阈值 0.30，不落进低置信筛选。
+# 注意：这是**常量**，app 组的 cls_dist 没有分布，不能拿它做低置信排序/筛选。
+DIST_OK = 0.15
 DIST_LOW = 0.31     # 待人工格子的 cls_dist 下限：留档相似度 78 换算出来只有 0.22，
 #                     会从界面的低置信筛选里漏掉 —— 这些格子必须被看见，所以压一个下限
 

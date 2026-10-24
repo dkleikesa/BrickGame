@@ -13,8 +13,9 @@
   · 绝对下限 top1 ≥ 0.95。
 任一项不过 → exit 1，`gate.json` 写 pass=false，导出脚本会拒绝装 assets。
 
-基线来源：`--base <目录>` 显式给；否则用 `<new>/baseline.json`；都没有则只查绝对下限
-（首次建基线）。通过后加 `--update` 把这次的指标写成新基线。
+基线来源：默认用滚动基线 `out/clf_baseline`（含 best.pt + baseline.json）；`--base` 只用于临时
+指定别处。通过后加 `--update` 会把这一版的 best.pt 和指标写进滚动基线目录，下一轮自动与它比
+（旧实现写在 `<new>/baseline.json`，每轮又拿写死的 `--base` 比，基线永远停在第一次那版）。
 
 用法：
   ~/.venvs/brick-train/bin/python eval_clf_gate.py --new out/clf_v2 --base out/clf_real --update
@@ -26,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,7 +84,9 @@ def fmt(m: dict | None) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="识别模型放行闸门（新 vs 基线，同一批查询）")
     ap.add_argument("--new", required=True, help="新模型目录（含 best.pt）")
-    ap.add_argument("--base", default="", help="基线目录（含 best.pt）；留空=用 baseline.json")
+    ap.add_argument("--base", default="", help="临时指定基线目录（含 best.pt）；一般不用给")
+    ap.add_argument("--baseline-dir", default=os.path.join(_ROOT, "out", "clf_baseline"),
+                    help="滚动基线目录：--update 通过后把这一版写进这里，下次默认与它比")
     ap.add_argument("--update", action="store_true", help="通过后把这次结果写成新基线")
     ap.add_argument("--force", action="store_true", help="不达标也写 gate.json 为 pass（慎用）")
     args = ap.parse_args()
@@ -94,10 +98,10 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         new_m = eval_ckpt(ckpt, os.path.join(td, "new"))
 
-        # 基线来源：显式 --base 且目录里有 best.pt → 重跑评测；
-        # 否则读 baseline.json（**绝不能拿 --new 自己的 best.pt 当基线**，那是自己跟自己比）
-        base_dir = args.base or args.new
-        base_ckpt = os.path.join(args.base, "best.pt") if args.base else ""
+        # 基线来源：--base（临时）→ --baseline-dir（滚动基线）→ 无。
+        # 曾经默认落在 --new 目录，导致每轮都跟一个写死的旧目录比，基线永远不前进。
+        base_dir = args.base or args.baseline_dir
+        base_ckpt = os.path.join(base_dir, "best.pt")
         base_m = None
         if base_ckpt and os.path.exists(base_ckpt):
             print(f"基线   {base_ckpt}")
@@ -148,7 +152,9 @@ def main() -> None:
         sys.exit(1)
     print("✓ 通过" + ("（--force）" if reasons else ""))
     if args.update:
-        base_path = os.path.join(args.new, "baseline.json")
+        os.makedirs(args.baseline_dir, exist_ok=True)
+        shutil.copyfile(ckpt, os.path.join(args.baseline_dir, "best.pt"))
+        base_path = os.path.join(args.baseline_dir, "baseline.json")
         json.dump({"real": new_m, "ckpt": gate["ckpt"], "ckpt_md5": gate["ckpt_md5"],
                    "at": gate["at"]},
                   open(base_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)

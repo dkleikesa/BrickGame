@@ -292,8 +292,13 @@ def main() -> None:
         used.add(name)
         os.makedirs(os.path.join(frame_dir, frame), exist_ok=True)
         cells, idx, D, gap = r["cells"], r["idx"], r["dist"], r["gap"]
+        rows_n = r["rows"]
         n_empty = 0
         for c in cells:
+            # 15 行布局的最后一行被 App 悬浮窗盖住，切出来是黑格（真值是空位）。
+            # 收进训练会污染 class 0 原型，也让"每帧最多 140 格"这条对不上。
+            if rows_n >= 15 and c["row"] >= 14:
+                continue
             if c["hole"]:
                 n_empty += 1
             # 每帧的格子**全部落盘**（rows×cols 一个不少），保证"不丢图"：
@@ -330,7 +335,9 @@ def main() -> None:
                 w.writerow(["frame_a", "ra", "ca", "frame_b", "rb", "cb",
                             "same", "distance", "confident"])
                 w.writerows(pairs)
-        n_cells = r["rows"] * r["cols"]
+        # cells 记"实际落盘的格子数"：15 行布局丢掉被遮挡的最后一行，不等于 rows×cols
+        n_cells = sum(1 for c in r["cells"]
+                      if not (r["rows"] >= 15 and c["row"] >= 14))
         st, lab = keep_status.get(frame, ("pending", ""))
         ledger_rows.append({
             "frame": frame, "source_file": name, "source_md5": md5_of[name], "batch": batch,
@@ -365,7 +372,18 @@ def main() -> None:
         w.writeheader()
         w.writerows(total_rows)
 
+    # 台账里有、却一格都没切出来的帧：空目录 + status=done，永远不会再出现在标注页，
+    # 也永远进不了训练。剔掉台账行，下次运行因 md5 不在台账里会被当新帧重切。
+    have = {}
+    for r in total_rows:
+        have[r["frame"]] = have.get(r["frame"], 0) + 1
     all_ledger = ledger + ledger_rows
+    bad = [r["frame"] for r in all_ledger if have.get(r["frame"], 0) == 0]
+    if bad:
+        print(f"\n  ⚠ {len(bad)} 帧台账在、但一格都没有（目录空/index 无行）"
+              f"，已从台账移除，下次运行会当新帧重切：")
+        print("     " + "、".join(bad[:5]) + ("…" if len(bad) > 5 else ""))
+        all_ledger = [r for r in all_ledger if have.get(r["frame"], 0) > 0]
     write_ledger(args.out, all_ledger)
     n_empty = sum(1 for r in total_rows if r.get("cls_src") == "empty")
     n_pending = sum(1 for r in all_ledger if r.get("status") != "done")

@@ -12,7 +12,7 @@
 为什么页面不直接删：file:// 打开的页面碰不到文件系统。沿用 annotate.html 的老办法 ——
 页面只产清单，落地交给 python 脚本（可预览、有留档、能回滚）。
 
-标记存浏览器 localStorage（key 按 dataset 路径分开），刷新不丢；导出的 JSON 才是准的。
+标删只存在内存：提交前刷新会丢标记（index.csv 没动，数据不丢）。
 用法：
   .venv/bin/python review_dataset.py            # → review.html
   .venv/bin/python review_dataset.py --open     # 生成并用默认浏览器打开
@@ -127,14 +127,13 @@ body.serve .tile:hover .edit{display:block}
 <div id="panel"><button class="close" id="pclose">关闭</button><div id="pbody"></div></div>
 <script>
 const DATA = __DATA__;
-const KEY = 'bgdel:' + DATA.dataset;
-const LS = (() => { try { localStorage.setItem('_t','1'); localStorage.removeItem('_t'); return localStorage; } catch(e) { return null; } })();
-let S = (LS && JSON.parse(LS.getItem(KEY) || 'null')) || {del: {}};
-if (!S.del) S.del = {};
+// 标删状态只放内存：提交前刷新会丢标记（数据不会丢，index.csv 没动）。
+// 不做任何本地持久化：刷新后标记清零，一切以 index.csv 为准。
+let S = {del: {}};
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const REF = DATA.refs;                                   // class_id → entry（JSON 的对象键已转成字符串）
 const refSrc = cid => (cid === null || REF[cid] === undefined) ? '' : DATA.tiles + REF[cid] + '.png';
-const save = () => { if (LS) LS.setItem(KEY, JSON.stringify(S)); };
+const save = () => { stats(); };
 
 // 每类的成员路径表：点一下只重算本行计数，不整体重绘（上千张图，innerHTML 重绘会闪）
 const PATHS = {}; DATA.classes.forEach(c => PATHS[c.key] = c.members.map(m => m.path));
@@ -181,35 +180,10 @@ function srcLine(c) {
       ? `<span class="man">人工 ${n}</span>` : `${SRCN[k] || k} ${n}`).join(' · ');
 }
 
-// 标注页（annotate.html）的改动存在 localStorage 里，这里跟 index.csv 逐条比：
-// 对不上的就是"标了但没写回"的 —— 页面分类只认 index.csv，所以它们不会生效。
-function pendingEdits() {
-  const cur = {};
-  DATA.classes.forEach(c => c.members.forEach(m => cur[m.path] = m));
-  let raw = null;
-  try { raw = LS && LS.getItem('bgcls:' + DATA.dataset); } catch (e) { return 0; }
-  if (!raw) return 0;
-  let ed = {};
-  try { ed = (JSON.parse(raw).edits) || {}; } catch (e) { return 0; }
-  let n = 0;
-  for (const [p, e] of Object.entries(ed)) {
-    const now = cur[p];
-    if (!now) continue;
-    if (e.unknown) { if (now.cid !== null && now.kind !== 'unknown') n++; }
-    else if (now.kind !== 'manual' || String(e.class_id) !== String(now.cid)) n++;
-  }
-  return n;
-}
+// 标注页现在逐格即时写回 index.csv，不存在"标了但没写回"的状态，这里恒为 0。
+function pendingEdits() { return 0; }
 function showWarn() {
-  const n = pendingEdits();
-  const el = document.getElementById('warn');
-  if (!n) { el.hidden = true; return; }
-  el.hidden = false;
-  el.innerHTML = `⚠ 标注页里还有 <b>${n}</b> 条改动没写回 dataset/index.csv —— `
-    + '本页分类只认 index.csv，所以看着"还是错的"。'
-    + '在标注页点「导出标注 JSON」，再跑 '
-    + '<code>apply_corrections.py --corrections corrections.json --inplace</code> 就一致了。'
-    + '<span style="color:#8b8f96">（读的是浏览器里标注页的本地记录，两个页面要用同一个地址打开）</span>';
+  document.getElementById('warn').hidden = true;
 }
 
 function rowsHtml() {
@@ -249,7 +223,8 @@ function stats() {
   let cls = 0;
   for (const c of DATA.classes) if (cntDel(c.key)) cls++;
   document.getElementById('stat').textContent =
-    `共 ${DATA.classes.length} 类 / ${DATA.total} 张 · 已标删 ${n} 张（涉及 ${cls} 类）`;
+    `共 ${DATA.classes.length} 类 / ${DATA.total} 张 · 已标删 ${n} 张（涉及 ${cls} 类）`
+    + (n ? ' · 未提交，刷新会丢' : '');
 }
 function render() {
   document.getElementById('list').innerHTML = rowsHtml() || '<div class="empty">没有匹配的类</div>';

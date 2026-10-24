@@ -215,8 +215,12 @@ def classify(dataset: str, catalog: str, top: int = 12, thr: float = 0.30, force
 
     # 空位格也一起识别："背景"在参考库里是一个正式类别（class_id=0）。
     # 判空是检测器给的判断，让模型独立判一遍可以复核，也避免判空错时砖块静默消失。
+    # 只重算"模型自己写的"标签：manual（人工改过）和 app（App 上报，相似度已达标）
+    # 都必须保住，否则少跑一次 import_app_labels.py，App 标签就被自动识别顶掉。
+    # empty 格允许复核（判空可能错），但结论在下面按模型结果修正 cls_src，不会自相矛盾。
+    PROTECT = {"manual", "app"}
     targets = [i for i, r in enumerate(rows)
-               if (force or r.get("cls_src") != "manual")
+               if (force or r.get("cls_src") not in PROTECT)
                and (frames is None or r.get("frame") in frames)]
     if frames is not None:
         print(f"  只识别指定的 {len(frames)} 个帧（其余帧的标签原样不动）")
@@ -267,10 +271,15 @@ def classify(dataset: str, catalog: str, top: int = 12, thr: float = 0.30, force
     dists = []
     for t, i in enumerate(targets):
         d0, cid0 = hits[t][0]
+        prev = (rows[i].get("cls_src") or "").strip()
         rows[i]["class_id"] = int(cid0)
         rows[i]["cls_dist"] = round(d0, 3)
-        # 保留建库时给的 empty 标记（"检测器判成空位"），其余标 auto
-        rows[i]["cls_src"] = rows[i].get("cls_src") or "auto"
+        if prev == "empty" and int(cid0) != 0:
+            # 检测器判空、模型却认出砖块：改标 auto，让它进低置信筛选被人看到，
+            # 否则 class_id 非 0 + cls_src=empty 这种自相矛盾的行会一直躺在库里。
+            rows[i]["cls_src"] = "auto"
+        else:
+            rows[i]["cls_src"] = prev or "auto"
         dists.append(d0)
     dists = np.array(dists)
 

@@ -720,6 +720,15 @@ def run_real(args, dev: str) -> None:
           f"增广 {'light' if args.aug == 'light' else '无'}")
 
     def save_ckpt(path: str, ep: int) -> None:
+        # 覆盖前先留一份带时间戳的：闸门要能重跑"上一版 vs 新一版"，
+        # 旧 best.pt 被直接覆盖就没法复现基线了（YOLO 侧也是这么做的）。
+        if os.path.exists(path) and ep == 0:
+            import time as _t
+            bak = path.replace(".pt", f"_{_t.strftime('%Y%m%d-%H%M')}.pt")
+            if not os.path.exists(bak):
+                import shutil as _sh
+                _sh.copyfile(path, bak)
+                print(f"  旧权重已备份 → {os.path.basename(bak)}")
         torch.save(ckpt_dict(model, args, ep, cat), path)
 
     start = 0

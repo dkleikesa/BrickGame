@@ -55,15 +55,17 @@ cd BrickGame-Tool && ~/.venvs/brick-train/bin/python train_classifier.py \
 ## ⑤ 放行闸门（不许跳过）
 
 ```bash
-~/.venvs/brick-train/bin/python eval_clf_gate.py --new out/clf_v2 --base out/clf_real --update
+~/.venvs/brick-train/bin/python eval_clf_gate.py --new out/clf_v2 --update
 ```
 
 - 闸门会**在当前数据集上重跑两个模型的 `--eval-only`**，保证同一批查询格；直接比旧的
   `metrics.json` 等于拿两把尺子量（数据集已经加过帧/改过标）。
 - 硬规则：`top1 ≥ 0.95` 且不比基线低超过 0.3 个点；`hit_dist_p95` 不比基线高超过 0.005；
   `wrong_dist_p5` 不比基线低超过 0.01。不过就 exit 1，`gate.json` 写 `pass=false`。
-- 基线来源：`--base <目录>`；否则用 `<new>/baseline.json`；都没有就只查绝对下限（首次建基线）。
-- `--update` 只会在通过时把这次指标写成新基线。
+- 基线是**滚动**的：固定放在 `out/clf_baseline/`（best.pt + baseline.json）。`--update` 通过后
+  会把这一版拷进去，下一轮自动与它比。**不要**再传 `--base out/clf_real` —— 那是 10 月的旧目录，
+  会让基线永远停在那一版（旧实现把 baseline.json 写进 `<new>/`，配合写死的 --base 就是这个结果）。
+- `--update` 只会在通过时更新基线；没通过连 best.pt 都不会写进去。
 - 留档阈值 `dumpSimilarity` 来自 `dist_wrong_p5`，这一项塌了等于线上误留档暴增。
 
 ## ⑥ 导出：ONNX → TFLite → assets
@@ -99,7 +101,10 @@ adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
    真值是空位。别把带黑边的格当训练样本收，会污染 class 0 原型；标空位用界面里的「标为空位」。
 4. **预标注别混用两套模型**：默认就是上一版 V2；只有在 V2 tflite 缺失时才会退回
    v3-large 特征缓存。两套的 `cls_dist` 量纲不同，混着看阈值会误判。
-5. **闸门与权重绑定**：`gate.json` 记的是 `best.pt` 的 md5。重新训练后必须重跑闸门，
+5. **基线必须滚动**：每轮都用 `--new <新目录> --update`，基线在 `out/clf_baseline` 自己前移；
+   不要每轮复制同样的 `--base` 命令，否则永远比同一版。`out/` 不入库，基线丢了就重新
+   `--update` 一次（首次会只查绝对下限）。
+6. **闸门与权重绑定**：`gate.json` 记的是 `best.pt` 的 md5。重新训练后必须重跑闸门，
    旧 gate 不会自动失效成"通过"——导出脚本会拦住。
-6. **刚训进去的帧不能当评测集**：评估用 `--eval-only` 的类划分，但人工刚改过的帧仍在训练集里，
+7. **刚训进去的帧不能当评测集**：评估用 `--eval-only` 的类划分，但人工刚改过的帧仍在训练集里，
    真正的外部检验靠 `compare_models.py` 在留档图上逐格对比。
