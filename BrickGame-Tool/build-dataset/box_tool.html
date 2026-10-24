@@ -37,35 +37,44 @@ async function boot(){
     return;
   }
   build();
-  await flushPending();
 }
-const state = JSON.parse(localStorage.getItem('brick-box-tool') || '{}');
-// 旧版的「确认无误」只写 localStorage，没落盘。启动时把本地积压的确认一次性补交，
-// 免得已经标过的帧还要人重新点一遍。
-async function flushPending(){
-  const out = {};
-  DATA.forEach(d=>{ const s = state[d.file]; if (s && s.ok) out[d.file] = s; });
-  const n = Object.keys(out).length;
-  if (!n) return;
-  const el = document.getElementById('prog');
-  el.textContent = '本地有 ' + n + ' 帧确认记录，正在补交…';
-  try {
-    const r = await fetch('/save', {method:'POST', headers:{'Content-Type':'application/json'},
-                                    body: JSON.stringify(out)});
-    const j = await r.json();
-    if (!j.ok) throw new Error();
-    REVIEWED = j.reviewed || REVIEWED;
-    el.textContent = '已补交 ' + n + ' 帧（服务端确认数 ' + REVIEWED + '），刷新中…';
-    setTimeout(()=>location.reload(), 1200);
-  } catch (e) {
-    el.textContent = '本地有 ' + n + ' 帧确认记录，补交失败：需通过 http://127.0.0.1:8771 打开';
-  }
-}
+// 只存在内存里：浏览器不存任何标注状态，所有改动一律当场写回服务端。
+// 之前用 localStorage 当缓存，页面看着"记住了"，服务端其实没收到，刷新即丢。
+const state = {};
 const cache = {};
+const queues = {};         // 同一帧的请求串行，避免快速连点时乱序覆盖
 
 function st(f){ if(!state[f]) state[f] = {deleted:[], added:[], board:null, ok:false}; return state[f]; }
-const armed = new Set();   // 哪些卡片处于"重画棋盘"模式（不落盘，刷新即清）
-function save(){ localStorage.setItem('brick-box-tool', JSON.stringify(state)); progress(); }
+const armed = new Set();   // 哪些卡片处于"重画棋盘"模式（纯界面状态）
+
+/** 把某帧的当前状态立刻写回服务端；失败就在卡片上报错，不留含糊。 */
+function push(d){
+  const send = ()=>fetch('/save', {method:'POST', headers:{'Content-Type':'application/json'},
+                                   body: JSON.stringify({[d.file]: st(d.file)})})
+    .then(r=>r.json()).then(j=>{
+      if (!j.ok) throw new Error(j.error || 'save failed');
+      REVIEWED = j.reviewed;
+      progress(); msg(d);
+      const el = document.querySelector('#c-'+d.file+' .msg');
+      if (j.missing && j.missing.length) {
+        el.textContent = '未写入：服务端没有这帧的框文件';
+        return false;
+      }
+      const s = st(d.file);
+      const brief = (s.deleted.length ? '删 '+s.deleted.length+' ' : '')
+                  + (s.added.length ? '补 '+s.added.length+' ' : '')
+                  + (s.board ? '重画棋盘 ' : '');
+      el.textContent = brief + (s.ok ? '已确认，服务端已记录' : '已写入');
+      return true;
+    }).catch(e=>{
+      const el = document.querySelector('#c-'+d.file+' .msg');
+      if (el) el.textContent = '未写入：' + (e.message || '需要通过 127.0.0.1:8771 打开');
+      return false;
+    });
+  queues[d.file] = (queues[d.file] || Promise.resolve()).then(send, send);
+  return queues[d.file];
+}
+function save(){ progress(); }
 function progress(){
   const n = DATA.filter(d => { const s=state[d.file]; return s && (s.deleted.length || s.added.length || s.board || s.ok); }).length;
   document.getElementById('prog').textContent =
@@ -164,26 +173,14 @@ function build(){
       obtn.classList.toggle('primary', on);
     };
     paintOk();
-    obtn.onclick = async ()=>{
+    obtn.onclick = ()=>{
       const s = st(d.file);
       const next = !s.ok;
       s.ok = next; paintOk(); save(); draw(d,cv,null); msg(d);
-      // 点一下就落盘：这个按钮就是"人看过这帧"的唯一入口，不该还要再点顶部保存
-      try {
-        const r = await fetch('/save', {method:'POST', headers:{'Content-Type':'application/json'},
-                                        body: JSON.stringify({[d.file]: s})});
-        const j = await r.json();
-        if (!j.ok) throw new Error(j.error || 'save failed');
-        // 以服务端回写的 reviewed 为准，别只信本地布尔值
-        REVIEWED = j.reviewed;
-        const landed = (j.confirmed || []).includes(d.file);
-        if (landed !== next) throw new Error('服务端未记录');
-        progress(); msg(d);
-        card.querySelector('.msg').textContent = next ? '已确认，服务端已记录' : '已取消确认';
-      } catch (e) {
-        s.ok = !next; paintOk(); save(); msg(d);
-        card.querySelector('.msg').textContent = '保存失败，未写入：' + (e.message || '需要通过 127.0.0.1:8771 打开');
-      }
+      push(d).then(ok=>{
+        if (ok) return;
+        s.ok = !next; paintOk(); save(); draw(d,cv,null); msg(d);   // 没写进去就别显示成已确认
+      });
     };
     bbtn.onclick = ()=>{
       if (armed.has(d.file)) armed.delete(d.file); else armed.add(d.file);
@@ -214,7 +211,7 @@ function build(){
         const ai = hitAdded(d, down[0], down[1], cv.width, cv.height);
         if (ai >= 0) {
           cur.added.splice(ai, 1);
-          save(); draw(d,cv,null); msg(d);
+          save(); draw(d,cv,null); msg(d); push(d);
           down=null; return;
         }
         const i = hit(d, down[0], down[1], cv.width, cv.height);
@@ -222,7 +219,7 @@ function build(){
           // toggle：点一次标删、再点一次取消
           const k = cur.deleted.indexOf(i);
           if (k>=0) cur.deleted.splice(k,1); else cur.deleted.push(i);
-          save(); draw(d,cv,null); msg(d);
+          save(); draw(d,cv,null); msg(d); push(d);
         }
       } else {
         const x1=Math.min(p[0],down[0])/cv.width, y1=Math.min(p[1],down[1])/cv.height;
@@ -235,7 +232,7 @@ function build(){
           } else {
             cur.added.push([x1,y1,x2,y2]);
           }
-          save(); draw(d,cv,null); msg(d);
+          save(); draw(d,cv,null); msg(d); push(d);
         }
       }
       down=null; draft=null;
@@ -261,9 +258,9 @@ function build(){
     setTimeout(()=>{ btn.textContent='保存到训练集'; btn.disabled=false; }, 2200);
   };
   document.getElementById('resetall').onclick = ()=>{
-    if(!confirm('清空全部修改？')) return;
-    Object.keys(state).forEach(k=>delete state[k]); save();
-    DATA.forEach(d=>{ const cv=document.querySelector('#c-'+d.file+' canvas'); draw(d,cv,null); });
+    // 改动已经逐条写到服务端，本地清不掉；只能重新装配或用 .orig 还原
+    if(!confirm('所有改动已实时写入服务端，这里无法撤销。刷新页面重新加载？')) return;
+    location.reload();
   };
   progress();
 }
