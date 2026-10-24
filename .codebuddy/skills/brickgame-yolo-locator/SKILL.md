@@ -88,6 +88,9 @@ cd <repo>/BrickGame-Tool
 2. 框 → `yolo/labels/<split>/fXXXXXXXX.txt`（归一化，标签 `labels/` 优先于 `prelabel/`）
 3. 写 `meta.json`（file↔src 映射、rows/cols、reviewed）、`split.json`、`data.yaml`
 4. 文件名 = `f` + md5(帧名)[:8]，**不是序号**（序号会让新帧把旧框串位）
+5. `split.json` 每次都全量落盘，新帧补登为 train；只有 `--rebalance` 才重抽 val
+6. 打印**标注覆盖率报表**：按格数（有 `rows/cols`）和按面积（台账没覆盖的帧）两套，
+   列出 <50% 的帧和边长 >50% 的异常 tile 框
 
 压缩只在这里发生：240M → 63M。已装配过的图直接跳过，不重编码（否则 JPG 每跑一次掉一代质量）。
 
@@ -134,6 +137,9 @@ loss 会降但定位能力不涨。装配只是把 `reviewed.json` 刷进 `meta.
 .venv-train/bin/python train_yolo.py --resume runs/brick/weights/last.pt --epochs 40
 ```
 
+- **开训前会拦一次**：`meta.json` 里有未确认帧直接退出，逃生门是 `--allow-unreviewed`
+  （只用于排查，指标不可信）
+- 旧 `best.pt` 自动备份成 `best_<时间>.pt`，不会再被 `exist_ok=True` 静默覆盖
 - `yolo11n`，`imgsz=640`，`batch=8`，device 自动选 mps
 - 数据 <200 帧**必须 `--resume`**，从头训会让旧皮肤漂掉
 - 训练前自动重写 `data.yaml` 的绝对路径，换机器/换克隆目录不用重新装配
@@ -151,7 +157,9 @@ loss 会降但定位能力不涨。装配只是把 `reviewed.json` 刷进 `meta.
 
 - 口径：board IoU>0.7 算命中；tile 同类 IoU>0.5 贪心一对一；召回=TP/真值，精确率=TP/检出
 - val 里有未确认帧时 `--update` 会被拒绝（模型给自己判卷，指标必然虚高）
-- 换标注口径要把旧基线挪走：`mv runs/brick/metrics.json runs/brick/metrics_weak_labels.json`
+- 基线里存了 `labels_fp`（labels 内容指纹）。**改过标注后旧基线自动作废**：指纹不一致时跳过
+  「精确率掉 3 点」这条，只判 board/召回，避免拿另一份真值的数字误杀
+- 想让新口径成为基线，重跑一次 `eval_gate.py --update` 即可（会自动写入新指纹）
 - 精确率低先算标注覆盖率（已标注格 / rows×cols），60% 覆盖时精确率天然偏低
 
 ## 8. 回灌：新模型接管下一轮预标注
@@ -242,6 +250,12 @@ adb logcat -s YoloBoardDetector
 7. **15 行关卡最后一整行常被 App 悬浮窗盖住**，真值是空位，别把带黑边的格当样本。
 8. **留档文件名带毫秒**，只到秒同秒两帧会互相覆盖。
 9. **ZIP 要同时打 `low-conf/` 和 `scan-fail/`**，定位失败帧以前根本导不出来。
+10. **覆盖率高不代表框对着**：已确认帧里也有 7 帧覆盖率 <50%（确认时没补框就点了确认）。
+    装配报表会点名，覆盖率低的帧要回头重标，不是点个确认就完事。
+11. **半个棋盘被框成一块砖**：`scanfail_1022-004943` 出现 w=0.97 的 tile 框。
+    这种框会把格距撑大一倍，装配会告警边长 >50% 的框。
+12. **改过 labels 必须重建基线**，否则 `metrics.json` 里的指标是对旧真值算的，
+    闸门比的是两套口径。现在有 `labels_fp` 指纹自动识别。
 
 ## 仓库入库策略
 

@@ -396,8 +396,8 @@
   "rows": 14,
   "cols": 10,
   "tiles": 73,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fd9604003",
@@ -476,8 +476,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 2,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f8608ed5d",
@@ -1716,8 +1716,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 77,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fd81d9fdc",
@@ -1866,8 +1866,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 2,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fce2da2ac",
@@ -2036,8 +2036,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 64,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fbc174334",
@@ -2046,8 +2046,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 64,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f2aebb8ec",
@@ -2056,8 +2056,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 64,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f52764dda",
@@ -2146,8 +2146,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 2,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fd305391c",
@@ -2236,8 +2236,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 5,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fabfddb05",
@@ -2246,8 +2246,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 136,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f5e199bb7",
@@ -2256,8 +2256,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 136,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f501ef9d5",
@@ -2266,8 +2266,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 136,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f7dc22c55",
@@ -2276,8 +2276,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 121,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "fd2b38e28",
@@ -2286,8 +2286,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 28,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f8dc6e021",
@@ -2296,8 +2296,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 112,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "faecc86ed",
@@ -2306,8 +2306,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 136,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f2f348f28",
@@ -2316,8 +2316,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 119,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f937972cd",
@@ -2326,8 +2326,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 85,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "ffe9682bc",
@@ -2336,8 +2336,8 @@
   "rows": 0,
   "cols": 0,
   "tiles": 114,
-  "labels_from": "prelabel",
-  "reviewed": false
+  "labels_from": "labels",
+  "reviewed": true
  },
  {
   "file": "f16183d40",

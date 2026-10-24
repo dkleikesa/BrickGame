@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -46,6 +47,16 @@ def iou(a, b):
 def xywh2xyxy(b):
     cx, cy, w, h = b
     return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+
+
+def labels_fp() -> str:
+    """标注内容指纹：labels 改过之后，旧基线的精确率就不可比了。"""
+    import hashlib
+    h = hashlib.md5()
+    for p in sorted(glob.glob(os.path.join(YOLO_DIR, "labels", "*", "*.txt"))):
+        h.update(os.path.basename(p).encode())
+        h.update(open(p, "rb").read())
+    return h.hexdigest()[:12]
 
 
 def evaluate(weights: str, conf: float) -> dict:
@@ -98,6 +109,7 @@ def evaluate(weights: str, conf: float) -> dict:
         "precision": tp / max(1, tp + fp),
         "tp": tp, "fn": fn, "fp": fp,
         "weights": os.path.relpath(weights, ROOT),
+        "labels_fp": labels_fp(),
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -139,13 +151,20 @@ def main() -> None:
         reasons.append(f"board 命中 {cur['board']:.1%} < {MIN_BOARD:.0%}")
     if cur["recall"] < MIN_RECALL:
         reasons.append(f"tile 召回 {cur['recall']:.1%} < {MIN_RECALL:.0%}")
-    if base and cur["precision"] < base["precision"] - 0.03:
+    comparable = True
+    if base and base.get("labels_fp") and base["labels_fp"] != cur["labels_fp"]:
+        # 标注改过，旧指标是拿另一份真值算的，比下去只会误判
+        print("⚠ labels 已变更（基线指纹 "
+              f"{base['labels_fp']} → {cur['labels_fp']}），精确率不与旧基线对比")
+        comparable = False
+    elif base and cur["precision"] < base["precision"] - 0.03:
         reasons.append(f"精确率比基线低 {base['precision'] - cur['precision']:.1%}（>3 个点）")
 
     if reasons and not args.force:
         print("✗ 不放行：" + "；".join(reasons))
         sys.exit(1)
-    print("✓ 通过" + ("（--force 忽略以下问题：" + "；".join(reasons) + "）" if reasons else ""))
+    print("✓ 通过" + ("（--force 忽略以下问题：" + "；".join(reasons) + "）" if reasons else "")
+          + ("" if comparable else "（精确率基线已作废，需重建）"))
     if args.update or args.force:
         json.dump(cur, open(METRICS, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         print(f"基线已更新 → {METRICS}")

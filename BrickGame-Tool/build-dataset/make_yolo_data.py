@@ -123,6 +123,51 @@ def ledger_shapes() -> dict[str, tuple[int, int]]:
         return {r["frame"]: (int(r["rows"]), int(r["cols"])) for r in csv.DictReader(f)}
 
 
+def audit(meta: list[dict]) -> None:
+    """标注质量报表：覆盖率、异常框、无台账帧。
+
+    漏检在训练里等价于"这里没有砖"，看不出来就会一直训错。没有 rows/cols 的帧
+    （frames.csv 台账没覆盖）用 tile 面积和 / board 面积估算，不让它们从报表里消失。
+    """
+    import statistics as st
+    by_cell, by_area, weird, no_layout = [], [], [], 0
+    for m in meta:
+        p = os.path.join(OUT, "labels", m["split"], m["file"] + ".txt")
+        board = tiles = 0.0
+        for line in open(p, encoding="utf-8"):
+            q = line.split()
+            if len(q) < 5:
+                continue
+            c, w, h = int(q[0]), float(q[3]), float(q[4])
+            if c == 0:
+                board = max(board, w * h)
+            elif c == 1:
+                tiles += w * h
+                if w > 0.5 or h > 0.5:
+                    weird.append((m["src"], round(w, 2), round(h, 2)))
+        if m["rows"] and m["cols"]:
+            by_cell.append((m, m["tiles"] / (m["rows"] * m["cols"])))
+        elif board > 0:
+            no_layout += 1
+            by_area.append((m, tiles / board))
+    print("\n— 标注覆盖率 —")
+    for name, rows in (("按格数", by_cell), ("按面积(无台账帧)", by_area)):
+        if not rows:
+            continue
+        vals = [c for _, c in rows]
+        low = [(m, c) for m, c in rows if c < 0.5]
+        print(f"  {name}: {len(rows)} 帧，中位 {st.median(vals):.0%}，"
+              f"<50% 的 {len(low)} 帧（已确认 {sum(1 for m, _ in low if m['reviewed'])}）")
+        for m, c in low[:3]:
+            print(f"    {c:.0%} {m['src']} ({m['tiles']} 框"
+                  f"{'/'+str(m['rows']*m['cols']) if m['rows'] else ''}"
+                  f"{'，已确认' if m['reviewed'] else '，未确认'})")
+    if no_layout:
+        print(f"  其中 {no_layout} 帧没有 rows/cols（frames.csv 没登记），只能按面积估")
+    if weird:
+        print(f"  ⚠ {len(weird)} 个 tile 框边长 >50%（多半是把半块棋盘框成了砖）：{weird[:3]}")
+
+
 def archive_stale(keep_images: set[str], keep_labels: set[str], reviewed: set[str]) -> tuple[list[str], int, int]:
     """把本次没装配到的图/框挪进 _trash，不再直接删。
 
@@ -194,7 +239,9 @@ def main() -> None:
         if n_board == 0:
             skipped.append((stem, "缺 board 框"))
             continue
-        if n_tile == 0:
+        # 空盘帧是有效样本（定位器要能认"有板没砖"），但必须是人工确认过的 ——
+        # 未确认的零 tile 更可能是模型整体漏检，放进去等于教它"整板都没砖"。
+        if n_tile == 0 and not (is_reviewed and n_board > 0):
             skipped.append((stem, "没有 tile 框"))
             continue
 
@@ -235,6 +282,9 @@ def main() -> None:
         json.dump(split, open(split_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     for f in frames:
         split.setdefault(f["stem"], "train")
+    # 每次都落盘：之前只在首次/--rebalance 时写，新帧只存在内存里，
+    # 结果 split.json 永远停在首批 44 条，val 永远是那 6 帧。
+    json.dump(split, open(split_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
         os.makedirs(os.path.join(OUT, sub), exist_ok=True)
@@ -275,6 +325,7 @@ def main() -> None:
                      "labels_from": from_src, "reviewed": is_rev})
 
     orphaned, n_trash_img, n_trash_lab = archive_stale(keep_images, keep, reviewed)
+    audit(meta)
 
     with open(os.path.join(OUT, "data.yaml"), "w") as fh:
         fh.write(f"path: {OUT}\ntrain: images/train\nval: images/val\n")

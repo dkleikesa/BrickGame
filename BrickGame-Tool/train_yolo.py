@@ -40,6 +40,43 @@ def ensure_data_yaml() -> None:
                  "names:\n  0: board\n  1: tile\n")
 
 
+def check_labels_ready(allow_unreviewed: bool) -> None:
+    """开训前拦一次：未人工确认的帧进训练 = 模型学自己猜的框。
+
+    预标注的漏检会被写成"这里没有砖"，训完再拿去预标注下一批，错误只累积不自愈。
+    """
+    import json
+    meta_path = os.path.join(HERE, "build-dataset", "yolo", "meta.json")
+    if not os.path.exists(meta_path):
+        raise SystemExit(f"找不到 {meta_path}，先跑 make_yolo_data.py")
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    bad = [m for m in meta if not m.get("reviewed")]
+    if not bad:
+        return
+    print(f"⚠ {len(bad)}/{len(meta)} 帧未人工确认："
+          f"{', '.join(m['src'] for m in bad[:3])}{' …' if len(bad) > 3 else ''}")
+    if allow_unreviewed:
+        print("  --allow-unreviewed 已指定，按预标注继续训练")
+        return
+    raise SystemExit(
+        "拒绝开训：先把未确认帧过一遍 box_server.py，再跑 make_yolo_data.py。\n"
+        "确实要用预标注硬训，加 --allow-unreviewed（指标不可信，别拿来发版）。"
+    )
+
+
+def backup_weights() -> None:
+    """从 runs/brick 从头训会原地覆盖 best.pt/last.pt，先留一份带时间戳的。"""
+    import time
+    wdir = os.path.join(PROJECT, "brick", "weights")
+    best = os.path.join(wdir, "best.pt")
+    if not os.path.exists(best):
+        return
+    dst = os.path.join(wdir, f"best_{time.strftime('%Y%m%d-%H%M')}.pt")
+    if not os.path.exists(dst):
+        shutil.copyfile(best, dst)
+        print(f"旧权重已备份 → {os.path.basename(dst)}")
+
+
 def pick_device() -> str:
     try:
         import torch
@@ -56,9 +93,13 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--resume", default="", help="从某个 last.pt 继续训练（补数据后用）")
     ap.add_argument("--export", action="store_true", help="训练完导出 TFLite")
+    ap.add_argument("--allow-unreviewed", action="store_true",
+                    help="未确认帧也允许开训（只用于排查，指标不可信）")
     args = ap.parse_args()
 
     ensure_data_yaml()
+    check_labels_ready(args.allow_unreviewed)
+    backup_weights()
     model = YOLO(args.resume or args.model)
     device = pick_device()
     print(f"训练设备 {device}，数据 {DATA}")
@@ -92,10 +133,12 @@ def main() -> None:
     print(f"best.pt → {best}")
 
     if args.export:
-        out = YOLO(best).export(format="tflite", imgsz=args.imgsz, int8=False)
-        dst = os.path.join(HERE, "yolo", "brickgame_yolo.tflite")
-        shutil.copyfile(str(out), dst)
-        print(f"TFLite → {dst}")
+        # 与 skill 的部署路径一致：nms=False 把 NMS 留在端侧，模型只出原始框
+        out = YOLO(best).export(format="tflite", imgsz=args.imgsz, int8=False, nms=False)
+        dst = os.path.join(PROJECT, "brick", "weights", "best.tflite")
+        if os.path.abspath(str(out)) != os.path.abspath(dst):
+            shutil.copyfile(str(out), dst)
+        print(f"TFLite → {dst}（再 cp 到 androidApp/src/main/assets/brick_yolo.tflite）")
 
 
 if __name__ == "__main__":
