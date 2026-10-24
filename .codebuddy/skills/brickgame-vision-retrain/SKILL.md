@@ -69,8 +69,8 @@ cd BrickGame-Tool && ~/.venvs/brick-train/bin/python train_classifier.py \
 - 硬规则：`top1 ≥ 0.95` 且不比基线低超过 0.3 个点；`hit_dist_p95` 不比基线高超过 0.005；
   `wrong_dist_p5` 不比基线低超过 0.01。不过就 exit 1，`gate.json` 写 `pass=false`。
 - 基线是**滚动**的：固定放在 `out/clf_baseline/`（best.pt + baseline.json）。`--update` 通过后
-  会把这一版拷进去，下一轮自动与它比。**不要**再传 `--base out/clf_real` —— 那是 10 月的旧目录，
-  会让基线永远停在那一版（旧实现把 baseline.json 写进 `<new>/`，配合写死的 --base 就是这个结果）。
+  会把这一版拷进去，下一轮自动与它比。**不要**在命令里写死 `--base <某个历史目录>` ——
+  那样基线永远停在那一版（旧实现还把 baseline.json 写进 `<new>/`，两件事叠加就是这个结果）。
 - `--update` 只会在通过时更新基线；没通过连 best.pt 都不会写进去。
 - 留档阈值 `dumpSimilarity` 来自 `dist_wrong_p5`，这一项塌了等于线上误留档暴增。
 

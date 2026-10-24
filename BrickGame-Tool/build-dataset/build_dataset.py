@@ -275,6 +275,8 @@ def main() -> None:
     ap.add_argument("--highconf-thr", type=float, default=0.30,
                     help="新增帧里 top-1 距离低于它的格子视为「已经认得足够好」，不再入库（0=不过滤）")
     ap.add_argument("--keep-highconf", action="store_true", help="不做高置信过滤（保留全部新增格）")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只打印会切哪些新帧，不写任何文件")
     ap.add_argument("--prune-empty", action="store_true",
                     help="把「台账里有、但一格都没切出来」的帧从台账剔除（下次会重切）")
     ap.add_argument("--skip-embed", action="store_true",
@@ -334,11 +336,27 @@ def main() -> None:
     names = sorted(f for f in os.listdir(args.samples) if f.lower().endswith((".jpg", ".png")))
     md5_of = {n: file_md5(os.path.join(args.samples, n)) for n in names}
     by_md5 = {r["source_md5"]: r for r in ledger if r.get("source_md5")}
-    new_names = [n for n in names if md5_of[n] not in by_md5]
+    # 黑名单：明确不再入库的截图（删过的重复图/弃用批次）。只跳过、不删原图 ——
+    # 没有它的话，每次重跑都会把 samples/ 里没登记的图当新帧切回来。
+    rej_path = os.path.join(args.out, "rejected.txt")
+    rejected = set()
+    if os.path.exists(rej_path):
+        rejected = {ln.strip() for ln in open(rej_path, encoding="utf-8") if ln.strip()}
+    new_names = [n for n in names
+                 if md5_of[n] not in by_md5 and os.path.splitext(n)[0] not in rejected]
+    skipped_rej = [n for n in names
+                   if md5_of[n] not in by_md5 and os.path.splitext(n)[0] in rejected]
+    if skipped_rej:
+        print(f"  黑名单跳过 {len(skipped_rej)} 张（rejected.txt）")
     dup = [(n, by_md5[md5_of[n]]["frame"]) for n in names if md5_of[n] in by_md5]
     if dup:
         print(f"  跳过 {len(dup)} 张重复截图（内容与已有帧相同）："
               + "、".join(f"{n}=={f}" for n, f in dup[:3]) + ("…" if len(dup) > 3 else ""))
+    if args.dry_run:
+        print(f"  [dry-run] samples 里 {len(names)} 张，其中会被当新帧切的有 {len(new_names)} 张："
+              f"{'、'.join(n[:20] for n in new_names[:5])}{'…' if len(new_names) > 5 else ''}")
+        print("  [dry-run] 什么都没写。确认无误去掉 --dry-run 再跑。")
+        return
     if not new_names:
         print(f"  没有新帧：samples/ 里 {len(names)} 张截图都已入库（要整体重切加 --rebuild）")
     else:
