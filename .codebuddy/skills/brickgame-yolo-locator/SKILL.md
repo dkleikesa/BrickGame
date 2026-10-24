@@ -241,6 +241,21 @@ adb logcat -s YoloBoardDetector
 
 框坐标全程归一化 0~1，所以换尺寸不会错位。
 
+## 置信度与 NMS（全链路必须一致）
+
+| 环节 | conf | NMS iou |
+|---|---|---|
+| `prelabel_yolo` / `eval_gate` / `eval_yolo` / `yolo_grid` / `audit_labels` | 0.25 | **0.45** |
+| `YoloBoardDetector`（端侧） | 0.25 | **0.45** |
+
+- **训练完全不看置信度**：`labels/*.txt` 每行只写 5 个数（类别 + 中心 + 宽高），
+  prelabel 里第 6 个 conf 在装配时被 `read_labels` 丢掉
+- ultralytics 默认 `iou=0.7`，会给同一块砖留两个重叠框。Python 侧的 predict
+  必须显式传 `iou=0.45`，否则预标注带着重复框入库、指标里的误检也偏高
+- **判断漏标别用框数**：模型对同一格会重复出框，框数天然虚高。要把框映射成
+  「哪几格有砖」的集合再比（`audit_labels.py` 就是这么做的）
+- 置信度高低只说明模型对自己那个框有多大把握，**不能**用来判断标签是否漏标
+
 ## 契约（改模型/改代码必须同步两端）
 
 | 项 | 值 | 不同步的后果 |

@@ -44,7 +44,7 @@ def main() -> None:
             c, cx, cy, w, h = line.split()
             gt.append((int(c), xywh2xyxy([float(cx), float(cy), float(w), float(h)])))
 
-        res = model.predict(img, imgsz=640, conf=0.25, verbose=False)[0]
+        res = model.predict(img, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]  # 与端侧 NMS 一致
         h, w = res.orig_shape
         preds = []
         for box, cls, cf in zip(res.boxes.xyxy.cpu().numpy(),

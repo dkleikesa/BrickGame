@@ -49,7 +49,7 @@ def main() -> None:
         rows_raw = [line.split() for line in open(lab, encoding="utf-8") if line.split()]
         lab_t = [list(map(float, q[1:5])) for q in rows_raw if q[0] == "1"]
         lab_b = [[list(map(float, q[1:5])) for q in rows_raw if q[0] == "0"]]
-        res = model.predict(img, imgsz=640, conf=args.conf, verbose=False)[0]
+        res = model.predict(img, imgsz=640, conf=args.conf, iou=0.45, verbose=False)[0]
         H, W = res.orig_shape
         mod_t = [[(x1 + x2) / 2 / W, (y1 + y2) / 2 / H, (x2 - x1) / W, (y2 - y1) / H]
                  for (x1, y1, x2, y2), c in zip(res.boxes.xyxy.cpu().numpy(),

@@ -73,7 +73,7 @@ def evaluate(weights: str, conf: float) -> dict:
         for line in open(os.path.join(YOLO_DIR, "labels", split, base + ".txt")):
             c, cx, cy, w, h = line.split()[:5]
             gt.append((int(c), xywh2xyxy([float(cx), float(cy), float(w), float(h)])))
-        res = model.predict(img, imgsz=640, conf=conf, verbose=False)[0]
+        res = model.predict(img, imgsz=640, conf=conf, iou=0.45, verbose=False)[0]  # 与端侧 NMS 一致
         h_, w_ = res.orig_shape
         preds = []
         for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy()):

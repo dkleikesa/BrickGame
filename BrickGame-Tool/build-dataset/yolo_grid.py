@@ -74,7 +74,7 @@ def grid_of(img: np.ndarray, weights: str = "", conf: float = 0.25):
     @return (xlines, ylines, rows, cols) 或 None（砖太少/残差过大，判不出可信网格）。
     """
     model = _load(resolve_weights(weights))
-    res = model.predict(img, imgsz=640, conf=conf, verbose=False)[0]
+    res = model.predict(img, imgsz=640, conf=conf, iou=0.45, verbose=False)[0]  # 与 YoloBoardDetector.NMS_IOU 一致
     board = None
     tiles = []
     for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy()):

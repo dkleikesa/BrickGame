@@ -60,8 +60,10 @@ def main() -> None:
     total_tile = 0
     for name in todo:
         stem = os.path.splitext(name)[0]
+        # iou 必须与端侧 YoloBoardDetector 的 NMS_IOU=0.45 一致：
+        # 用 ultralytics 默认的 0.7 会给同一块砖留两个重叠框，预标注直接带上重复。
         res = model.predict(os.path.join(args.samples, name), imgsz=640,
-                            conf=args.conf, verbose=False)[0]
+                            conf=args.conf, iou=0.45, verbose=False)[0]
         h, w = res.orig_shape
         boxes = []
         for box, cls, cf in zip(res.boxes.xyxy.cpu().numpy(),
