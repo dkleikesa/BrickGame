@@ -39,15 +39,20 @@ def label_path(base: str) -> str:
     return os.path.join(YOLO, "labels", "train", base + ".txt")
 
 
-def mark_reviewed(bases) -> None:
-    """记下"人看过了"。make_yolo_data 用它算未确认帧，页面用它决定还展示哪些帧。"""
+def mark_reviewed(on, off) -> None:
+    """记下"人看过了"，取消勾选时移除。
+
+    以页面的 ok 为准：改了框但没点「确认无误」不算确认，
+    否则未过目的框会跟着 reviewed 一起进训练集。
+    """
     frames = set()
     if os.path.exists(REVIEWED):
         try:
             frames = set(json.load(open(REVIEWED, encoding="utf-8")).get("frames", []))
         except (json.JSONDecodeError, OSError):
             frames = set()
-    frames.update(bases)
+    frames.update(on)
+    frames.difference_update(off)
     with open(REVIEWED, "w", encoding="utf-8") as fh:
         json.dump({"frames": sorted(frames)}, fh, ensure_ascii=False, indent=1)
 
@@ -141,7 +146,8 @@ class Handler(BaseHTTPRequestHandler):
         snapshot(changed)   # 首次保存先留底（只对真的改了框的帧）
         restore(changed)    # 每次从原始版本重算，避免重复叠加
         deleted, added = apply(fixes)
-        mark_reviewed(bases)
+        mark_reviewed([b for b in bases if fixes[b].get("ok")],
+                      [b for b in bases if not fixes[b].get("ok")])
         body = json.dumps({"ok": True, "frames": len(bases), "deleted": deleted, "added": added},
                           ensure_ascii=False).encode()
         self._send(200, body, "application/json")

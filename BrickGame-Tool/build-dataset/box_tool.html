@@ -140,10 +140,21 @@ function build(){
       obtn.classList.toggle('primary', on);
     };
     paintOk();
-    obtn.onclick = ()=>{
+    obtn.onclick = async ()=>{
       const s = st(d.file);
-      s.ok = !s.ok;
-      paintOk(); save(); draw(d,cv,null); msg(d);
+      const next = !s.ok;
+      s.ok = next; paintOk(); save(); draw(d,cv,null); msg(d);
+      // 点一下就落盘：这个按钮就是"人看过这帧"的唯一入口，不该还要再点顶部保存
+      try {
+        const r = await fetch('/save', {method:'POST', headers:{'Content-Type':'application/json'},
+                                        body: JSON.stringify({[d.file]: s})});
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.error || 'save failed');
+        msg(d);
+      } catch (e) {
+        s.ok = !next; paintOk(); save(); msg(d);
+        card.querySelector('.msg').textContent = '保存失败：需要通过 http://127.0.0.1:8771 打开';
+      }
     };
     bbtn.onclick = ()=>{
       if (armed.has(d.file)) armed.delete(d.file); else armed.add(d.file);
