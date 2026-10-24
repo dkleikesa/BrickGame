@@ -208,14 +208,18 @@ def drop_high_conf(dataset: str, frames: list[str], keep_quantile: float,
     if not cand:
         return 0
 
-    vals = sorted(d for _, d in cand)
-    k = int(len(vals) * (1.0 - keep_quantile))
-    k = min(max(k, 0), len(vals) - 1)
-    cut = vals[k]
-    if abs_thr > 0:
-        cut = max(cut, abs_thr)
-
-    drop = [r for r, d in cand if d < cut]
+    # 按帧取分位：整批混在一起取会把"好认的老皮肤"整帧丢光、难认的新皮肤全留下。
+    # 每帧至少留 1 格，保证每张截图都还有样本。
+    per: dict[str, list] = {}
+    for r, d in cand:
+        per.setdefault(r["frame"], []).append((r, d))
+    keep_ids = set()
+    for items in per.values():
+        items.sort(key=lambda t: -t[1])          # 距离大的（更难的）优先
+        k = max(1, int(round(len(items) * keep_quantile)))
+        keep_ids |= {id(r) for r, _ in items[:k]}
+    drop = [r for r, d in cand if id(r) not in keep_ids
+            and not (abs_thr > 0 and d >= abs_thr)]
     if not drop:
         return 0
 
@@ -234,8 +238,12 @@ def drop_high_conf(dataset: str, frames: list[str], keep_quantile: float,
 
     drop_paths = {r["path"] for r in drop}
     keep = [r for r in rows if r["path"] not in drop_paths]
+    if not keep:
+        if not quiet:
+            print("  这一批全被高置信过滤掉了，index.csv 不动")
+        return len(drop)
     with open(idx_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(keep[0].keys()))
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(keep)
 
@@ -263,13 +271,13 @@ def drop_high_conf(dataset: str, frames: list[str], keep_quantile: float,
         rej = os.path.join(dataset, "rejected.txt")
         old = {ln.strip() for ln in open(rej, encoding="utf-8")} if os.path.exists(rej) else set()
         with open(rej, "w", encoding="utf-8") as f:
-            f.write("\n".join(sorted(old | set(gone))) + "\n")
+            f.write("\n".join(sorted(old | {g + " #highconf" for g in gone})) + "\n")
         if not quiet:
             print(f"  {len(gone)} 帧全被过滤光，已写入 rejected.txt（不会再重切）")
 
     if not quiet:
         print(f"  高置信过滤: 丢弃 {len(drop)}/{len(cand)} 格"
-              f"（保留距离最大的 {int(keep_quantile * 100)}%，cutoff {cut:.3f}）")
+              f"（每帧保留最难的 {int(keep_quantile * 100)}%，至少 1 格）")
     return len(drop)
 
 
@@ -366,7 +374,9 @@ def main() -> None:
     rej_path = os.path.join(args.out, "rejected.txt")
     rejected = set()
     if os.path.exists(rej_path):
-        rejected = {ln.strip() for ln in open(rej_path, encoding="utf-8") if ln.strip()}
+        # 允许逐行带原因：<frame> #dropped-batch / #highconf
+        rejected = {ln.split("#")[0].strip() for ln in open(rej_path, encoding="utf-8")
+                    if ln.strip() and not ln.startswith("#")}
     new_names = [n for n in names
                  if md5_of[n] not in by_md5 and os.path.splitext(n)[0] not in rejected]
     skipped_rej = [n for n in names

@@ -50,9 +50,18 @@ def md5_of(path: str) -> str:
 
 
 def ckpt_info(ckpt: str) -> dict:
+    """权重里存的构建参数 + 评测口径（口径不同不能比）。"""
     import torch
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
-    return {"backbone": ck.get("backbone"), "img": int(ck.get("img") or 0)}
+    a = ck.get("args") or {}
+    return {
+        "backbone": ck.get("backbone"), "img": int(ck.get("img") or 0),
+        "embed_dim": ck.get("embed_dim") or a.get("embed_dim"),
+        "width": ck.get("width") or a.get("width"),
+        "crop": ck.get("crop") or a.get("crop"),
+        "val_frames": a.get("val_frames"), "val_cls_ratio": a.get("val_cls_ratio"),
+        "seed": a.get("seed"),
+    }
 
 
 def eval_ckpt(ckpt: str, out_dir: str) -> dict:
@@ -66,12 +75,22 @@ def eval_ckpt(ckpt: str, out_dir: str) -> dict:
         "--resume", ckpt, "--backbone", info["backbone"], "--img", str(info["img"]),
         "--out", out_dir,
     ]
+    # 构建参数必须原样带上：crop 不匹配会静默重采样，指标直接不可比
+    if info.get("embed_dim"):
+        cmd += ["--embed-dim", str(info["embed_dim"])]
+    if info.get("width"):
+        cmd += ["--width", str(info["width"])]
+    if info.get("crop"):
+        cmd += ["--crop", str(info["crop"])]
     print("  评测：", " ".join(cmd[2:]))
     env = dict(os.environ, PYTHONPATH=_ROOT)
     subprocess.run(cmd, check=True, env=env, cwd=_ROOT,
                    stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     with open(os.path.join(out_dir, "metrics.json"), encoding="utf-8") as f:
-        return json.load(f)["real"]
+        j = json.load(f)
+    # 口径从评测产物里取（这次评测真正用的参数），不是从权重里取 ——
+    # 权重只记录训练期设置，拿旧 ckpt 评测时两者不是一回事。
+    return {"real": j["real"], "config": j.get("config", {})}
 
 
 def fmt(m: dict | None) -> str:
@@ -96,27 +115,40 @@ def main() -> None:
         raise SystemExit(f"找不到 {ckpt}")
     print(f"新模型 {ckpt}（{ckpt_info(ckpt)['backbone']} img={ckpt_info(ckpt)['img']}）")
     with tempfile.TemporaryDirectory() as td:
-        new_m = eval_ckpt(ckpt, os.path.join(td, "new"))
+        new_ev = eval_ckpt(ckpt, os.path.join(td, "new"))
+        new_m, new_cfg = new_ev["real"], new_ev["config"]
 
         # 基线来源：--base（临时）→ --baseline-dir（滚动基线）→ 无。
         # 曾经默认落在 --new 目录，导致每轮都跟一个写死的旧目录比，基线永远不前进。
         base_dir = args.base or args.baseline_dir
         base_ckpt = os.path.join(base_dir, "best.pt")
-        base_m = None
+        base_m, base_cfg = None, None
         if base_ckpt and os.path.exists(base_ckpt):
             print(f"基线   {base_ckpt}")
-            base_m = eval_ckpt(base_ckpt, os.path.join(td, "base"))
+            base_ev = eval_ckpt(base_ckpt, os.path.join(td, "base"))
+            base_m, base_cfg = base_ev["real"], base_ev["config"]
         elif os.path.exists(os.path.join(base_dir, "baseline.json")):
             saved = json.load(open(os.path.join(base_dir, "baseline.json"), encoding="utf-8"))
-            base_m = saved["real"]
+            base_m, base_cfg = saved["real"], saved.get("config")
             print(f"基线   沿用 {base_dir}/baseline.json（{saved.get('at', '')}）")
         else:
             print("基线   无（首次运行，只查绝对下限；通过后 --update 建基线）")
 
     print(f"新     {fmt(new_m)}")
+    print(f"口径   整帧留出 {new_cfg['val_frames']} / 每类抽 {new_cfg['val_cls_ratio']}"
+          f" / seed {new_cfg['seed']} / crop {new_cfg['crop']}")
     print(f"基线   {fmt(base_m)}")
 
     reasons = []
+    # 口径不一致的两次评测不可比：历史上就出过 same_mean 0.0198 和 0.013 两份
+    # 长得一样的 gate.json，谁也看不出用的不是同一套留出规则。
+    if base_m and not base_cfg:
+        reasons.append("基线没有记录评测口径（旧格式），不可比 —— 重跑 --update 重建基线")
+    elif base_cfg and any(base_cfg.get(k) != new_cfg.get(k)
+                          for k in ("val_frames", "val_cls_ratio", "seed", "crop")):
+        reasons.append(f"评测口径已变更（基线 {base_cfg.get('val_frames')}/"
+                       f"{base_cfg.get('val_cls_ratio')} vs 本次 "
+                       f"{new_cfg['val_frames']}/{new_cfg['val_cls_ratio']}），需重建基线")
     if new_m["n_class"] != (base_m or new_m)["n_class"]:
         reasons.append(f"类数变了：{new_m['n_class']} vs {base_m['n_class']}（图鉴改过要重建基线）")
     if new_m["top1"] < MIN_TOP1:
@@ -141,6 +173,7 @@ def main() -> None:
         "ckpt_md5": md5_of(ckpt),
         "thresholds": {"min_top1": MIN_TOP1, "top1_tol": TOP1_TOL,
                        "hit_p95_tol": HIT_TOL, "wrong_p5_tol": WRONG_TOL},
+        "config": new_cfg,
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     gate_path = os.path.join(args.new, "gate.json")
@@ -155,7 +188,8 @@ def main() -> None:
         os.makedirs(args.baseline_dir, exist_ok=True)
         shutil.copyfile(ckpt, os.path.join(args.baseline_dir, "best.pt"))
         base_path = os.path.join(args.baseline_dir, "baseline.json")
-        json.dump({"real": new_m, "ckpt": gate["ckpt"], "ckpt_md5": gate["ckpt_md5"],
+        json.dump({"real": new_m, "config": new_cfg,
+                   "ckpt": gate["ckpt"], "ckpt_md5": gate["ckpt_md5"],
                    "at": gate["at"]},
                   open(base_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         print(f"基线已更新 → {base_path}")
