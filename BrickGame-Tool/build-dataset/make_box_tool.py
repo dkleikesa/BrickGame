@@ -65,8 +65,29 @@ async function boot(){
     return;
   }
   build();
+  await flushPending();
 }
 const state = JSON.parse(localStorage.getItem('brick-box-tool') || '{}');
+// 旧版的「确认无误」只写 localStorage，没落盘。启动时把本地积压的确认一次性补交，
+// 免得已经标过的帧还要人重新点一遍。
+async function flushPending(){
+  const out = {};
+  DATA.forEach(d=>{ const s = state[d.file]; if (s && s.ok) out[d.file] = s; });
+  const n = Object.keys(out).length;
+  if (!n) return;
+  const el = document.getElementById('prog');
+  el.textContent = '本地有 ' + n + ' 帧确认记录，正在补交…';
+  try {
+    const r = await fetch('/save', {method:'POST', headers:{'Content-Type':'application/json'},
+                                    body: JSON.stringify(out)});
+    const j = await r.json();
+    if (!j.ok) throw new Error();
+    el.textContent = '已补交 ' + n + ' 帧，刷新中…';
+    setTimeout(()=>location.reload(), 1200);
+  } catch (e) {
+    el.textContent = '本地有 ' + n + ' 帧确认记录，补交失败：需通过 http://127.0.0.1:8771 打开';
+  }
+}
 const cache = {};
 
 function st(f){ if(!state[f]) state[f] = {deleted:[], added:[], board:null, ok:false}; return state[f]; }
