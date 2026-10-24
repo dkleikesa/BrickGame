@@ -50,10 +50,14 @@ def main() -> None:
                     if line.split() and line.split()[0] == "1")
         res = model.predict(img, imgsz=640, conf=args.conf, verbose=False)[0]
         n_mod = sum(1 for c in res.boxes.cls.cpu().numpy() if int(c) == 1)
-        out[m["file"]] = {"label": n_lab, "model": n_mod,
+        cells = (m["rows"] or 0) * (m["cols"] or 0)
+        out[m["file"]] = {"label": n_lab, "model": n_mod, "cells": cells,
                           "rows": m["rows"], "cols": m["cols"], "reviewed": m["reviewed"]}
+        # 标签已经接近满盘时，模型多出来的只能是误检（一格最多一块砖），不算漏标
+        if cells and n_lab >= cells * 0.95:
+            continue
         if n_mod - n_lab >= args.gap:
-            suspects.append((m["src"], n_lab, n_mod, n_mod - n_lab))
+            suspects.append((m["src"], n_lab, n_mod, n_mod - n_lab, cells))
 
     json.dump({"weights": os.path.basename(args.weights),
                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -61,9 +65,10 @@ def main() -> None:
               open(os.path.join(YOLO_DIR, "audit.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
 
-    print(f"复检 {len(out)} 帧，疑似漏标 {len(suspects)} 帧（模型比标签多 ≥{args.gap} 块）")
-    for src, a, b, d in sorted(suspects, key=lambda x: -x[3])[:12]:
-        print(f"  标签 {a:3d} 模型 {b:3d} 差 {d:3d}  {src}")
+    print(f"复检 {len(out)} 帧，疑似漏标 {len(suspects)} 帧"
+          f"（模型比标签多 ≥{args.gap} 块，且标签未满盘）")
+    for src, a, b, d, cells in sorted(suspects, key=lambda x: -x[3])[:12]:
+        print(f"  标签 {a:3d}/{cells or '?'} 模型 {b:3d} 差 {d:3d}  {src}")
     print(f"结果 → {os.path.join(YOLO_DIR, 'audit.json')}")
 
 

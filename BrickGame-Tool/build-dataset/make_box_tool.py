@@ -346,7 +346,15 @@ def audit_suspects() -> set:
     except (json.JSONDecodeError, OSError):
         return set()
     gap = a.get("gap", 10)
-    return {b for b, v in a.get("frames", {}).items() if v["model"] - v["label"] >= gap}
+    out = set()
+    for b, v in a.get("frames", {}).items():
+        if v["model"] - v["label"] < gap:
+            continue
+        cells = v.get("cells") or 0
+        if cells and v["label"] >= cells * 0.95:
+            continue          # 标签已满盘，模型多出来的是误检，不是漏标
+        out.add(b)
+    return out
 
 
 def build_data() -> list:
