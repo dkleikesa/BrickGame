@@ -492,6 +492,9 @@ def main() -> None:
                            frames=None if args.rebuild else new_frames)
 
     # ---------- 2.5) 高置信样本不入库：现有数据够了，只补充"模型拿不准"的格子 ----------
+    # 硬约束：只传本次新增帧（new_frames）。--rebuild 传空列表，等于不过滤 ——
+    # 存量数据里高置信的样本是训练集的主体，删了模型就没法学了。
+    # 别把这里改成"全库扫描"。
     if not args.keep_highconf:
         drop_high_conf(args.out, [] if args.rebuild else new_frames, args.highconf_thr)
 
