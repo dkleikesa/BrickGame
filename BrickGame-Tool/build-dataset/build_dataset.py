@@ -203,6 +203,8 @@ def main() -> None:
                              "mobilenet_v3_large", "dinov2_vits14"],
                     help="预训练骨干（识别与分组的特征来源）。改 auto_classify.DEFAULT_BACKBONE 即整体切换")
     ap.add_argument("--cache", default="", help="中间产物目录（默认 数据集同级 cache/）")
+    ap.add_argument("--prune-empty", action="store_true",
+                    help="把「台账里有、但一格都没切出来」的帧从台账剔除（下次会重切）")
     ap.add_argument("--skip-embed", action="store_true",
                     help="复用已有的 cache/emb_*.npz（图片没变时省 10 秒）")
     ap.add_argument("--no-classify", action="store_true", help="只裁图，不做模型识别")
@@ -380,10 +382,15 @@ def main() -> None:
     all_ledger = ledger + ledger_rows
     bad = [r["frame"] for r in all_ledger if have.get(r["frame"], 0) == 0]
     if bad:
-        print(f"\n  ⚠ {len(bad)} 帧台账在、但一格都没有（目录空/index 无行）"
-              f"，已从台账移除，下次运行会当新帧重切：")
+        print(f"\n  ⚠ {len(bad)} 帧台账在、但一格都没有（目录不存在 / index 无行）")
         print("     " + "、".join(bad[:5]) + ("…" if len(bad) > 5 else ""))
-        all_ledger = [r for r in all_ledger if have.get(r["frame"], 0) > 0]
+        if args.prune_empty:
+            # 剔掉后台账里没有它们的 md5，下次会当新帧重切。默认不做：
+            # 这些帧原图里往往有砖（实测 101~115 块），静默重切等于复活已清理的数据。
+            print(f"     --prune-empty：从台账剔除 {len(bad)} 帧（下次运行会重切）")
+            all_ledger = [r for r in all_ledger if have.get(r["frame"], 0) > 0]
+        else:
+            print("     未处理。要重切加 --prune-empty；要丢弃就把原图移出 samples/")
     write_ledger(args.out, all_ledger)
     n_empty = sum(1 for r in total_rows if r.get("cls_src") == "empty")
     n_pending = sum(1 for r in all_ledger if r.get("status") != "done")
