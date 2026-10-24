@@ -135,7 +135,9 @@ class Handler(BaseHTTPRequestHandler):
             import make_box_tool
             frames = make_box_tool.build_data()
             meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
-            done = len({m["file"] for m in meta}) - len(frames)
+            # build_data 现在还会返回低覆盖的复查帧，不能再拿 len(frames) 反推已确认数
+            bases = {m["file"] for m in meta}
+            done = len(make_box_tool.reviewed_frames() & bases)
             body = json.dumps({"frames": frames, "reviewed": done, "total": len(meta)},
                               ensure_ascii=False).encode()
             self._send(200, body, "application/json")

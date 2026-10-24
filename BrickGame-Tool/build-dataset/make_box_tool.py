@@ -40,6 +40,8 @@ TEMPLATE = r"""<!doctype html>
  .hint{color:#666}
  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;padding:14px}
  .card{background:#fff;border:1px solid #e2e2e6;border-radius:10px;padding:8px}
+ .card.recheck{border:2px solid #c00;box-shadow:0 0 0 3px rgba(204,0,0,.08)}
+ .cov{font-weight:600} .cov.low{color:#c00}
  .hd{display:flex;justify-content:space-between;font-size:12px;color:#555;margin-bottom:6px}
  canvas{display:block;width:100%;height:auto;background:#000;border-radius:6px;cursor:crosshair}
  .row{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
@@ -181,10 +183,14 @@ function build(){
   const host = document.getElementById('grid');
   DATA.forEach(d=>{
     const card = document.createElement('div');
-    card.className='card'; card.id='c-'+d.file;
+    card.className = 'card' + (d.recheck ? ' recheck' : ''); card.id='c-'+d.file;
     const w = Math.round(d.w*d.scale), h = Math.round(d.h*d.scale);
+    const covPct = d.cov == null ? null : Math.round(d.cov * 100);
+    const covTag = (d.recheck ? '⚠ 复查 · ' : '')
+      + (covPct == null ? '覆盖率未知'
+                        : '<span class="cov' + (covPct < 50 ? ' low' : '') + '">覆盖 ' + covPct + '%</span>');
     card.innerHTML =
-      '<div class="hd"><span>'+d.src+'</span><span>砖 '+d.boxes.filter(b=>b[0]===1).length+' 块</span></div>'+
+      '<div class="hd"><span>'+d.src+'</span><span>砖 '+d.boxes.filter(b=>b[0]===1).length+' 块 · '+covTag+'</span></div>'+
       '<canvas width="'+w+'" height="'+h+'"></canvas>'+
       '<div class="row"><button class="bd">重画棋盘</button>'+
       '<button class="ok">确认无误</button><span class="msg"></span></div>';
@@ -314,13 +320,47 @@ def reviewed_frames() -> set:
         return set()
 
 
+def coverage(boxes: list, m: dict) -> float | None:
+    """一帧的标注覆盖率：优先按格数，台账缺 rows/cols 时按面积估。
+
+    覆盖率低 = 漏检多，而漏检在训练里等于"这里没有砖"，比没标更糟。
+    """
+    if m.get("rows") and m.get("cols"):
+        return m["tiles"] / (m["rows"] * m["cols"])
+    board = max([b[3] * b[4] for b in boxes if b[0] == 0] or [0])
+    tiles = sum(b[3] * b[4] for b in boxes if b[0] == 1)
+    return (tiles / board) if board else None
+
+
 def build_data() -> list:
-    """把"还没人工确认的帧"打包成页面要的 JSON（服务每次请求现算，页面本身不变）。"""
+    """待标帧 + 复查帧打包成页面要的 JSON（服务每次请求现算，页面本身不变）。
+
+    已确认但覆盖率 <50% 的帧也会拉回来（recheck=True），排在最前面 ——
+    点过确认不等于标全了，那批漏检会在下一轮变成负样本。
+    """
     meta = json.load(open(os.path.join(YOLO, "meta.json"), encoding="utf-8"))
     done = reviewed_frames()
-    frames = [m for m in meta if m.get("file") not in done]
+    # 先按 label 算覆盖率，决定哪些帧要上页面（图片编码很贵，只处理入选的）
+    need = []
+    for m in meta:
+        base = m["file"]
+        lab = os.path.join(YOLO, "labels", m["split"], base + ".txt")
+        if not os.path.exists(lab):
+            continue
+        boxes = []
+        for line in open(lab, encoding="utf-8"):
+            q = line.split()
+            if len(q) >= 5:
+                boxes.append([int(q[0])] + [round(float(v), 6) for v in q[1:5]])
+        cov = coverage(boxes, m)
+        is_done = base in done
+        # 已确认且覆盖够 → 不再打扰；tiles==0 的空盘帧尊重人工判断，不反复拉回
+        if is_done and (cov is None or cov >= 0.5 or m["tiles"] == 0):
+            continue
+        need.append((m, boxes, cov, is_done))
+
     data = []
-    for m in frames:
+    for m, boxes, cov, is_done in need:
         split, base = m["split"], m["file"]
         # 优先取 samples 原图：yolo/images 已按 imgsz 缩到 640，拿它画 460 宽的预览
         # 等于反向放大，tile 边缘会糊，人工补框看不准。
@@ -340,11 +380,6 @@ def build_data() -> list:
             continue
         img = cv2.imdecode(np.fromfile(img_path, np.uint8), cv2.IMREAD_COLOR)
         h, w = img.shape[:2]
-        boxes = []
-        for line in open(os.path.join(YOLO, "labels", split, base + ".txt")):
-            p = line.split()
-            if len(p) >= 5:
-                boxes.append([int(p[0])] + [round(float(v), 6) for v in p[1:5]])
         scale = WIDTH / w
         small = cv2.resize(img, (WIDTH, max(1, round(h * scale))), interpolation=cv2.INTER_AREA)
         # 框直接烤进图里：canvas 那层如果被浏览器安全策略挡住，至少还能看见框
@@ -373,7 +408,11 @@ def build_data() -> list:
         data.append({
             "file": base, "src": m["src"], "w": w, "h": h, "scale": scale,
             "boxes": boxes, "img": base64.b64encode(buf.tobytes()).decode(),
+            "cov": cov, "recheck": is_done,
         })
+
+    # 复查帧优先，其余按覆盖率从低到高：最容易出错的最先看到
+    data.sort(key=lambda d: (not d["recheck"], d["cov"] if d["cov"] is not None else 1.0))
     return data
 
 

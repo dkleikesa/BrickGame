@@ -11,6 +11,8 @@
  .hint{color:#666}
  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;padding:14px}
  .card{background:#fff;border:1px solid #e2e2e6;border-radius:10px;padding:8px}
+ .card.recheck{border:2px solid #c00;box-shadow:0 0 0 3px rgba(204,0,0,.08)}
+ .cov{font-weight:600} .cov.low{color:#c00}
  .hd{display:flex;justify-content:space-between;font-size:12px;color:#555;margin-bottom:6px}
  canvas{display:block;width:100%;height:auto;background:#000;border-radius:6px;cursor:crosshair}
  .row{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
@@ -152,10 +154,14 @@ function build(){
   const host = document.getElementById('grid');
   DATA.forEach(d=>{
     const card = document.createElement('div');
-    card.className='card'; card.id='c-'+d.file;
+    card.className = 'card' + (d.recheck ? ' recheck' : ''); card.id='c-'+d.file;
     const w = Math.round(d.w*d.scale), h = Math.round(d.h*d.scale);
+    const covPct = d.cov == null ? null : Math.round(d.cov * 100);
+    const covTag = (d.recheck ? '⚠ 复查 · ' : '')
+      + (covPct == null ? '覆盖率未知'
+                        : '<span class="cov' + (covPct < 50 ? ' low' : '') + '">覆盖 ' + covPct + '%</span>');
     card.innerHTML =
-      '<div class="hd"><span>'+d.src+'</span><span>砖 '+d.boxes.filter(b=>b[0]===1).length+' 块</span></div>'+
+      '<div class="hd"><span>'+d.src+'</span><span>砖 '+d.boxes.filter(b=>b[0]===1).length+' 块 · '+covTag+'</span></div>'+
       '<canvas width="'+w+'" height="'+h+'"></canvas>'+
       '<div class="row"><button class="bd">重画棋盘</button>'+
       '<button class="ok">确认无误</button><span class="msg"></span></div>';
