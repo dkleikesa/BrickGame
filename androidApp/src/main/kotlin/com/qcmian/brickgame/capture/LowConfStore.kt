@@ -154,6 +154,9 @@ object LowConfStore {
                         total++
                     }
                 }
+                // 附上本进程 logcat：出问题时用户只需分享这一个 ZIP，
+                // 定位失败的原因（无 board 框 / 格距太小 / 残差超限 / 第几帧）都在里面。
+                addText(out, "logs/logcat.txt", Diagnostics.logcat())
             }
         } catch (e: Throwable) {
             Log.w(TAG, "打包失败", e)
@@ -172,6 +175,12 @@ object LowConfStore {
     private fun addEntry(out: ZipOutputStream, file: File, entryName: String = file.name) {
         out.putNextEntry(ZipEntry(entryName))
         file.inputStream().use { it.copyTo(out) }
+        out.closeEntry()
+    }
+
+    private fun addText(out: ZipOutputStream, entryName: String, text: String) {
+        out.putNextEntry(ZipEntry(entryName))
+        out.write(text.toByteArray(Charsets.UTF_8))
         out.closeEntry()
     }
 

@@ -50,4 +50,15 @@ object HintUiBus {
     var lowConfShots by mutableStateOf<List<File>>(emptyList())
 
     val lowConfCount: Int get() = lowConfShots.size
+
+    /**
+     * "定位失败"留档（`scan-fail/`）的帧数。
+     *
+     * 单独计数而不是塞进 [lowConfShots]：相册只展示低置信度那批，而分享/删除要覆盖两类 ——
+     * 否则定位失败的帧永远发不出去、也删不掉。
+     */
+    var scanFailCount by mutableStateOf(0)
+
+    /** 可分享/可删除的总帧数。 */
+    val captureCount: Int get() = lowConfCount + scanFailCount
 }
