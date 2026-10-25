@@ -61,6 +61,12 @@ class AutoSolverAgreementTest {
                     }
                 }
 
+                is AutoSolver.Outcome.Inconsistent ->
+                    fail("第 $trial 盘：随机盘面出现奇数类 ${outcome.oddClasses}\n${render(grid)}")
+
+                is AutoSolver.Outcome.MemoryLimited ->
+                    fail("默认配置不应触发死表满：$outcome")
+
                 is AutoSolver.Outcome.Unknown -> unknown++
             }
         }

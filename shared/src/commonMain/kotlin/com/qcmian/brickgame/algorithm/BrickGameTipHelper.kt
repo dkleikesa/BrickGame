@@ -1,5 +1,7 @@
 package com.qcmian.brickgame.algorithm
 
+import kotlin.random.Random
+
 /**
  * 一组可消除的同款砖。
  *
@@ -13,6 +15,64 @@ data class BrickMove(
     val pairRow: Int,
     val pairCol: Int,
 )
+
+/** 一个动作的 6 个坐标各占 10 bit（0..1023），合计 60 bit，能塞进一个 Long。 */
+private const val ACTION_COORD_BITS = 10
+private const val ACTION_COORD_MASK = 0x3FFL
+
+/** 把 [fromRow, fromCol, toRow, toCol, pairRow, pairCol] 打包成一个 Long，不产生数组。 */
+internal fun packAction(fr: Int, fc: Int, tr: Int, tc: Int, pr: Int, pc: Int): Long {
+    var v = 0L
+    v = v or (fr.toLong() and ACTION_COORD_MASK)
+    v = v or ((fc.toLong() and ACTION_COORD_MASK) shl ACTION_COORD_BITS)
+    v = v or ((tr.toLong() and ACTION_COORD_MASK) shl (ACTION_COORD_BITS * 2))
+    v = v or ((tc.toLong() and ACTION_COORD_MASK) shl (ACTION_COORD_BITS * 3))
+    v = v or ((pr.toLong() and ACTION_COORD_MASK) shl (ACTION_COORD_BITS * 4))
+    v = v or ((pc.toLong() and ACTION_COORD_MASK) shl (ACTION_COORD_BITS * 5))
+    return v
+}
+
+/** 解包到调用方给的 6 元 IntArray；求解器复用同一块 scratch，避免每动作分配。 */
+internal fun unpackAction(packed: Long, out: IntArray) {
+    out[0] = (packed and ACTION_COORD_MASK).toInt()
+    out[1] = ((packed ushr ACTION_COORD_BITS) and ACTION_COORD_MASK).toInt()
+    out[2] = ((packed ushr (ACTION_COORD_BITS * 2)) and ACTION_COORD_MASK).toInt()
+    out[3] = ((packed ushr (ACTION_COORD_BITS * 3)) and ACTION_COORD_MASK).toInt()
+    out[4] = ((packed ushr (ACTION_COORD_BITS * 4)) and ACTION_COORD_MASK).toInt()
+    out[5] = ((packed ushr (ACTION_COORD_BITS * 5)) and ACTION_COORD_MASK).toInt()
+}
+
+/**
+ * 求解器专用的动作缓冲：节点之间复用，不分配 `IntArray` / `ArrayList`。
+ *
+ * 动作用 [packAction] 压成 Long；典型容量 32，超过才扩容。
+ */
+internal class ActionBuffer(initialCapacity: Int = 32) {
+    private var data = LongArray(initialCapacity)
+    var size = 0
+        private set
+
+    operator fun get(index: Int): Long = data[index]
+
+    fun clear() {
+        size = 0
+    }
+
+    fun add(fr: Int, fc: Int, tr: Int, tc: Int, pr: Int, pc: Int) {
+        if (size == data.size) data = data.copyOf(data.size * 2)
+        data[size++] = packAction(fr, fc, tr, tc, pr, pc)
+    }
+
+    /** 原地 Fisher-Yates，随机数消耗顺序与 `Collections.shuffle` 一致，搜索序不变。 */
+    fun shuffle(random: Random) {
+        for (i in size downTo 2) {
+            val j = random.nextInt(i)
+            val tmp = data[i - 1]
+            data[i - 1] = data[j]
+            data[j] = tmp
+        }
+    }
+}
 
 /**
  * 方块消除游戏的提示与执行逻辑。
@@ -77,19 +137,296 @@ object BrickGameTipHelper {
      * 能不能走一律以 [actionStep] 的判定为准。
      */
     fun findActions(grid: Array<IntArray>): List<IntArray> {
-        val moves = ArrayList<IntArray>()
+        val near = Nearest(grid.size, grid[0].size)
+        val buffer = ActionBuffer()
+        findActionsInto(grid, near, buffer)
+        val out = ArrayList<IntArray>(buffer.size)
+        val action = IntArray(6)
+        for (i in 0 until buffer.size) {
+            unpackAction(buffer[i], action)
+            out.add(action.copyOf())
+        }
+        return out
+    }
+
+    /**
+     * 求解器专用入口：最近邻索引表 + 动作缓冲都由调用方复用，热点路径零分配。
+     *
+     * 旧实现每个节点要扫 450 多次"到最近非空"；现在先建表，再按"空格 + 左右/上下
+     * 最近砖"反查生成动作，动作直接压成 Long 写进 [out]。
+     */
+    internal fun findActionsInto(grid: Array<IntArray>, near: Nearest, out: ActionBuffer) {
         val rows = grid.size
         val cols = grid[0].size
+        require(near.rows == rows && near.cols == cols) {
+            "Nearest 尺寸不匹配：${near.rows}x${near.cols} vs ${rows}x${cols}"
+        }
+        near.prepare(grid)
+        out.clear()
+        addInPlaceMoves(grid, near, out)
+        addHorizontalMoves(grid, near, out)
+        addVerticalMoves(grid, near, out)
+    }
 
-        for (row in 0 until rows) {
-            moveRight(grid, row, moves)
-            moveLeft(grid, row, moves)
+    /** 原地消：只看右/下方向，保证一对砖只从行优先序靠前的那一端报一次。 */
+    private fun addInPlaceMoves(grid: Array<IntArray>, near: Nearest, moves: ActionBuffer) {
+        val cols = near.cols
+        for (r in 0 until near.rows) {
+            val base = r * cols
+            for (c in 0 until cols) {
+                val cls = grid[r][c]
+                if (cls == BACKGROUND) continue
+                val idx = base + c
+                val right = near.right[idx]
+                if (right >= 0 && grid[r][right] == cls) {
+                    moves.add(r, c, r, c, r, right)
+                }
+                val down = near.down[idx]
+                if (down >= 0 && grid[down][c] == cls) {
+                    moves.add(r, c, r, c, down, c)
+                }
+            }
         }
-        for (col in 0 until cols) {
-            moveDown(grid, col, moves)
-            moveUp(grid, col, moves)
+    }
+
+    /**
+     * 横向移动：按"空段 + 紧邻砖段"枚举，和原实现的区域语义一致。
+     *
+     * 关键点（踩过的坑）：落点不一定是空位。把一块砖往空段方向拖，会把它和空段之间的
+     * 砖一起顶走，落点可以是砖段里的某一格。所以目标 t 的范围是
+     * `[砖段起点+1, 砖段终点+空段长度]`，再从窗口里反查"哪块砖能落到 t"。
+     */
+    private fun addHorizontalMoves(grid: Array<IntArray>, near: Nearest, moves: ActionBuffer) {
+        val rows = near.rows
+        val cols = near.cols
+        for (r in 0 until rows) {
+            var p = 0
+            while (p < cols) {
+                if (grid[r][p] != BACKGROUND) { p++; continue }
+                val emptyStart = p
+                while (p < cols && grid[r][p] == BACKGROUND) p++
+                val emptyEnd = p - 1
+                val emptySize = emptyEnd - emptyStart + 1
+
+                // 空段左边的砖段：向右拖进空段
+                if (emptyStart > 0) {
+                    var brickStart = emptyStart - 1
+                    while (brickStart > 0 && grid[r][brickStart - 1] != BACKGROUND) brickStart--
+                    horizontalToRight(grid, near, moves, r, brickStart, emptyStart - 1, emptySize)
+                }
+                // 空段右边的砖段：向左拖进空段
+                if (emptyEnd + 1 < cols) {
+                    var brickEnd = emptyEnd + 1
+                    while (brickEnd + 1 < cols && grid[r][brickEnd + 1] != BACKGROUND) brickEnd++
+                    horizontalToLeft(grid, near, moves, r, emptyEnd + 1, brickEnd, emptySize)
+                }
+            }
         }
-        return uniqueAction(moves)
+    }
+
+    private fun horizontalToRight(
+        grid: Array<IntArray>, near: Nearest, moves: ActionBuffer,
+        row: Int, brickStart: Int, brickEnd: Int, emptySize: Int,
+    ) {
+        val cols = near.cols
+        val runMask = classMaskRow(grid, row, brickStart, brickEnd)
+        val targetFirst = brickStart + 1
+        val targetLast = brickEnd + emptySize
+        for (t in targetFirst..targetLast) {
+            val lo = maxOf(brickStart, t - emptySize)
+            val hi = minOf(brickEnd, t - 1)
+            if (lo > hi) continue
+            val idx = row * cols + t
+            val up = near.up[idx]
+            val down = near.down[idx]
+            val upClass = if (up >= 0) grid[up][t] else BACKGROUND
+            val downClass = if (down >= 0) grid[down][t] else BACKGROUND
+            if (upClass == BACKGROUND && downClass == BACKGROUND) continue
+            if (!mayContain(runMask, upClass) && !mayContain(runMask, downClass)) continue
+            for (b in lo..hi) {
+                val cls = grid[row][b]
+                if (cls == upClass) moves.add(row, b, row, t, up, t)
+                if (cls == downClass) moves.add(row, b, row, t, down, t)
+            }
+        }
+    }
+
+    private fun horizontalToLeft(
+        grid: Array<IntArray>, near: Nearest, moves: ActionBuffer,
+        row: Int, brickStart: Int, brickEnd: Int, emptySize: Int,
+    ) {
+        val cols = near.cols
+        val runMask = classMaskRow(grid, row, brickStart, brickEnd)
+        val targetFirst = brickStart - emptySize
+        val targetLast = brickEnd - 1
+        for (t in targetFirst..targetLast) {
+            val lo = maxOf(brickStart, t + 1)
+            val hi = minOf(brickEnd, t + emptySize)
+            if (lo > hi) continue
+            val idx = row * cols + t
+            val up = near.up[idx]
+            val down = near.down[idx]
+            val upClass = if (up >= 0) grid[up][t] else BACKGROUND
+            val downClass = if (down >= 0) grid[down][t] else BACKGROUND
+            if (upClass == BACKGROUND && downClass == BACKGROUND) continue
+            if (!mayContain(runMask, upClass) && !mayContain(runMask, downClass)) continue
+            for (b in lo..hi) {
+                val cls = grid[row][b]
+                if (cls == upClass) moves.add(row, b, row, t, up, t)
+                if (cls == downClass) moves.add(row, b, row, t, down, t)
+            }
+        }
+    }
+
+    /** 纵向移动，逻辑与 [addHorizontalMoves] 对称：空段 + 上/下紧邻砖段。 */
+    private fun addVerticalMoves(grid: Array<IntArray>, near: Nearest, moves: ActionBuffer) {
+        val rows = near.rows
+        val cols = near.cols
+        for (c in 0 until cols) {
+            var p = 0
+            while (p < rows) {
+                if (grid[p][c] != BACKGROUND) { p++; continue }
+                val emptyStart = p
+                while (p < rows && grid[p][c] == BACKGROUND) p++
+                val emptyEnd = p - 1
+                val emptySize = emptyEnd - emptyStart + 1
+
+                // 空段上方的砖段：向下拖进空段
+                if (emptyStart > 0) {
+                    var brickStart = emptyStart - 1
+                    while (brickStart > 0 && grid[brickStart - 1][c] != BACKGROUND) brickStart--
+                    verticalToDown(grid, near, moves, c, brickStart, emptyStart - 1, emptySize)
+                }
+                // 空段下方的砖段：向上拖进空段
+                if (emptyEnd + 1 < rows) {
+                    var brickEnd = emptyEnd + 1
+                    while (brickEnd + 1 < rows && grid[brickEnd + 1][c] != BACKGROUND) brickEnd++
+                    verticalToUp(grid, near, moves, c, emptyEnd + 1, brickEnd, emptySize)
+                }
+            }
+        }
+    }
+
+    private fun verticalToDown(
+        grid: Array<IntArray>, near: Nearest, moves: ActionBuffer,
+        col: Int, brickStart: Int, brickEnd: Int, emptySize: Int,
+    ) {
+        val cols = near.cols
+        val runMask = classMaskCol(grid, col, brickStart, brickEnd)
+        val targetFirst = brickStart + 1
+        val targetLast = brickEnd + emptySize
+        for (t in targetFirst..targetLast) {
+            val lo = maxOf(brickStart, t - emptySize)
+            val hi = minOf(brickEnd, t - 1)
+            if (lo > hi) continue
+            val idx = t * cols + col
+            val left = near.left[idx]
+            val right = near.right[idx]
+            val leftClass = if (left >= 0) grid[t][left] else BACKGROUND
+            val rightClass = if (right >= 0) grid[t][right] else BACKGROUND
+            if (leftClass == BACKGROUND && rightClass == BACKGROUND) continue
+            if (!mayContain(runMask, leftClass) && !mayContain(runMask, rightClass)) continue
+            for (b in lo..hi) {
+                val cls = grid[b][col]
+                if (cls == leftClass) moves.add(b, col, t, col, t, left)
+                if (cls == rightClass) moves.add(b, col, t, col, t, right)
+            }
+        }
+    }
+
+    private fun verticalToUp(
+        grid: Array<IntArray>, near: Nearest, moves: ActionBuffer,
+        col: Int, brickStart: Int, brickEnd: Int, emptySize: Int,
+    ) {
+        val cols = near.cols
+        val runMask = classMaskCol(grid, col, brickStart, brickEnd)
+        val targetFirst = brickStart - emptySize
+        val targetLast = brickEnd - 1
+        for (t in targetFirst..targetLast) {
+            val lo = maxOf(brickStart, t + 1)
+            val hi = minOf(brickEnd, t + emptySize)
+            if (lo > hi) continue
+            val idx = t * cols + col
+            val left = near.left[idx]
+            val right = near.right[idx]
+            val leftClass = if (left >= 0) grid[t][left] else BACKGROUND
+            val rightClass = if (right >= 0) grid[t][right] else BACKGROUND
+            if (leftClass == BACKGROUND && rightClass == BACKGROUND) continue
+            if (!mayContain(runMask, leftClass) && !mayContain(runMask, rightClass)) continue
+            for (b in lo..hi) {
+                val cls = grid[b][col]
+                if (cls == leftClass) moves.add(b, col, t, col, t, left)
+                if (cls == rightClass) moves.add(b, col, t, col, t, right)
+            }
+        }
+    }
+
+    /** 一段砖的类别位图；类别超过 63 时退回 -1（每次都扫窗口，不靠位图剪枝）。 */
+    private fun classMaskRow(grid: Array<IntArray>, row: Int, from: Int, to: Int): Long {
+        var mask = 0L
+        for (i in from..to) {
+            val v = grid[row][i]
+            if (v !in 1..63) return -1L
+            mask = mask or (1L shl v)
+        }
+        return mask
+    }
+
+    private fun classMaskCol(grid: Array<IntArray>, col: Int, from: Int, to: Int): Long {
+        var mask = 0L
+        for (i in from..to) {
+            val v = grid[i][col]
+            if (v !in 1..63) return -1L
+            mask = mask or (1L shl v)
+        }
+        return mask
+    }
+
+    private fun mayContain(mask: Long, cls: Int): Boolean {
+        if (cls <= 0) return false
+        if (cls >= 64) return mask == -1L
+        return (mask and (1L shl cls)) != 0L
+    }
+
+    /**
+     * 一张盘面的"四个方向最近非空格"索引表，按尺寸复用。
+     *
+     * 索引 `i = row * cols + col`；`left` / `right` 存最近非空的**列号**，
+     * `up` / `down` 存**行号**，-1 表示该方向没有非空格。
+     */
+    internal class Nearest(val rows: Int, val cols: Int) {
+        val left = IntArray(rows * cols)
+        val right = IntArray(rows * cols)
+        val up = IntArray(rows * cols)
+        val down = IntArray(rows * cols)
+
+        fun prepare(grid: Array<IntArray>) {
+            for (r in 0 until rows) {
+                val base = r * cols
+                var last = -1
+                for (c in 0 until cols) {
+                    left[base + c] = last
+                    if (grid[r][c] != BACKGROUND) last = c
+                }
+                last = -1
+                for (c in cols - 1 downTo 0) {
+                    right[base + c] = last
+                    if (grid[r][c] != BACKGROUND) last = c
+                }
+            }
+            for (c in 0 until cols) {
+                var last = -1
+                for (r in 0 until rows) {
+                    up[r * cols + c] = last
+                    if (grid[r][c] != BACKGROUND) last = r
+                }
+                last = -1
+                for (r in rows - 1 downTo 0) {
+                    down[r * cols + c] = last
+                    if (grid[r][c] != BACKGROUND) last = r
+                }
+            }
+        }
     }
 
     /**
@@ -170,299 +507,6 @@ object BrickGameTipHelper {
         }
         return null
     }
-
-    /**
-     * 精确去重：同一组 (from, to, paired) 只留一条（枚举有多条路径能撞出同一个动作）。
-     *
-     * 以前这里按"A->B 与 B->A 视为同一个 move"去重，落到 6 元动作上就等于按 (from, to) 去重 ——
-     * 于是"落点相同、配对不同"的那条被悄悄吃掉：一块砖同时和左右（或上下）两块同款对齐时
-     * 游戏让玩家二选一，两条分支本来都是合法的，少一条就可能少掉唯一的解。
-     */
-    private fun uniqueAction(list: List<IntArray>): List<IntArray> {
-        val result = ArrayList<IntArray>(list.size)
-        val seen = HashSet<Long>(list.size * 2)
-        for (origin in list) {
-            if (seen.add(packAction(origin))) result.add(origin)
-        }
-        return result
-    }
-
-    /**
-     * 6 个坐标打包成一个 Long 做去重 key。
-     *
-     * 坐标最大 20 行/16 列，每项 8 bit 足够（48 bit < 64）；相比原来
-     * `result.none { 逐项比较 }` 的 O(k²)，去重降到 O(k)。顺序仍由 [result] 保持。
-     */
-    private fun packAction(a: IntArray): Long {
-        var key = 0L
-        for (i in 0 until 6) key = (key shl 8) or (a[i].toLong() and 0xFF)
-        return key
-    }
-
-    // ---------------------- 纵向（列内移动，行内匹配） ----------------------
-
-    private fun moveUp(grid: Array<IntArray>, colIndex: Int, moves: MutableList<IntArray>) {
-        var startIndex = 0
-        // 顶部连续的方块不需要移动，直接匹配
-        var i = 0
-        while (i < grid.size && grid[i][colIndex] != BACKGROUND) {
-            matchRow(grid, i, colIndex, i, colIndex, moves)
-            i++
-        }
-        while (true) {
-            val region = findNextUpMoveRegionInCol(grid, colIndex, startIndex)
-            if (!isValidMoveRegion(region)) return
-            val emptySize = region[1] - region[0] + 1
-            for (brick in region[2]..region[3]) {
-                for (step in 0..emptySize) {
-                    matchRow(grid, brick, colIndex, brick - step, colIndex, moves)
-                }
-            }
-            startIndex = region[3] + 1
-        }
-    }
-
-    private fun moveDown(grid: Array<IntArray>, colIndex: Int, moves: MutableList<IntArray>) {
-        var endIndex = grid.size - 1
-        var i = endIndex
-        while (i >= 0 && grid[i][colIndex] != BACKGROUND) {
-            matchRow(grid, i, colIndex, i, colIndex, moves)
-            i--
-        }
-        while (true) {
-            val region = findNextDownMoveRegionInCol(grid, colIndex, endIndex)
-            if (!isValidMoveRegion(region)) return
-            val emptySize = region[1] - region[0] + 1
-            for (brick in region[3] downTo region[2]) {
-                for (step in 0..emptySize) {
-                    matchRow(grid, brick, colIndex, brick + step, colIndex, moves)
-                }
-            }
-            endIndex = region[2] - 1
-        }
-    }
-
-    /**
-     * 自上而下查找 "空位段 + 紧随其后的方块段"。
-     * 返回 [emptyStart, emptyEnd, brickStart, brickEnd]，找不到的项为 -1。
-     */
-    private fun findNextUpMoveRegionInCol(grid: Array<IntArray>, colIndex: Int, startIndex: Int): IntArray {
-        var emptyStart = -1
-        var emptyEnd = -1
-        var brickStart = -1
-        var brickEnd = -1
-        val rows = grid.size
-        if (startIndex >= rows) {
-            return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-        }
-        for (i in startIndex until rows) {
-            if (grid[i][colIndex] != BACKGROUND) {
-                if (emptyEnd >= 0) {
-                    if (brickEnd < 0) brickEnd = i
-                    if (brickStart < 0) brickStart = i
-                    if (i == brickEnd + 1) brickEnd = i
-                }
-            } else {
-                if (emptyEnd < 0) emptyEnd = i
-                if (emptyStart < 0) emptyStart = i
-                if (i == emptyEnd + 1) emptyEnd = i
-                if (brickStart >= 0) break
-            }
-        }
-        return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-    }
-
-    /**
-     * 自下而上查找 "空位段 + 紧随其后的方块段"。
-     * 返回 [emptyStart, emptyEnd, brickStart, brickEnd]，找不到的项为 -1。
-     */
-    private fun findNextDownMoveRegionInCol(grid: Array<IntArray>, colIndex: Int, endIndex: Int): IntArray {
-        var emptyStart = -1
-        var emptyEnd = -1
-        var brickStart = -1
-        var brickEnd = -1
-        if (endIndex <= 0) {
-            return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-        }
-        for (i in endIndex downTo 0) {
-            if (grid[i][colIndex] != BACKGROUND) {
-                if (emptyEnd >= 0) {
-                    if (brickEnd < 0) brickEnd = i
-                    if (brickStart < 0) brickStart = i
-                    if (i == brickStart - 1) brickStart = i
-                }
-            } else {
-                if (emptyEnd < 0) emptyEnd = i
-                if (emptyStart < 0) emptyStart = i
-                if (i == emptyStart - 1) emptyStart = i
-                if (brickStart >= 0) break
-            }
-        }
-        return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-    }
-
-    /**
-     * 在 rowIndex 行内，以 colIndex 为起点向左、向右各找最近的非空方块，
-     * 若与 (targetRow, targetCol) 同类则记录一个 move。
-     */
-    private fun matchRow(
-        grid: Array<IntArray>, targetRow: Int, targetCol: Int,
-        rowIndex: Int, colIndex: Int, moves: MutableList<IntArray>
-    ) {
-        val target = grid[targetRow][targetCol]
-
-        // 向左
-        for (i in colIndex - 1 downTo 0) {
-            if (grid[rowIndex][i] != BACKGROUND) {
-                if (grid[rowIndex][i] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, rowIndex, i))
-                }
-                break
-            }
-        }
-
-        // 向右
-        for (i in colIndex + 1 until grid[0].size) {
-            if (grid[rowIndex][i] != BACKGROUND) {
-                if (grid[rowIndex][i] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, rowIndex, i))
-                }
-                return
-            }
-        }
-    }
-
-    // ---------------------- 横向（行内移动，列内匹配） ----------------------
-
-    private fun moveLeft(grid: Array<IntArray>, rowIndex: Int, moves: MutableList<IntArray>) {
-        var startIndex = 0
-        val row = grid[rowIndex]
-        var i = 0
-        while (i < row.size && row[i] != BACKGROUND) {
-            matchColumn(grid, rowIndex, i, rowIndex, i, moves)
-            i++
-        }
-        while (true) {
-            val region = findNextLeftMoveRegionInRow(grid, rowIndex, startIndex)
-            if (!isValidMoveRegion(region)) return
-            val emptySize = region[1] - region[0] + 1
-            for (brick in region[2]..region[3]) {
-                for (step in 0..emptySize) {
-                    matchColumn(grid, rowIndex, brick, rowIndex, brick - step, moves)
-                }
-            }
-            startIndex = region[3] + 1
-        }
-    }
-
-    private fun moveRight(grid: Array<IntArray>, rowIndex: Int, moves: MutableList<IntArray>) {
-        var endIndex = grid[0].size - 1
-        val row = grid[rowIndex]
-        var i = endIndex
-        while (i >= 0 && row[i] != BACKGROUND) {
-            matchColumn(grid, rowIndex, i, rowIndex, i, moves)
-            i--
-        }
-        while (true) {
-            val region = findNextRightMoveRegionInRow(grid, rowIndex, endIndex)
-            if (!isValidMoveRegion(region)) return
-            val emptySize = region[1] - region[0] + 1
-            for (brick in region[3] downTo region[2]) {
-                for (step in 0..emptySize) {
-                    matchColumn(grid, rowIndex, brick, rowIndex, brick + step, moves)
-                }
-            }
-            endIndex = region[2] - 1
-        }
-    }
-
-    /** 自左而右查找 "空位段 + 紧随其后的方块段"。 */
-    private fun findNextLeftMoveRegionInRow(grid: Array<IntArray>, rowIndex: Int, startIndex: Int): IntArray {
-        val row = grid[rowIndex]
-        var emptyStart = -1
-        var emptyEnd = -1
-        var brickStart = -1
-        var brickEnd = -1
-        val cols = grid[0].size
-        if (startIndex >= cols) {
-            return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-        }
-        for (i in startIndex until cols) {
-            if (row[i] != BACKGROUND) {
-                if (emptyEnd >= 0) {
-                    if (brickEnd < 0) brickEnd = i
-                    if (brickStart < 0) brickStart = i
-                    if (i == brickEnd + 1) brickEnd = i
-                }
-            } else {
-                if (emptyEnd < 0) emptyEnd = i
-                if (emptyStart < 0) emptyStart = i
-                if (i == emptyEnd + 1) emptyEnd = i
-                if (brickStart >= 0) break
-            }
-        }
-        return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-    }
-
-    /** 自右而左查找 "空位段 + 紧随其后的方块段"。 */
-    private fun findNextRightMoveRegionInRow(grid: Array<IntArray>, rowIndex: Int, endIndex: Int): IntArray {
-        val row = grid[rowIndex]
-        var emptyStart = -1
-        var emptyEnd = -1
-        var brickStart = -1
-        var brickEnd = -1
-        if (endIndex <= 0) {
-            return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-        }
-        for (i in endIndex downTo 0) {
-            if (row[i] != BACKGROUND) {
-                if (emptyEnd >= 0) {
-                    if (brickEnd < 0) brickEnd = i
-                    if (brickStart < 0) brickStart = i
-                    if (i == brickStart - 1) brickStart = i
-                }
-            } else {
-                if (emptyEnd < 0) emptyEnd = i
-                if (emptyStart < 0) emptyStart = i
-                if (i == emptyStart - 1) emptyStart = i
-                if (brickStart >= 0) break
-            }
-        }
-        return intArrayOf(emptyStart, emptyEnd, brickStart, brickEnd)
-    }
-
-    /**
-     * 在 colIndex 列内，以 rowIndex 为起点向上、向下各找最近的非空方块，
-     * 若与 (targetRow, targetCol) 同类则记录一个 move。
-     */
-    private fun matchColumn(
-        grid: Array<IntArray>, targetRow: Int, targetCol: Int,
-        rowIndex: Int, colIndex: Int, moves: MutableList<IntArray>
-    ) {
-        val target = grid[targetRow][targetCol]
-
-        // 向上
-        for (i in rowIndex - 1 downTo 0) {
-            if (grid[i][colIndex] != BACKGROUND) {
-                if (grid[i][colIndex] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, i, colIndex))
-                }
-                break
-            }
-        }
-
-        // 向下
-        for (i in rowIndex + 1 until grid.size) {
-            if (grid[i][colIndex] != BACKGROUND) {
-                if (grid[i][colIndex] == target) {
-                    moves.add(intArrayOf(targetRow, targetCol, rowIndex, colIndex, i, colIndex))
-                }
-                return
-            }
-        }
-    }
-
-    private fun isValidMoveRegion(region: IntArray): Boolean = region.all { it >= 0 }
 
     // ------------------------------------------------------------------
     // 执行一步操作

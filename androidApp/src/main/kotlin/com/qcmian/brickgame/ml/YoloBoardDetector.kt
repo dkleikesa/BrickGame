@@ -100,21 +100,37 @@ class YoloBoardDetector(context: Context) : Closeable {
      * 链只剩 YOLO 一个定位器（OpenCV 已删），构造一失败就整帧定位不了。CPU 慢，但
      * 至少还能用，也能把 `Error applying delegate` 留在 logcat 里而不是静默变成
      * "定位失败"。
+     *
+     * 返回值第二项记录**这次到底挂没挂上 GPU**：`GpuDelegate()` 创建成功不等于
+     * Interpreter 挂载成功，之前只有失败日志、没有成功日志，线上无法确认跑在哪。
      */
-    private val interp: Interpreter = runCatching {
-        Interpreter(
-            loadModel(context, "brick_yolo.tflite"),
-            Interpreter.Options().apply {
-                gpuDelegate?.let { addDelegate(it) }
-                setNumThreads(4)
-            },
-        )
-    }.onFailure {
-        Log.w(TAG, "GPU delegate 挂不上 YOLO 模型，回退 CPU", it)
-    }.getOrNull() ?: Interpreter(
-        loadModel(context, "brick_yolo.tflite"),
-        Interpreter.Options().apply { setNumThreads(4) },
-    )
+    private val backend: Pair<Interpreter, Boolean> = run {
+        val gpuInterp = gpuDelegate?.let { delegate ->
+            runCatching {
+                Interpreter(
+                    loadModel(context, "brick_yolo.tflite"),
+                    Interpreter.Options().apply {
+                        addDelegate(delegate)
+                        setNumThreads(4)
+                    },
+                )
+            }.onFailure {
+                Log.w(TAG, "GPU delegate 挂不上 YOLO 模型，回退 CPU", it)
+            }.getOrNull()
+        }
+        if (gpuInterp != null) {
+            gpuInterp to true
+        } else {
+            Interpreter(
+                loadModel(context, "brick_yolo.tflite"),
+                Interpreter.Options().apply { setNumThreads(4) },
+            ) to false
+        }
+    }
+    private val interp: Interpreter = backend.first
+
+    /** 这次解释器是否真的挂了 GPU delegate（TFLite 仍可能把少量算子回退 CPU）。 */
+    val usingGpu: Boolean = backend.second
 
     /**
      * 输入/输出形状只在构造时读一次。`allocateTensors()` 顺带把解释器准备好，
@@ -186,13 +202,17 @@ class YoloBoardDetector(context: Context) : Closeable {
         }
         Log.i(
             TAG,
+            "YOLO 后端：${if (usingGpu) "GPU delegate（TFLite 可能仍有少量算子回退 CPU）" else "CPU（GPU delegate 不可用/挂载失败）"}",
+        )
+        Log.i(
+            TAG,
             "模型 IO：输入 ${inShape.contentToString()} 输出 ${outShape.contentToString()}" +
                 "（${if (nchw) "NCHW" else "NHWC"}，${inW}x${inH}，${anchors} anchors）",
         )
     }
 
     /** 模型版本与耗时，控制条上要能看出这一帧到底是谁算的。 */
-    val label: String = "YOLO nano ${inW}x${inH}"
+    val label: String = "YOLO nano ${inW}x${inH} ${if (usingGpu) "GPU" else "CPU"}"
 
     fun scan(frame: Bitmap): BoardScan? {
         val t0 = System.nanoTime()
@@ -216,7 +236,7 @@ class YoloBoardDetector(context: Context) : Closeable {
 
         val boxes = decode(ox, oy, scale)
         val tDec = System.nanoTime()
-        Log.i(TAG, "${inW}x${inH} 原始输出最高分 board=${maxBoardScore} tile=${maxTileScore}，" +
+        Log.i(TAG, "${if (usingGpu) "GPU" else "CPU"} ${inW}x${inH} 原始输出最高分 board=${maxBoardScore} tile=${maxTileScore}，" +
             "过阈值后 board=${boxes.count { it.cls == CLS_BOARD }} tile=${boxes.count { it.cls == CLS_TILE }}" +
             "｜分段(ms) letterbox=${(tLb - t0) / 1_000_000} fill=${(tFill - tLb) / 1_000_000} " +
             "推理=${(tRun - tFill) / 1_000_000} 解码=${(tDec - tRun) / 1_000_000} " +

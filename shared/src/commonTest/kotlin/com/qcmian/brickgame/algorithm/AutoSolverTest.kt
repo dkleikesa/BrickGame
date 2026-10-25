@@ -112,6 +112,42 @@ class AutoSolverTest {
         }
     }
 
+    @Test
+    fun progressReportsCumulativeNodesAcrossAttempts() {
+        // 每轮只给 0 个节点：第一次 dfs 走 1 个节点就被叫停，重启后累计继续涨。
+        // 这种"小预算重启"正是进度最容易停在 0 的场景，所以每轮结束也必须报一次。
+        val seen = mutableListOf<Long>()
+
+        val outcome = AutoSolver.solve(
+            arrayOf(intArrayOf(1, 2, 1, 2)),
+            AutoSolver.Config(nodesPerAttempt = 0, maxAttempts = 3),
+            onProgress = { seen += it },
+        )
+
+        assertIs<AutoSolver.Outcome.Unknown>(outcome)
+        assertEquals(listOf(1L, 2L, 3L), seen, "每次尝试结束都要报累计节点数，不能每次从 0 重来")
+        assertEquals(seen.last(), outcome.nodes)
+    }
+
+    @Test
+    fun progressReportsNodeLevelCounts() {
+        // 512 节点的预算至少要跨过 256 这个节点级回调点；这盘真机截图要几百个节点才解完。
+        val seen = mutableListOf<Long>()
+
+        val outcome = AutoSolver.solve(
+            REAL_BOARD_A.map { it.copyOf() }.toTypedArray(),
+            AutoSolver.Config(nodesPerAttempt = 512, maxAttempts = 1),
+            onProgress = { seen += it },
+        )
+
+        assertTrue(seen.isNotEmpty(), "至少要报一次进度")
+        assertEquals(seen.sorted(), seen, "累计节点数必须单调不减：$seen")
+        assertTrue(seen.count { it % 256 == 0L } >= 1, "节点级进度必须按 256 的倍数报：$seen")
+        if (outcome is AutoSolver.Outcome.Unknown) {
+            assertEquals(outcome.nodes, seen.last(), "尝试结束时要补报真实总数，不能少掉最后的零头")
+        }
+    }
+
     // ---------------------------------------------------------------- 工具
 
     /** 把解逐步喂回 [BrickGameTipHelper.actionStep]，确认最后真的清空、且每一步都合法。 */

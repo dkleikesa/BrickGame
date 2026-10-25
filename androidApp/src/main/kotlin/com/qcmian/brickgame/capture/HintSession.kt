@@ -23,10 +23,12 @@ import com.qcmian.brickgame.vision.HintEngine
 import com.qcmian.brickgame.vision.BoardState
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /** 取一帧屏幕；无障碍服务（takeScreenshot）与调试用的"喂图片"都实现它。 */
 fun interface ScreenshotProvider {
@@ -148,6 +150,40 @@ class HintSession(
     private var autoSteps = 0
 
     /**
+     * 本次求解已探索的节点数（控制条上的"已尝试了多少步"）。
+     *
+     * solver 在 worker 线程每 256 个节点写一次，主线程每秒读一次：
+     * 首帧预算 10M 节点 / 300 秒，如果状态行只写"求解中…"，用户对着一条几分钟
+     * 不动的字分不清是卡死还是还在算。这个数每秒变一次，本身就是"还活着"的证据。
+     */
+    private val solveNodes = AtomicLong(0)
+
+    /** 求解进度心跳的状态（只在主线程读写）。 */
+    private var solving = false
+    private var solveHint = ""
+    private var solveRemaining = 0
+    private var solveStartMs = 0L
+    private var solveBudgetMs = 0L
+
+    /** 每秒把进度写进控制条；求解结束时由 [stopSolveProgress] 摘掉。 */
+    private val solveProgressTick = object : Runnable {
+        override fun run() {
+            if (!solving || !running.get() || !auto.get()) return
+            val elapsedS = (SystemClock.elapsedRealtime() - solveStartMs) / 1000
+            updateBar(
+                solveHint,
+                "已尝试 ${formatSteps(solveNodes.get())} 步 · 剩 $solveRemaining 块",
+            )
+            // 右上角的"总耗时"临时换成求解计时；无挂钟时只显示已用时长
+            overlay.setBarTiming(
+                if (solveBudgetMs > 0) "${elapsedS}s/${solveBudgetMs / 1000}s"
+                else "${elapsedS}s（手动停止）",
+            )
+            main.postDelayed(this, SOLVE_PROGRESS_MS)
+        }
+    }
+
+    /**
      * **整盘计划**：一次 [AutoSolver.solve] 算出来的完整解，之后逐步执行，不再每步重算。
      *
      * 为什么必须"一次算完再逐步点"（第一版是每帧重算，实测很快就失败）：
@@ -187,8 +223,8 @@ class HintSession(
     /**
      * 本次自动运行是否已经做过第一次完整求解。
      *
-     * 只用来区分控制条文案（首帧 / 重算）；预算已经统一，两者都是
-     * [SOLVE_CONFIG] / [SOLVE_TIME_BUDGET_MS]。
+     * 只用来区分控制条文案（首帧 / 重算）和首帧那份更大的搜索预算
+     * （见 [SOLVE_CONFIG_FIRST] / [SOLVE_TIME_BUDGET_FIRST_MS]）。
      */
     private var deepSolveDone = false
 
@@ -282,6 +318,7 @@ class HintSession(
         capturing.set(false)
         main.removeCallbacks(captureTimeout)
         main.removeCallbacks(autoTick)
+        stopSolveProgress()
         generation.incrementAndGet()          // 让还在跑的那一帧的结果失效
         overlay.hide()
         overlay.setBarAuto(false)
@@ -327,6 +364,7 @@ class HintSession(
     fun stopAuto() {
         if (!auto.getAndSet(false)) return
         main.removeCallbacks(autoTick)
+        stopSolveProgress()
         overlay.setBarAuto(false)
         HintUiBus.state = HintUiBus.state.copy(auto = false)
         updateBar("已停止", "已消 $autoSteps 对")
@@ -373,7 +411,7 @@ class HintSession(
         val t0 = SystemClock.elapsedRealtime()
         return classifierProvider(want).also {
             loaded = it
-            Log.i(TAG, "识别模型加载完成：${want.label}，耗时 ${SystemClock.elapsedRealtime() - t0}ms")
+            Log.i(TAG, "识别模型加载完成：${it.name}，耗时 ${SystemClock.elapsedRealtime() - t0}ms")
         }
     }
 
@@ -681,34 +719,104 @@ class HintSession(
     private fun solveAndPlan(result: HintPipeline.Result) {
         val grid = result.state.asGrid()
         val gen = generation.get()
-        // 首帧和重算用同一份预算（12 万×16 / 120s）：原来重算只给 8 秒，
-        // 8 秒一到就 Unknown、整局停在“已消 0 对”。现在只保留 120 秒这一道挂钟限制。
+        // 首帧目标是一次算出**最终解**（或证明无解），所以单次搜索给到 1000 万节点、
+        // 挂钟 300 秒；重算只在计划失效时发生，仍用 12 万×16 / 120 秒。
         val firstSolve = !deepSolveDone
         deepSolveDone = true
-        val config = SOLVE_CONFIG
-        val budgetMs = SOLVE_TIME_BUDGET_MS
+        val config = if (firstSolve) SOLVE_CONFIG_FIRST else SOLVE_CONFIG
+        val budgetMs = if (firstSolve) SOLVE_TIME_BUDGET_FIRST_MS else SOLVE_TIME_BUDGET_MS
+        val nodesText = if (config.nodesPerAttempt == Int.MAX_VALUE) "无上限" else "${config.nodesPerAttempt}"
         Log.i(
             TAG,
             "求解开始：${if (firstSolve) "首帧" else "重算"}（第 $planRounds 轮），" +
-                "节点 ${config.nodesPerAttempt}×${config.maxAttempts}，挂钟 ${budgetMs}ms",
+                "节点 ${nodesText}×${config.maxAttempts}，" +
+                "挂钟 ${if (budgetMs > 0) "${budgetMs}ms" else "无（手动停止）"}",
         )
-        updateBar(
-            if (firstSolve) "首帧求解中…（最长 ${budgetMs / 1000} 秒）" else "求解中…",
-            "剩 ${countBricks(result.state)} 块",
+        // 一进搜索就把进度立起来：第一秒先显示 0 步，之后每秒由 [solveProgressTick] 刷新。
+        // 以前只留一句"求解中…（最长 300 秒）"，几分钟不动，分不清是卡死还是还在算。
+        startSolveProgress(
+            hint = if (firstSolve) "首帧求解中…" else "求解中…",
+            remaining = countBricks(result.state),
+            budgetMs = budgetMs,
         )
 
         worker.post {
             // 节点预算拦不住"单次尝试就是慢"的病态盘，再压一道挂钟上限
             val solveStart = SystemClock.elapsedRealtime()
-            val deadline = solveStart + budgetMs
-            val outcome = AutoSolver.solve(grid, config) {
-                // 停止自动时立刻收工：首帧最长可能跑 120s，不该让线程空烧完
-                SystemClock.elapsedRealtime() > deadline || !auto.get()
+            // budgetMs=0 表示不设挂钟：唯一停止条件是手动关自动/关悬浮窗。
+            val deadline = if (budgetMs > 0) solveStart + budgetMs else Long.MAX_VALUE
+            val abort = {
+                !auto.get() || (budgetMs > 0 && SystemClock.elapsedRealtime() > deadline)
+            }
+            // solver 每 256 个节点回调一次累计节点数；这里只写原子量，UI 由主线程每秒取一次
+            val reportNodes: (Long) -> Unit = { nodes -> solveNodes.set(nodes) }
+            val outcome = try {
+                // 首帧 256MB 死表；LargeHeap 下仍分配失败就按 10MB 梯子逐级降，绝不让 OOM 崩掉进程。
+                AutoSolver.solve(grid, config, abort, reportNodes)
+            } catch (t: Throwable) {
+                if (t !is OutOfMemoryError) {
+                    Log.e(TAG, "求解异常", t)
+                    main.post {
+                        if (gen == generation.get() && auto.get()) {
+                            finishAuto("求解异常：${t.message ?: t.javaClass.simpleName}")
+                        }
+                    }
+                    return@post
+                }
+                var last: Throwable = t
+                var retried: AutoSolver.Outcome? = null
+                for (slots in SOLVE_DEAD_SLOTS_FALLBACK) {
+                    if (slots == config.deadSlots) continue
+                    val mb = slots * 16 / (1024 * 1024)
+                    try {
+                        Log.w(TAG, "死表分配失败，降到 ${mb}MB（${slots} 槽）重试", last)
+                        // 降级是重新开一次搜索，进度从 0 重新计数
+                        solveNodes.set(0)
+                        retried = AutoSolver.solve(grid, config.copy(deadSlots = slots), abort, reportNodes)
+                        break
+                    } catch (t2: Throwable) {
+                        last = t2
+                        if (t2 !is OutOfMemoryError) {
+                            Log.e(TAG, "求解异常（降级重试）", t2)
+                            main.post {
+                                if (gen == generation.get() && auto.get()) {
+                                    finishAuto("求解异常：${t2.message ?: t2.javaClass.simpleName}")
+                                }
+                            }
+                            return@post
+                        }
+                    }
+                }
+                if (retried == null) {
+                    Log.e(TAG, "求解内存不足：10MB 梯度全部失败", last)
+                    main.post {
+                        if (gen == generation.get() && auto.get()) {
+                            finishAuto("求解内存不足：256MB→64MB 全部失败，请关闭其他应用或洗牌")
+                        }
+                    }
+                    return@post
+                }
+                retried
             }
             val solveMs = SystemClock.elapsedRealtime() - solveStart
             main.post {
+                // 先摘掉每秒心跳，再把控制条交还给各结局的文案
+                stopSolveProgress()
+                val tried = solveNodes.get()
+                val rate = if (solveMs > 0) tried * 1000 / solveMs else 0
+                Log.i(TAG, "求解结束：已尝试 $tried 步，${solveMs}ms，约 $rate 步/秒")
                 if (gen != generation.get() || !auto.get()) return@post
                 when (outcome) {
+                    is AutoSolver.Outcome.Inconsistent -> {
+                        Log.w(
+                            TAG,
+                            "盘面不一致：奇数类 ${outcome.oddClasses}（砖块不可能是单个，识别/重复框有误）",
+                        )
+                        finishAuto(
+                            "识别可能出错：${outcome.oddClasses.size} 类砖块数为奇数（常见于重复框/误检），请刷新",
+                        )
+                    }
+
                     is AutoSolver.Outcome.Solved -> {
                         if (outcome.steps.isEmpty()) {
                             finishAuto("已通关：盘面清空")
@@ -787,6 +895,13 @@ class HintSession(
                             finishFrame()
                             main.postDelayed(autoTick, UNSOLVABLE_RETRY_MS)
                         }
+                    }
+
+                    is AutoSolver.Outcome.MemoryLimited -> {
+                        Log.w(TAG, "求解死表满：${outcome.nodes} 节点")
+                        finishAuto(
+                            "求解内存表已满（${outcome.nodes} 节点），已无法继续保证穷尽；建议洗牌或加大内存",
+                        )
                     }
 
                     is AutoSolver.Outcome.Unknown -> {
@@ -1034,6 +1149,7 @@ class HintSession(
     private fun finishAuto(message: String) {
         auto.set(false)
         main.removeCallbacks(autoTick)
+        stopSolveProgress()
         overlay.setBarAuto(false)
         HintUiBus.state = HintUiBus.state.copy(auto = false, autoMessage = message, autoSteps = autoSteps)
         // 第一行给标题+统计，第二行才是原因（message 非空时控制条用红色显示它）——
@@ -1070,6 +1186,44 @@ class HintSession(
         overlay.updateBar(ControlBarView.State(hintText = hintText, statusText = statusText, message = message))
     }
 
+    /**
+     * 启动求解进度心跳：立刻写一帧"0 步"，之后每秒刷一次。
+     *
+     * 只在主线程调用；重复调用会先摘掉上一次的心跳（例如 OOM 降级重试前）。
+     */
+    private fun startSolveProgress(hint: String, remaining: Int, budgetMs: Long) {
+        main.removeCallbacks(solveProgressTick)
+        solving = true
+        solveHint = hint
+        solveRemaining = remaining
+        solveBudgetMs = budgetMs
+        solveStartMs = SystemClock.elapsedRealtime()
+        solveNodes.set(0)
+        updateBar(hint, "已尝试 0 步 · 剩 $remaining 块")
+        overlay.setBarTiming("0s/${budgetMs / 1000}s")
+        main.postDelayed(solveProgressTick, SOLVE_PROGRESS_MS)
+    }
+
+    /**
+     * 停止求解进度心跳，并把控制条右上角恢复成这一帧的端到端耗时。
+     *
+     * 求解结束 / 被叫停都要走这里，否则下一秒心跳会把"共 N 步"、"无解"之类的结论覆盖掉。
+     */
+    private fun stopSolveProgress() {
+        if (!solving) return
+        solving = false
+        main.removeCallbacks(solveProgressTick)
+        overlay.setBarTiming(lastTiming)
+    }
+
+    /**
+     * 进度里的步数：千分位，读起来不容易看错位。
+     *
+     * 不折成"万"：慢盘一秒只走几百个节点，折成一位小数的万会十几秒才变一次，
+     * 又变成"看着像卡死"；精确到个位才能每秒都看出在动。
+     */
+    private fun formatSteps(nodes: Long): String = String.format(Locale.US, "%,d", nodes)
+
     private companion object {
         const val TAG = "HintSession"
 
@@ -1086,19 +1240,58 @@ class HintSession(
         const val HINT_HIDE_SETTLE_MS = 150L
 
         /**
-         * 求解参数：首帧和重算同一份预算，节点 12 万/次、最多重启 16 次。
+         * 求解进度刷新间隔：1 秒一次。
          *
-         * 原来重算用 4 万×8，32 万节点就先被节点预算掐死，根本轮不到挂钟上限；
-         * 统一之后重算也能吃满下面的 120 秒。
+         * 太密会跟状态行其他更新抢重绘，太慢又看不出"还在动"；1 秒正好。
+         */
+        const val SOLVE_PROGRESS_MS = 1000L
+
+        /**
+         * 首帧求解参数：**单次搜索 + 大死表，不再 16 次随机重启**。
+         *
+         * - 10M 节点上限：一次搜索给足深度；
+         * - 死表 16M 槽 × 16B = **256MB**，单次搜索内持久，不再中途 clear 重搜；
+         * - 表满直接返回 [AutoSolver.Outcome.MemoryLimited]，绝不把手机撑 OOM；
+         * - `largeHeap` + 256MB 分配失败时自动退回 128MB（见 solveAndPlan）。
+         *
+         * 这盘实测 50 万节点就够证明无解；256MB 是为了困难盘少重搜、保证效率。
+         */
+        val SOLVE_CONFIG_FIRST = AutoSolver.Config(
+            nodesPerAttempt = Int.MAX_VALUE,   // 不设节点上限，只靠死表/手动停止
+            maxAttempts = 1,
+            deadSlots = 1 shl 24,              // 16M 槽 × 16B = 256MB
+            abortWhenFull = true,
+        )
+
+        /**
+         * 首帧挂钟：**0 = 不设上限**，只由用户手动停止（关自动/关悬浮窗）。
+         * 死表满或证明解/无解时也会结束，但不是按时间。
+         */
+        const val SOLVE_TIME_BUDGET_FIRST_MS = 0L
+
+        /**
+         * 首帧死表 OOM 的降级梯度：从 256MB 开始，每次减 10MB，最低 64MB。
+         *
+         * 1 槽 16B → 10MB = 655,360 槽。不再 256→128 一刀砍半；
+         * 246/236/…/68 都可能刚好塞进当前堆，尽量保住搜索效率。
+         */
+        val SOLVE_DEAD_SLOTS_FALLBACK: List<Int> = buildList {
+            val step = (10 * 1024 * 1024) / 16
+            val min = (64 * 1024 * 1024) / 16
+            var slots = 1 shl 24
+            while (slots >= min) {
+                add(slots)
+                slots -= step
+            }
+        }
+
+        /**
+         * 重算参数：计划失效后才跑，12 万/次、最多重启 16 次，挂钟 120 秒；死表按预算自动（约 4MB）。
          */
         val SOLVE_CONFIG = AutoSolver.Config(nodesPerAttempt = 120_000, maxAttempts = 16)
 
         /**
-         * 求解的挂钟上限：**只保留这一道，120 秒**，首帧和重算一样。
-         *
-         * 8 秒原来是旧版“每帧都要算”的节流阀，后来被沿用到重算上：8 秒一到就返回
-         * `Unknown`，自动层又不落子，整局就停在“已消 0 对”。节点预算仍负责拦内存
-         * （置换表 16 B/状态，12 万约 4 MB），单次尝试特别慢的病态盘由这 120 秒兜底。
+         * 重算挂钟上限：120 秒。
          */
         const val SOLVE_TIME_BUDGET_MS = 120_000L
 
