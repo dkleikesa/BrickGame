@@ -1,7 +1,7 @@
 {
  "name": "brick_embedder_v2",
  "variant": "v2",
- "exported_from": "BrickGame-Tool/out/clf_v2_r2/best.pt",
+ "exported_from": "BrickGame-Tool/out/clf_v2/best.pt",
  "epoch": 20,
  "input": {
   "name": "input",
@@ -4773,11 +4773,11 @@
   "p037_b3_r1_c7"
  ],
  "thresholds": {
-  "dist_hit_p95": 0.0482,
-  "dist_wrong_p5": 0.1532,
-  "top1": 1.0,
-  "top1_macro": 1.0,
-  "n_query": 494,
+  "dist_hit_p95": 0.0239,
+  "dist_wrong_p5": 0.1481,
+  "top1": 0.9975,
+  "top1_macro": 0.9981,
+  "n_query": 403,
   "distance_def": "余弦距离 = 1 - 点积",
   "hint": "距离 > dist_hit_p95 → 低置信；> dist_wrong_p5 → 基本可判为未知物品"
  },
