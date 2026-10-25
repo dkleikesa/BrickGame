@@ -12,8 +12,11 @@ import kotlin.test.assertTrue
  * 两个"真实盘面"是从真机截图（1080×2400，棋盘 14 行 × 10 列 = 140 格）上逐格抄下来的，
  * 每类个数全为偶数（游戏的硬不变量）；抄完还跟求解器算出的"开局可走 6 / 5 步"对过账，
  * 所以这两组数据可以当初值基准用：
- *  - [REAL_BOARD_A]：**无解**（穷举完整张可达图只有 768 个状态，最多只能消 28 块）；
+ *  - [REAL_BOARD_A]：**可通关**。它曾被判"穷举后无解（可达图 768 个状态、最多消 28 块）"，
+ *    实际是求解器漏了"把整条砖顶着走"的走法（见 [AutoSolverAgreementTest] 类注释）；
  *  - [REAL_BOARD_B]：**可通关**（完整解能清空 140 格）。
+ *
+ * 两盘现在都按"有解 + 逐步重放能清空"来校验。
  */
 class AutoSolverTest {
 
@@ -27,9 +30,10 @@ class AutoSolverTest {
         val outcome = AutoSolver.solve(grid)
         assertIs<AutoSolver.Outcome.Solved>(outcome)
         assertEquals(1, outcome.steps.size)
-        assertEquals(AutoSolver.Cell(0, 0), outcome.steps[0].from)
-        assertEquals(AutoSolver.Cell(0, 0), outcome.steps[0].to)
-        assertEquals(AutoSolver.Cell(0, 1), outcome.steps[0].paired)
+        // 两块都在原地：谁当"被拖的那块"都行（走法序随机），只校验配对与原地消除
+        val step = outcome.steps[0]
+        assertTrue(step.isInPlace, "同款相邻必须原地消，不该产生位移：$step")
+        assertEquals(setOf(AutoSolver.Cell(0, 0), AutoSolver.Cell(0, 1)), setOf(step.from, step.paired))
     }
 
     @Test
@@ -51,9 +55,14 @@ class AutoSolverTest {
         val outcome = AutoSolver.solve(grid)
         assertIs<AutoSolver.Outcome.Solved>(outcome)
         assertEquals(1, outcome.steps.size)
-        assertEquals(AutoSolver.Cell(0, 0), outcome.steps[0].from)
-        assertEquals(AutoSolver.Cell(0, 1), outcome.steps[0].to)
-        assertEquals(AutoSolver.Cell(2, 1), outcome.steps[0].paired)
+        val step = outcome.steps[0]
+        // 两种移动方案都合法（拖 (0,0) 或拖 (2,1)），求解器挑哪个都算对
+        assertTrue(!step.isInPlace, "两块不同线，必须有一次移动：$step")
+        assertEquals(setOf(AutoSolver.Cell(0, 0), AutoSolver.Cell(2, 1)), setOf(step.from, step.paired))
+        assertTrue(
+            step.paired.row == step.to.row || step.paired.col == step.to.col,
+            "落点必须与配对砖同行或同列：$step",
+        )
     }
 
     @Test
@@ -74,16 +83,21 @@ class AutoSolverTest {
         replayAndAssertCleared(REAL_BOARD_B, outcome.steps)
     }
 
+    /**
+     * 真机盘面 A 以前被判"穷举后无解"，其实是**求解器漏了走法**：它自己重推落点、
+     * 还要求落点是空位，而拖动时整条砖会被顶着走。修好之后这盘能解 ——
+     * "先报无解、再刷新又有解"就是这个假无解。
+     */
     @Test
-    fun realBoardAIsProvedUnsolvable() {
+    fun realBoardAIsSolvableOnceRunPushingMovesAreAllowed() {
         val grid = REAL_BOARD_A.map { it.copyOf() }.toTypedArray()
 
         val outcome = AutoSolver.solve(grid, AutoSolver.Config.THOROUGH)
-        assertEquals(
-            AutoSolver.Outcome.Unsolvable,
+        assertIs<AutoSolver.Outcome.Solved>(
             outcome,
-            "这盘真机截图穷举后无解；如果这里变成了 Solved/Unknown，说明算法或数据被改坏了",
+            "这盘真机截图有完整解；报无解说明走法枚举又退化了",
         )
+        replayAndAssertCleared(REAL_BOARD_A, outcome.steps)
     }
 
     @Test

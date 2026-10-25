@@ -71,6 +71,10 @@ object BrickGameTipHelper {
      *
      * 关键点是**带着目标位置**。早先只给 [from, pair]，执行层只能拿"矩形的另一个角"去猜落点，
      * 猜出来跟枚举时的实际目标不一致，于是出现"提示画了框、自动却判无解"。
+     *
+     * 注意 `to` **不要求当前是空位**：拖动时整条砖会被顶着走，`to` 可以是同一条线上
+     * 另一块砖此刻占着的格子（那块砖被顶开后落位）。所以"落点必须是空的"这种推测是错的，
+     * 能不能走一律以 [actionStep] 的判定为准。
      */
     fun findActions(grid: Array<IntArray>): List<IntArray> {
         val moves = ArrayList<IntArray>()
@@ -85,12 +89,30 @@ object BrickGameTipHelper {
             moveDown(grid, col, moves)
             moveUp(grid, col, moves)
         }
-        return uniqueMove(moves)
+        return uniqueAction(moves)
     }
 
-    /** 兼容旧口径：只给 [fromRow, fromCol, pairRow, pairCol]。 */
-    fun findMoves(grid: Array<IntArray>): List<IntArray> =
-        findActions(grid).map { intArrayOf(it[0], it[1], it[4], it[5]) }
+    /**
+     * 兼容旧口径：只给 [fromRow, fromCol, pairRow, pairCol]。
+     *
+     * **丢掉了落点，所以不能拿来执行**（同一个配对可能有好几种落点），只适合提示层画框。
+     * 执行与求解一律走 [findActions]。这里按 (from, pair) 无序去重，免得同一对在提示里画两遍。
+     */
+    fun findMoves(grid: Array<IntArray>): List<IntArray> {
+        val cols = grid[0].size
+        val result = ArrayList<IntArray>()
+        for (action in findActions(grid)) {
+            val from = action[0] * cols + action[1]
+            val pair = action[4] * cols + action[5]
+            val duplicate = result.any {
+                val f = it[0] * cols + it[1]
+                val p = it[2] * cols + it[3]
+                (f == from && p == pair) || (f == pair && p == from)
+            }
+            if (!duplicate) result.add(intArrayOf(action[0], action[1], action[4], action[5]))
+        }
+        return result
+    }
 
     /** [findMoves] 的强类型包装：全部可行走法（识别出来的整盘二维数组直接喂进来）。 */
     fun hints(grid: Array<IntArray>): List<BrickMove> = findMoves(grid).map { move ->
@@ -108,11 +130,11 @@ object BrickGameTipHelper {
     /**
      * 把 [findMoves] 给出的候选补全为可直接喂给 [actionStep] 的 6 元动作。
      *
-     * 落点只可能是候选砖与配对砖构成的矩形的另一个角：`(fromRow, pairCol)` 或 `(pairRow, fromCol)`；
-     * 当两砖本就同线相邻时落点等于起点（原地消除）。哪个角能落不靠几何硬猜，直接拿 [actionStep]
-     * 在副本上试一次。
+     * 落点**不由这里猜**：同一对砖经常有好几种可行的拖动方案（拖其中任意一块、拖多远），
+     * 全部由 [findActions] 枚举好 —— 这里只按配对把动作捞出来，挨个用 [actionStep] 试到能行为止。
+     * 落点是不是空位也不预设：拖动时整条砖会被顶着走，落点可能是别的砖正占着的格子。
      *
-     * @return `[fromRow, fromCol, toRow, toCol, pairedRow, pairedCol]`，两个角都试不成返回 null。
+     * @return `[fromRow, fromCol, toRow, toCol, pairedRow, pairedCol]`，一个都试不成返回 null。
      */
     fun resolveAction(grid: Array<IntArray>, move: IntArray): IntArray? {
         val fromRow = move[0]
@@ -120,22 +142,18 @@ object BrickGameTipHelper {
         val pairRow = move[2]
         val pairCol = move[3]
 
-        // 候选落点 = 两个十字交叉点 + 沿 from 所在行/列能滑到的所有空位。
-        //
-        // 只用交叉点是错的：两块同列、中间隔着别的东西时，交叉点就是它们自己的位置，
-        // 全被跳过，于是判成"无解"；但实际把上面那块往下滑到配对砖旁边就能消。
-        // 下面按"由近到远"枚举可达空位，覆盖这类走法。
-        // 目标位置由枚举阶段直接给出（它就是"这一列/行上的空行"里的某一格），不再猜
-        val action = findActions(grid).firstOrNull {
-            it[0] == fromRow && it[1] == fromCol && it[4] == pairRow && it[5] == pairCol
-        } ?: return null
-        val probe = Array(grid.size) { grid[it].copyOf() }
-        // GAME_FAIL 也算"这一步能动"：它表示这步消完盘面没救了（全局策略问题），
-        // 不是这一步不合法 —— 提示层要列全部可消对，不能因此把真能消的一对吞掉。
-        return when (actionStep(probe, action)) {
-            ACTION_SUCCESS, GAME_SUCCESS, GAME_FAIL -> action
-            else -> null
+        for (action in findActions(grid)) {
+            if (action[0] != fromRow || action[1] != fromCol ||
+                action[4] != pairRow || action[5] != pairCol
+            ) continue
+            val probe = Array(grid.size) { grid[it].copyOf() }
+            // GAME_FAIL 也算"这一步能动"：它表示这步消完盘面没救了（全局策略问题），
+            // 不是这一步不合法 —— 提示层要列全部可消对，不能因此把真能消的一对吞掉。
+            when (actionStep(probe, action)) {
+                ACTION_SUCCESS, GAME_SUCCESS, GAME_FAIL -> return action
+            }
         }
+        return null
     }
 
     /**
@@ -153,21 +171,24 @@ object BrickGameTipHelper {
         return null
     }
 
-    /** 去重：A->B 与 B->A 视为同一个 move。 */
-    private fun uniqueMove(list: List<IntArray>): List<IntArray> {
-        val result = ArrayList<IntArray>()
+    /**
+     * 精确去重：同一组 (from, to, paired) 只留一条（枚举有多条路径能撞出同一个动作）。
+     *
+     * 以前这里按"A->B 与 B->A 视为同一个 move"去重，落到 6 元动作上就等于按 (from, to) 去重 ——
+     * 于是"落点相同、配对不同"的那条被悄悄吃掉：一块砖同时和左右（或上下）两块同款对齐时
+     * 游戏让玩家二选一，两条分支本来都是合法的，少一条就可能少掉唯一的解。
+     */
+    private fun uniqueAction(list: List<IntArray>): List<IntArray> {
+        val result = ArrayList<IntArray>(list.size)
         for (origin in list) {
-            val isDuplicate = result.any { exist ->
-                (exist[0] == origin[0] && exist[1] == origin[1] &&
-                        exist[2] == origin[2] && exist[3] == origin[3]) ||
-                        (exist[0] == origin[2] && exist[1] == origin[3] &&
-                                exist[2] == origin[0] && exist[3] == origin[1])
-            }
-            if (!isDuplicate) {
-                result.add(origin)
-            }
+            if (result.none { sameAction(it, origin) }) result.add(origin)
         }
         return result
+    }
+
+    private fun sameAction(a: IntArray, b: IntArray): Boolean {
+        for (i in 0 until 6) if (a[i] != b[i]) return false
+        return true
     }
 
     // ---------------------- 纵向（列内移动，行内匹配） ----------------------
@@ -496,7 +517,8 @@ object BrickGameTipHelper {
         }
 
         if (isGameSuccess(grid)) return GAME_SUCCESS
-        if (findMoves(grid).isEmpty()) return GAME_FAIL
+        // 直接用 findActions 判空：findMoves 只是它的去重投影，多一次 O(n²) 没用
+        if (findActions(grid).isEmpty()) return GAME_FAIL
         return ACTION_SUCCESS
     }
 

@@ -18,6 +18,7 @@ import com.qcmian.brickgame.overlay.HintOverlayView
 import com.qcmian.brickgame.overlay.OverlayController
 import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.CellPoint
+import com.qcmian.brickgame.vision.CellRect
 import com.qcmian.brickgame.vision.HintEngine
 import com.qcmian.brickgame.vision.BoardState
 import com.qcmian.brickgame.vision.HintPipeline
@@ -176,8 +177,26 @@ class HintSession(
     /** 一共重新求了几次解。它一直涨说明盘面/识别在飘，得停下来报错。 */
     private var planRounds = 0
 
+    /**
+     * 本次自动运行是否已经做过第一次完整求解。
+     *
+     * 首帧给足预算（[SOLVE_CONFIG_FIRST] / [SOLVE_TIME_BUDGET_FIRST_MS]），目标是一次算准、
+     * 之后只执行计划；只有计划作废时才回到常规预算重算。
+     */
+    private var deepSolveDone = false
+
     /** 自动模式下连续几帧"根本没定位到棋盘"。 */
     private var missStreak = 0
+
+    /**
+     * 判无解之后又换了几帧复核，以及复核时看到的盘面。
+     *
+     * 一帧说无解不算数：判空靠 YOLO 的 tile 框，误检会把空格认成砖（tile 精确率只有
+     * 66~69%），盘面凭空多出几块就"无解"了 —— 用户看到的就是"先显示无解、点刷新又有解"。
+     * 所以换一帧再判：**同一个盘面读两遍都无解**才认，盘面变了就一直复核到上限。
+     */
+    private var unsolvableChecks = 0
+    private var unsolvableGrid: String? = null
 
     /**
      * "无解 + 一对都消不掉"连续重试了几次。
@@ -269,6 +288,9 @@ class HintSession(
             planRounds = 0
             missStreak = 0
             unsolvableRetries = 0
+            unsolvableChecks = 0
+            unsolvableGrid = null
+            deepSolveDone = false
             HintUiBus.state = HintUiBus.state.copy(auto = true, autoSteps = 0, autoMessage = null)
             overlay.setBarAuto(true)
         }
@@ -558,6 +580,9 @@ class HintSession(
             pendingPair = null
             if (state.labels[pair.row * state.cols + pair.col] == 0) {
                 badChecks = 0
+                // 有进展就把"重新求解"的配额清零：它拦的应该是"反复重算却没进展"，
+                // 不该因为一盘 70 步里零星错几步就把次数耗完、提前收工。
+                planRounds = 0
                 autoSteps++
                 planIndex++
                 HintUiBus.state = HintUiBus.state.copy(autoSteps = autoSteps)
@@ -592,13 +617,22 @@ class HintSession(
     private fun solveAndPlan(result: HintPipeline.Result) {
         val grid = result.state.asGrid()
         val gen = generation.get()
-        updateBar("求解中…", "剩 ${countBricks(result.state)} 块")
+        // 本次自动运行的第一次整盘求解给足预算：目标是一次拿到确定解，之后只执行计划。
+        val firstSolve = !deepSolveDone
+        deepSolveDone = true
+        val config = if (firstSolve) SOLVE_CONFIG_FIRST else SOLVE_CONFIG
+        val budgetMs = if (firstSolve) SOLVE_TIME_BUDGET_FIRST_MS else SOLVE_TIME_BUDGET_MS
+        updateBar(
+            if (firstSolve) "首帧求解中…（最长 ${budgetMs / 1000} 秒）" else "求解中…",
+            "剩 ${countBricks(result.state)} 块",
+        )
 
         worker.post {
             // 节点预算拦不住"单次尝试就是慢"的病态盘，再压一道挂钟上限
-            val deadline = SystemClock.elapsedRealtime() + SOLVE_TIME_BUDGET_MS
-            val outcome = AutoSolver.solve(grid, SOLVE_CONFIG) {
-                SystemClock.elapsedRealtime() > deadline
+            val deadline = SystemClock.elapsedRealtime() + budgetMs
+            val outcome = AutoSolver.solve(grid, config) {
+                // 停止自动时立刻收工：首帧最长可能跑 120s，不该让线程空烧完
+                SystemClock.elapsedRealtime() > deadline || !auto.get()
             }
             main.post {
                 if (gen != generation.get() || !auto.get()) return@post
@@ -610,6 +644,9 @@ class HintSession(
                         }
                         plan = outcome.steps
                         planIndex = 0
+                        // 这一帧判的是"有解"：之前攒的无解复核计数作废
+                        unsolvableChecks = 0
+                        unsolvableGrid = null
                         Log.i(TAG, "自动计划就绪：${plan.size} 步（第 $planRounds 次求解）")
                         // 先把"一共多少步"亮出来再动手：不给这一下停顿的话，
                         // 紧接着的 [playStep] 会把它覆盖成"第 1/N 步"，用户根本看不到总数。
@@ -626,6 +663,22 @@ class HintSession(
 
                     AutoSolver.Outcome.Unsolvable -> {
                         if (!AutoContinue.enabled(context)) {
+                            // 复核：同一盘面读两遍都无解才认。盘面变了说明上一帧的判空有误，
+                            // 接着换帧，最多换 UNSOLVABLE_CONFIRM_LIMIT 次（见 [unsolvableChecks]）。
+                            val key = result.state.labels.joinToString(",")
+                            val sameBoard = key == unsolvableGrid
+                            if (!sameBoard) {
+                                unsolvableGrid = key
+                                unsolvableChecks++
+                                if (unsolvableChecks <= UNSOLVABLE_CONFIRM_LIMIT) {
+                                    updateBar(
+                                        "疑似无解，复核中 $unsolvableChecks/$UNSOLVABLE_CONFIRM_LIMIT",
+                                        "剩 ${countBricks(result.state)} 块",
+                                    )
+                                    main.postDelayed(autoTick, UNSOLVABLE_CONFIRM_MS)
+                                    return@post
+                                }
+                            }
                             finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」")
                             return@post
                         }
@@ -662,13 +715,13 @@ class HintSession(
                     }
 
                     is AutoSolver.Outcome.Unknown -> {
-                        // 预算烧完还没结论：不算失败，先贪心走一步，下一帧重新求解
-                        val action = BrickGameTipHelper.autoHint(grid)
-                        if (action == null) {
-                            finishAuto("无解：一步都走不了")
-                        } else {
-                            playAction(result, action, "求解超预算，先走一步")
-                        }
+                        // 预算烧完还没结论：**不落子**。
+                        // 贪心走一步很可能把有解盘走成真无解 —— 这盘只是"还没算完"，
+                        // 不是"不能解"。保留盘面原样，重新开自动会走首帧的大预算。
+                        finishAuto(
+                            "求解超预算（${outcome.nodes} 节点），已暂停且未落子。" +
+                                "点「自动通关」用更大预算重试",
+                        )
                     }
                 }
             }
@@ -719,13 +772,15 @@ class HintSession(
         val toRect = scan.rectOf(CellPoint(tr, tc))
         // 滑完之后那块砖是否同时对齐两块同款砖：是的话游戏会让玩家二选一，
         // 只在落点松手什么都不会消（真机实测：反复"滑动没生效"）。
-        val ambiguous = !inPlace && ambiguousAfterMove(result.state, fr, fc, tr, tc)
-        // 直消：第一下点起点、第二下点配对砖；滑动：起点滑到落点格中心。
+        val ambiguous = !inPlace && ambiguousAfterMove(result.state, action)
+        // 直消：第一下点起点、第二下点配对砖；滑动：起点滑到落点格中心（再多推一点，见 [overshoot]）。
         val target = if (inPlace) pairRect else toRect
         val x1 = from.centerX.toFloat()
         val y1 = from.centerY.toFloat()
-        val x2 = target.centerX.toFloat()
-        val y2 = target.centerY.toFloat()
+        val swept = if (inPlace) target.centerX.toFloat() to target.centerY.toFloat()
+        else overshoot(result.scan, target, tr - fr, tc - fc)
+        val x2 = swept.first
+        val y2 = swept.second
         val gestureMs = when {
             inPlace -> TAP_MS * 2 + TAP_GAP_MS
             ambiguous -> SWIPE_MS + TAP_GAP_MS + TAP_MS
@@ -775,19 +830,66 @@ class HintSession(
     }
 
     /**
+     * 落点再往滑动方向多推 0.3 格。
+     *
+     * 为什么必须过冲：无障碍手势的坐标是**按路径长度均速插值**的，最后一条 MOVE 正好压在
+     * 落点格中心，紧接着就抬手。游戏把拖动距离换算成格数是"取整 / 数过界"，终点恰好落在
+     * 格边界上时，差几个像素就少算一格 —— 于是整条砖被推过去了，那块砖却没对上，什么也不消
+     * （真机表现："还没拖到位就松手，移动了但没消失"）。多推 0.3 格，两种算法都还落在目标格上
+     * （取整 1.3→1，过界也没多跨一个格子），同时给游戏的跟手插值留出追上来的时间。
+     */
+    private fun overshoot(scan: BoardScan, rect: CellRect, dRow: Int, dCol: Int): Pair<Float, Float> {
+        val stepX = scan.pitchX * SWIPE_OVERSHOOT
+        val stepY = scan.pitchY * SWIPE_OVERSHOOT
+        val x = rect.centerX + when {
+            dCol > 0 -> stepX
+            dCol < 0 -> -stepX
+            else -> 0f
+        }
+        val y = rect.centerY + when {
+            dRow > 0 -> stepY
+            dRow < 0 -> -stepY
+            else -> 0f
+        }
+        // 贴边的那一列/行推不出去：夹回棋盘里，别让手指滑到盘外（游戏会当成取消）
+        val left = scan.xlines.first().toFloat() + EDGE_INSET
+        val right = scan.xlines.last().toFloat() - EDGE_INSET
+        val top = scan.ylines.first().toFloat() + EDGE_INSET
+        val bottom = scan.ylines.last().toFloat() - EDGE_INSET
+        return x.coerceIn(left, right) to y.coerceIn(top, bottom)
+    }
+
+    /**
      * 这一步滑完之后，落点那块砖是否会同时对齐 ≥2 块同款砖。
      *
      * 判定与算法（[com.qcmian.brickgame.algorithm.BrickGameTipHelper]）一致：同行/同列、
      * 中间没有别的砖。≥2 时游戏要求玩家点一下指定消哪一对，光松手不会消。
+     *
+     * 推演**借算法自己算**（[BrickGameTipHelper.actionStep]），不再手推"落点换成这块砖"：
+     * 拖动时整条砖会被顶着走，手推出来的盘面跟游戏差好几格，二选一就会漏点或多点一下。
      */
-    private fun ambiguousAfterMove(state: BoardState, fr: Int, fc: Int, tr: Int, tc: Int): Boolean {
-        val grid = state.asGrid()
-        if (tr !in grid.indices || tc !in grid[0].indices) return false
-        val cls = grid[fr][fc]
+    private fun ambiguousAfterMove(state: BoardState, action: IntArray): Boolean {
+        val fromRow = action[0]
+        val fromCol = action[1]
+        val toRow = action[2]
+        val toCol = action[3]
+        val pairRow = action[4]
+        val pairCol = action[5]
+        val cls = state.labels[fromRow * state.cols + fromCol]
         if (cls <= 0) return false
-        grid[fr][fc] = 0
-        grid[tr][tc] = cls
-        return linePartners(grid, tr, tc, cls) >= 2
+        val after = state.asGrid()
+        when (BrickGameTipHelper.actionStep(after, action)) {
+            BrickGameTipHelper.ACTION_SUCCESS,
+            BrickGameTipHelper.GAME_SUCCESS,
+            BrickGameTipHelper.GAME_FAIL,
+            -> Unit
+
+            else -> return false
+        }
+        // actionStep 已经顺手把这一对消掉了：把这两格放回去，就是"刚落位、还没消"的盘面
+        after[toRow][toCol] = cls
+        after[pairRow][pairCol] = cls
+        return linePartners(after, toRow, toCol, cls) >= 2
     }
 
     /** 同行/同列、中间无砖的第一个非空格如果是同款，就算一个可配对象。 */
@@ -865,6 +967,23 @@ class HintSession(
         val SOLVE_CONFIG = AutoSolver.Config(nodesPerAttempt = 40_000, maxAttempts = 8)
 
         /**
+         * 首帧求解参数：节点预算 3 倍、重启次数 2 倍。
+         *
+         * 目的：一次拿到确定解（Solved / Unsolvable），之后只按计划执行，不再反复求解。
+         * 节点预算不能无上限 —— 置换表按状态建 key，位打包后约 160 B/状态：
+         * 12 万条约 19MB，30 万条约 48MB（到顶由 AutoSolver 的 MAX_DEAD_STATES 兜底）。
+         */
+        val SOLVE_CONFIG_FIRST = AutoSolver.Config(nodesPerAttempt = 120_000, maxAttempts = 16)
+
+        /**
+         * 首帧求解的挂钟上限。
+         *
+         * 8s 原本是"每帧都要算"的节流阀；整盘求解只做一次，卡在这里只会把可解局变成
+         * Unknown、退化成 8s/步的贪心。这里放到 120s，节点预算仍负责拦住内存。
+         */
+        const val SOLVE_TIME_BUDGET_FIRST_MS = 120_000L
+
+        /**
          * 单次求解的挂钟上限。
          *
          * [AutoSolver] 自己用的是节点预算，但"单次尝试就是慢"的病态盘（实测有盘单次烧到
@@ -875,8 +994,22 @@ class HintSession(
          */
         const val SOLVE_TIME_BUDGET_MS = 8_000L
 
-        /** 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。 */
-        const val SWIPE_MS = 220L
+        /**
+         * 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。
+         *
+         * 从 220ms 提到 320ms：手势是按路径长度均速插值的，220ms 走三四格时每一步只摊到
+         * 两三个 MOVE 事件，游戏的跟手插值还没追上就已经抬手了。慢一点只是每步多 0.1 秒。
+         */
+        const val SWIPE_MS = 320L
+
+        /**
+         * 滑动落点往前的过冲比例（格）。0.3 是"取整/数过界"两种换算都不会多算一格的上限。
+         * 见 [overshoot]。
+         */
+        const val SWIPE_OVERSHOOT = 0.3f
+
+        /** 过冲时离棋盘边线留的余量（px），免得手指滑到盘外。 */
+        const val EDGE_INSET = 2f
 
         /** 直消时每次"点一下"的按住时长。 */
         const val TAP_MS = 60L
@@ -901,6 +1034,17 @@ class HintSession(
 
         /** 无解且一对都消不掉时最多重试几次（10 次 ≈ 30 秒），超过就停下来让人洗牌。 */
         const val UNSOLVABLE_RETRY_LIMIT = 10
+
+        /**
+         * 判无解后最多换几帧复核。
+         *
+         * 只在"每帧读出来的盘面都不一样"时才会用满：盘面稳定下来（连着两帧同一张盘面
+         * 都无解）就立刻收工，不会让真无解的盘白等。
+         */
+        const val UNSOLVABLE_CONFIRM_LIMIT = 3
+
+        /** 复核间隔：比 UNSOLVABLE_RETRY_MS 短，只等一帧新截图。 */
+        const val UNSOLVABLE_CONFIRM_MS = 600L
 
         /**
          * 求解完成后，把"一共多少步"亮一会儿再开始动手的时长。

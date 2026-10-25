@@ -103,7 +103,9 @@ object AutoSolver {
         var totalNodes = 0L
         for (attempt in 0 until config.maxAttempts) {
             if (shouldAbort()) return Outcome.Unknown(totalNodes)
-            val search = Search(rows, cols, Random(SEED + attempt), config.nodesPerAttempt, shouldAbort)
+            val search = Search(
+                rows, cols, Random(SEED + attempt), config.nodesPerAttempt, shouldAbort,
+            )
             val solved = search.run(grid)
             totalNodes += search.nodes
             if (solved) return Outcome.Solved(search.solution())
@@ -124,6 +126,14 @@ object AutoSolver {
     }
 
     private const val SEED = 0x51ED1L
+
+    /**
+     * 置换表最多用多少槽。槽数按节点预算的 2 倍取 2 的幂，载入到一半就清空。
+     *
+     * 单槽 16 B（两个 Long 指纹），12 万节点预算约 4 MB，50 万约 16 MB。
+     * 清空只损失剪枝（部分死区被重搜），不影响结论正确性 —— 这是内存的硬保险。
+     */
+    private const val MAX_DEAD_SLOTS = 1 shl 20
 
     internal fun isCleared(grid: Array<IntArray>): Boolean {
         for (row in grid) for (v in row) if (v != BrickGameTipHelper.BACKGROUND) return false
@@ -151,15 +161,28 @@ object AutoSolver {
         var aborted: Boolean = false
             private set
 
-        /** 已证"从这里走不出解"的盘面。只在穷举完一个状态时才写入，所以结论永远可靠。 */
-        private val dead = HashSet<String>()
+        /** 槽数按节点预算的 2 倍取 2 的幂（载入因子 0.5），并受 [MAX_DEAD_SLOTS] 限制。 */
+        private val deadCapacity: Int = run {
+            var c = 16
+            while (c < budget * 2 && c < MAX_DEAD_SLOTS) c = c shl 1
+            c
+        }
+
+        /**
+         * 已证"从这里走不出解"的盘面，存 128-bit 指纹。
+         *
+         * 每状态 16 B（两个 Long），比 String key 的 ~340 B 省 20 倍。
+         * 代价是理论上存在哈希碰撞：碰撞会多剪枝 → 可能把有解判成无解。
+         * 128-bit 在百万级状态下的碰撞概率约 1e-28，工程上视为零（见 [FingerprintSet]）。
+         */
+        private val dead = FingerprintSet(deadCapacity)
 
         private val maxDepth = rows * cols / 2 + 1
         private val pool = Array(maxDepth + 1) { Array(rows) { IntArray(cols) } }
         private val chosen = arrayOfNulls<IntArray>(maxDepth)
         private var solutionDepth = -1
 
-        /** resolveAction 试落点用的探针盘，全局复用一块。 */
+        /** 校验候选动作用的探针盘，全局复用一块（[moves] 里每个动作都要 actionStep 试一次）。 */
         private val probe = Array(rows) { IntArray(cols) }
 
         fun run(start: Array<IntArray>): Boolean {
@@ -200,67 +223,130 @@ object AutoSolver {
                 val child = pool[depth + 1]
                 copyInto(grid, child)
                 BrickGameTipHelper.actionStep(child, action)
-                if (dead.contains(keyOf(child))) continue
+                fingerprint(child, fp)
+                if (dead.contains(fp[0], fp[1])) continue
                 chosen[depth] = action
                 if (dfs(depth + 1, child)) return true
                 if (aborted) return false
             }
 
-            dead.add(keyOf(grid))
+            // 置换表只用于剪枝：到顶清空只会让部分死区被重搜，不会把“有解”误判成“无解”。
+            if (dead.size >= dead.limit) dead.clear()
+            fingerprint(grid, fp)
+            dead.add(fp[0], fp[1])
             return false
         }
 
-        /** 全部合法动作：`findMoves` 给候选对，两个角落点各拿 `actionStep` 在探针盘上试一次。 */
+        /**
+         * 全部合法动作：**直接用 [BrickGameTipHelper.findActions] 的 6 元动作**，
+         * 再把每个动作拿 [BrickGameTipHelper.actionStep] 在探针盘上试一遍。
+         *
+         * 为什么要改掉"自己推落点"：这里原来只对 `findMoves` 的配对重推矩形两个角，
+         * 还额外要求**落点当前是空位**。但拖动时整条砖会被顶着走，落点完全可以是别的砖
+         * 此刻占着的格子 —— 这种走法全被判非法，于是可解盘被穷举成"确定无解"
+         * （4x3 的最小反例见 AutoSolverAgreementTest）。提示层一直走 findActions，
+         * 所以现场表现就是"提示能消、自动却报无解"。现在两边共用同一份动作。
+         */
         private fun moves(grid: Array<IntArray>): MutableList<IntArray> {
             val out = ArrayList<IntArray>(8)
-            for (move in BrickGameTipHelper.findMoves(grid)) {
-                resolve(grid, move)?.let { out.add(it) }
+            for (action in BrickGameTipHelper.findActions(grid)) {
+                copyInto(grid, probe)
+                when (BrickGameTipHelper.actionStep(probe, action)) {
+                    // GAME_FAIL 也算"这一步能走"：它说的是这步消完盘面没救了（全局策略问题），
+                    // 不是这一步不合法 —— 求解器要自己决定要不要走这一步。
+                    BrickGameTipHelper.ACTION_SUCCESS,
+                    BrickGameTipHelper.GAME_SUCCESS,
+                    BrickGameTipHelper.GAME_FAIL,
+                    -> out.add(action)
+                }
             }
             return out
         }
 
+        /** 复用的指纹输出，避免每节点分配。 */
+        private val fp = LongArray(2)
+
         /**
-         * 与 [BrickGameTipHelper.resolveAction] 逐条等价，只是把"每个角都新建一块副本"
-         * 换成复用同一块探针盘。落点依然是"让 actionStep 自己判"，不做几何硬猜。
+         * 盘面的 128-bit 指纹：两个独立混合的 64-bit 哈希。
+         *
+         * 直接扫原盘面，不生成中间数组 —— 这是它比“打包 key”更省时间的地方。
+         * 求解只关心“同款同号”，与类别 id 的具体值无关，所以直接拿原值参与混合即可。
          */
-        private fun resolve(grid: Array<IntArray>, move: IntArray): IntArray? {
-            val fr = move[0]
-            val fc = move[1]
-            val pr = move[2]
-            val pc = move[3]
-            if (tryResolve(grid, fr, fc, fr, pc, pr, pc)) return intArrayOf(fr, fc, fr, pc, pr, pc)
-            if (tryResolve(grid, fr, fc, pr, fc, pr, pc)) return intArrayOf(fr, fc, pr, fc, pr, pc)
-            return null
-        }
-
-        private fun tryResolve(
-            grid: Array<IntArray>, fromRow: Int, fromCol: Int,
-            toRow: Int, toCol: Int, pairRow: Int, pairCol: Int,
-        ): Boolean {
-            if (toRow == pairRow && toCol == pairCol) return false
-            val isFrom = toRow == fromRow && toCol == fromCol
-            if (!isFrom && grid[toRow][toCol] != BrickGameTipHelper.BACKGROUND) return false
-            if (toRow != fromRow && toCol != fromCol) return false
-
-            copyInto(grid, probe)
-            val action = intArrayOf(fromRow, fromCol, toRow, toCol, pairRow, pairCol)
-            return when (BrickGameTipHelper.actionStep(probe, action)) {
-                // GAME_FAIL 也算"这一步能走"：它说的是这步消完盘面没救了（全局策略问题），
-                // 不是这一步不合法 —— 求解器要自己决定要不要走这一步。
-                BrickGameTipHelper.ACTION_SUCCESS,
-                BrickGameTipHelper.GAME_SUCCESS,
-                BrickGameTipHelper.GAME_FAIL,
-                -> true
-
-                else -> false
-            }
-        }
-
-        private fun keyOf(grid: Array<IntArray>): String = buildString(rows * cols) {
+        private fun fingerprint(grid: Array<IntArray>, out: LongArray) {
+            var h1 = 0x811C9DC5L
+            var h2 = 0x27D4EB2FL
             for (r in 0 until rows) {
                 val row = grid[r]
-                for (c in 0 until cols) append(row[c].toChar())
+                for (c in 0 until cols) {
+                    val v = row[c].toLong()
+                    h1 = (h1 xor v) * 0x100000001B3L
+                    h2 = h2 + v + 0x9E3779B9L
+                    h2 = h2 xor (h2 ushr 29)
+                    h2 *= -0x40A7B892E31B1A47L
+                }
             }
+            // 全零留作“空槽”标记；极小概率撞上时挪一下，不参与任何判断
+            if (h1 == 0L && h2 == 0L) h1 = 1L
+            out[0] = h1
+            out[1] = h2
+        }
+
+        /**
+         * 定长开放寻址的指纹表。
+         *
+         * 不用 `HashSet<Long>`：HashMap.Node 每条约 32 B，加上装箱对象就省不下来了。
+         * 这里两个 Long 连续存，单条 16 B；载入到 [limit]（容量一半）由调用方 clear()。
+         */
+        private class FingerprintSet(val capacity: Int) {
+            private val mask = capacity - 1
+            private val slots = LongArray(capacity * 2)
+
+            /** 存到这个条数就提示调用方清空（载入因子 0.5，保证探测链短）。 */
+            val limit = capacity ushr 1
+
+            var size = 0
+                private set
+
+            fun contains(h1: Long, h2: Long): Boolean {
+                if (h1 == 0L && h2 == 0L) return false
+                var i = index(h1)
+                var probes = 0
+                while (probes < capacity) {
+                    val a = slots[i * 2]
+                    val b = slots[i * 2 + 1]
+                    if (a == 0L && b == 0L) return false
+                    if (a == h1 && b == h2) return true
+                    i = (i + 1) and mask
+                    probes++
+                }
+                return false
+            }
+
+            fun add(h1: Long, h2: Long) {
+                if (h1 == 0L && h2 == 0L) return
+                var i = index(h1)
+                var probes = 0
+                while (probes < capacity) {
+                    val a = slots[i * 2]
+                    val b = slots[i * 2 + 1]
+                    if (a == 0L && b == 0L) {
+                        slots[i * 2] = h1
+                        slots[i * 2 + 1] = h2
+                        size++
+                        return
+                    }
+                    if (a == h1 && b == h2) return
+                    i = (i + 1) and mask
+                    probes++
+                }
+            }
+
+            fun clear() {
+                slots.fill(0L)
+                size = 0
+            }
+
+            private fun index(h: Long): Int = (h xor (h ushr 32)).toInt() and mask
         }
 
         private fun copyInto(src: Array<IntArray>, dst: Array<IntArray>) {
