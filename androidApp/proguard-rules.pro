@@ -1,21 +1,17 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ---------------- TensorFlow Lite / LiteRT ----------------
+# 模型加载与推理全部经由 JNI，native 侧按类名反查 Java 对象；R8 改名会直接
+# 让 Interpreter / Delegate 初始化失败（表现为一启动就 nil 或 UnsatisfiedLinkError）。
+-keep class org.tensorflow.lite.** { *; }
+-keep class com.google.ai.edge.litert.** { *; }
+-dontwarn org.tensorflow.lite.**
+-dontwarn com.google.ai.edge.litert.**
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# GPU delegate 由 TFLite 运行时按字符串反射创建
+-keep class org.tensorflow.lite.gpu.** { *; }
+-keep class org.tensorflow.lite.nnapi.** { *; }
+-dontwarn org.tensorflow.lite.gpu.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ---------------- 保留栈可读性 ----------------
+# 线上崩溃日志要能定位到行，混淆后方法名不可读但行号仍有用
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
