@@ -161,6 +161,13 @@ class HintSession(
     /** 当前执行到 [plan] 的第几步。 */
     private var planIndex = 0
 
+    /** 当前计划是按几行几列算的；执行时和当前 scan 不一致就说明网格换了坐标系。 */
+    private var planRows = 0
+    private var planCols = 0
+
+    /** 连续几次因为网格尺寸变化而作废计划；防止"每帧都在变"时空转。 */
+    private var gridMismatch = 0
+
     /**
      * 上一步**配对砖所在的格子**，下一帧拿它复检这一步有没有真的落地。
      *
@@ -180,8 +187,8 @@ class HintSession(
     /**
      * 本次自动运行是否已经做过第一次完整求解。
      *
-     * 首帧给足预算（[SOLVE_CONFIG_FIRST] / [SOLVE_TIME_BUDGET_FIRST_MS]），目标是一次算准、
-     * 之后只执行计划；只有计划作废时才回到常规预算重算。
+     * 只用来区分控制条文案（首帧 / 重算）；预算已经统一，两者都是
+     * [SOLVE_CONFIG] / [SOLVE_TIME_BUDGET_MS]。
      */
     private var deepSolveDone = false
 
@@ -262,6 +269,8 @@ class HintSession(
         overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         overlay.setBarContinue(AutoContinue.enabled(context))
         updateBar("点「刷新」分析", "")
+        // 首次把两个模型加载掉（约 12 秒），别让它压在第一帧上
+        warmUpModels()
     }
 
     fun stop() {
@@ -289,6 +298,9 @@ class HintSession(
             autoSteps = 0
             plan = emptyList()
             planIndex = 0
+            planRows = 0
+            planCols = 0
+            gridMismatch = 0
             pendingPair = null
             badChecks = 0
             planRounds = 0
@@ -355,6 +367,27 @@ class HintSession(
         val want = ModelVariant.DEFAULT
         Log.i(TAG, "加载识别模型：${want.label}（${want.graphAsset}）")
         return classifierProvider(want).also { loaded = it }
+    }
+
+    /**
+     * 预加载两个模型（YOLO 10.7MB + 识别 12.6MB）。
+     *
+     * 首次构造解释器实测约 12 秒（GPU delegate 初始化 ~8 秒、识别模型加载 ~3.5 秒），
+     * 以前全压在第一帧上，用户看到的就是"首帧 13 秒"。这里在无障碍服务连上、
+     * 悬浮窗刚打开时先在 worker 线程加载好，第一帧只剩 ~0.5 秒的推理。
+     *
+     * 重复调用是安全的：两个字段已经存在时直接复用，不再加载。
+     */
+    fun warmUpModels() {
+        worker.post {
+            val t0 = SystemClock.elapsedRealtime()
+            val warm = loaded != null && yolo != null
+            runCatching { acquireClassifier() }
+                .onFailure { Log.w(TAG, "预加载识别模型失败", it) }
+            runCatching { if (yolo == null) yolo = YoloBoardDetector(context) }
+                .onFailure { Log.w(TAG, "预加载 YOLO 失败", it) }
+            if (!warm) Log.i(TAG, "模型预加载完成，耗时 ${SystemClock.elapsedRealtime() - t0}ms")
+        }
     }
 
     /** 只走 YOLO：模型加载失败或判不出可信网格就返回 null，这一帧直接跳过。 */
@@ -591,6 +624,7 @@ class HintSession(
                 planRounds = 0
                 autoSteps++
                 planIndex++
+                gridMismatch = 0
                 HintUiBus.state = HintUiBus.state.copy(autoSteps = autoSteps)
             } else {
                 // 这一步没落地：整条计划作废，重算（连续几次都不行就报错停）
@@ -623,11 +657,17 @@ class HintSession(
     private fun solveAndPlan(result: HintPipeline.Result) {
         val grid = result.state.asGrid()
         val gen = generation.get()
-        // 本次自动运行的第一次整盘求解给足预算：目标是一次拿到确定解，之后只执行计划。
+        // 首帧和重算用同一份预算（12 万×16 / 120s）：原来重算只给 8 秒，
+        // 8 秒一到就 Unknown、整局停在“已消 0 对”。现在只保留 120 秒这一道挂钟限制。
         val firstSolve = !deepSolveDone
         deepSolveDone = true
-        val config = if (firstSolve) SOLVE_CONFIG_FIRST else SOLVE_CONFIG
-        val budgetMs = if (firstSolve) SOLVE_TIME_BUDGET_FIRST_MS else SOLVE_TIME_BUDGET_MS
+        val config = SOLVE_CONFIG
+        val budgetMs = SOLVE_TIME_BUDGET_MS
+        Log.i(
+            TAG,
+            "求解开始：${if (firstSolve) "首帧" else "重算"}（第 $planRounds 轮），" +
+                "节点 ${config.nodesPerAttempt}×${config.maxAttempts}，挂钟 ${budgetMs}ms",
+        )
         updateBar(
             if (firstSolve) "首帧求解中…（最长 ${budgetMs / 1000} 秒）" else "求解中…",
             "剩 ${countBricks(result.state)} 块",
@@ -650,6 +690,8 @@ class HintSession(
                         }
                         plan = outcome.steps
                         planIndex = 0
+                        planRows = result.scan.rows
+                        planCols = result.scan.cols
                         // 这一帧判的是"有解"：之前攒的无解复核计数作废
                         unsolvableChecks = 0
                         unsolvableGrid = null
@@ -723,10 +765,11 @@ class HintSession(
                     is AutoSolver.Outcome.Unknown -> {
                         // 预算烧完还没结论：**不落子**。
                         // 贪心走一步很可能把有解盘走成真无解 —— 这盘只是"还没算完"，
-                        // 不是"不能解"。保留盘面原样，重新开自动会走首帧的大预算。
+                        // 不是"不能解"。保留盘面原样，重开自动会重新给满 120 秒；
+                        // 但搜索序是固定种子，同一盘面重试大概率还是同样的结果。
                         finishAuto(
                             "求解超预算（${outcome.nodes} 节点），已暂停且未落子。" +
-                                "点「自动通关」用更大预算重试",
+                                "点「自动通关」重试",
                         )
                     }
                 }
@@ -768,7 +811,24 @@ class HintSession(
             tr !in 0 until scan.rows || tc !in 0 until scan.cols ||
             pr !in 0 until scan.rows || pc !in 0 until scan.cols
         ) {
-            finishAuto("解出的坐标越界：识别网格与盘面对不上")
+            // 残局时 YOLO 会把空的顶行/首列裁掉，网格从 14x10 变成 13x10；
+            // 这份计划是按旧坐标系算的，不能硬套到新网格上。作废重算，不要整局停 ——
+            // 砖已经很少，重算基本是毫秒级。
+            Log.w(
+                TAG,
+                "计划坐标越界（计划 ${planRows}x${planCols} / 当前 ${scan.rows}x${scan.cols}）" +
+                    "→ 作废计划，按当前网格重算",
+            )
+            plan = emptyList()
+            planIndex = 0
+            pendingPair = null
+            gridMismatch++
+            if (gridMismatch >= GRID_MISMATCH_LIMIT) {
+                finishAuto("识别网格反复变化（当前 ${scan.rows}x${scan.cols}），没法稳定执行")
+                return
+            }
+            // 下一帧重新识别，autoAdvance 会走"没计划"分支重算
+            main.postDelayed(autoTick, STEP_SETTLE_MS)
             return
         }
 
@@ -969,36 +1029,22 @@ class HintSession(
          */
         const val HINT_HIDE_SETTLE_MS = 150L
 
-        /** 求解参数：一盘只算一次，所以给得比"每帧都算"时宽松。 */
-        val SOLVE_CONFIG = AutoSolver.Config(nodesPerAttempt = 40_000, maxAttempts = 8)
+        /**
+         * 求解参数：首帧和重算同一份预算，节点 12 万/次、最多重启 16 次。
+         *
+         * 原来重算用 4 万×8，32 万节点就先被节点预算掐死，根本轮不到挂钟上限；
+         * 统一之后重算也能吃满下面的 120 秒。
+         */
+        val SOLVE_CONFIG = AutoSolver.Config(nodesPerAttempt = 120_000, maxAttempts = 16)
 
         /**
-         * 首帧求解参数：节点预算 3 倍、重启次数 2 倍。
+         * 求解的挂钟上限：**只保留这一道，120 秒**，首帧和重算一样。
          *
-         * 目的：一次拿到确定解（Solved / Unsolvable），之后只按计划执行，不再反复求解。
-         * 节点预算不能无上限 —— 置换表按状态建 key，位打包后约 160 B/状态：
-         * 12 万条约 19MB，30 万条约 48MB（到顶由 AutoSolver 的 MAX_DEAD_STATES 兜底）。
+         * 8 秒原来是旧版“每帧都要算”的节流阀，后来被沿用到重算上：8 秒一到就返回
+         * `Unknown`，自动层又不落子，整局就停在“已消 0 对”。节点预算仍负责拦内存
+         * （置换表 16 B/状态，12 万约 4 MB），单次尝试特别慢的病态盘由这 120 秒兜底。
          */
-        val SOLVE_CONFIG_FIRST = AutoSolver.Config(nodesPerAttempt = 120_000, maxAttempts = 16)
-
-        /**
-         * 首帧求解的挂钟上限。
-         *
-         * 8s 原本是"每帧都要算"的节流阀；整盘求解只做一次，卡在这里只会把可解局变成
-         * Unknown、退化成 8s/步的贪心。这里放到 120s，节点预算仍负责拦住内存。
-         */
-        const val SOLVE_TIME_BUDGET_FIRST_MS = 120_000L
-
-        /**
-         * 单次求解的挂钟上限。
-         *
-         * [AutoSolver] 自己用的是节点预算，但"单次尝试就是慢"的病态盘（实测有盘单次烧到
-         * 5 秒以上）节点预算拦不住，所以这里再压一道真实时间。超时不会误判无解 ——
-         * 求解器会返回 `Unknown`，退化成贪心走一步、下一帧重算。
-         *
-         * 因为整盘只算一次（不是每步都算），这里可以给得宽一些；要调小的话优先动它。
-         */
-        const val SOLVE_TIME_BUDGET_MS = 8_000L
+        const val SOLVE_TIME_BUDGET_MS = 120_000L
 
         /**
          * 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。
@@ -1061,6 +1107,14 @@ class HintSession(
 
         /** 复检连续这么多次不符（计划里的格子没被消掉），就停下报错。 */
         const val BAD_CHECK_LIMIT = 3
+
+        /**
+         * 网格尺寸连续变化这么多次就不硬撑了。
+         *
+         * 正常残局只会从 14x10 变一次 13x10（空顶行被裁掉），重算一两次就能收尾；
+         * 一直变说明识别在飘，再重算也是空转。
+         */
+        const val GRID_MISMATCH_LIMIT = 3
 
         /** 重新求解的次数上限：一直重算说明盘面/识别在飘。 */
         const val PLAN_ROUND_LIMIT = 12

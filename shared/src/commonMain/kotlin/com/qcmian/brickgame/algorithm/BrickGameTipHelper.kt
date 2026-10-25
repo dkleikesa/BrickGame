@@ -180,15 +180,23 @@ object BrickGameTipHelper {
      */
     private fun uniqueAction(list: List<IntArray>): List<IntArray> {
         val result = ArrayList<IntArray>(list.size)
+        val seen = HashSet<Long>(list.size * 2)
         for (origin in list) {
-            if (result.none { sameAction(it, origin) }) result.add(origin)
+            if (seen.add(packAction(origin))) result.add(origin)
         }
         return result
     }
 
-    private fun sameAction(a: IntArray, b: IntArray): Boolean {
-        for (i in 0 until 6) if (a[i] != b[i]) return false
-        return true
+    /**
+     * 6 个坐标打包成一个 Long 做去重 key。
+     *
+     * 坐标最大 20 行/16 列，每项 8 bit 足够（48 bit < 64）；相比原来
+     * `result.none { 逐项比较 }` 的 O(k²)，去重降到 O(k)。顺序仍由 [result] 保持。
+     */
+    private fun packAction(a: IntArray): Long {
+        var key = 0L
+        for (i in 0 until 6) key = (key shl 8) or (a[i].toLong() and 0xFF)
+        return key
     }
 
     // ---------------------- 纵向（列内移动，行内匹配） ----------------------
@@ -462,9 +470,17 @@ object BrickGameTipHelper {
 
     /**
      * @param action [fromRow, fromCol, toRow, toCol, pairedRow, pairedCol]
+     * @param checkTerminal 是否在最后判"这步之后还有没有动作 / 是否已清空"。
+     *   提示与执行层要这个结论（GAME_SUCCESS / GAME_FAIL）；求解器内部**不要**：
+     *   它把 GAME_FAIL 也当可走，终局由下一层 `moves()` 自然判空。关掉后每节点从
+     *   1+C 次全盘 [findActions] 降到 1 次（C = 候选动作数）。
      * @return GAME_SUCCESS / ACTION_SUCCESS / GAME_FAIL 或各类负数错误码
      */
-    fun actionStep(grid: Array<IntArray>, action: IntArray): Int {
+    fun actionStep(
+        grid: Array<IntArray>,
+        action: IntArray,
+        checkTerminal: Boolean = true,
+    ): Int {
         val fromRow = action[0]
         val fromCol = action[1]
         val toRow = action[2]
@@ -516,6 +532,8 @@ object BrickGameTipHelper {
             if (result < 0) return result
         }
 
+        // 求解器只关心"这一步合不合法"，终局由下一层 moves() 判空，这里直接收工
+        if (!checkTerminal) return ACTION_SUCCESS
         if (isGameSuccess(grid)) return GAME_SUCCESS
         // 直接用 findActions 判空：findMoves 只是它的去重投影，多一次 O(n²) 没用
         if (findActions(grid).isEmpty()) return GAME_FAIL

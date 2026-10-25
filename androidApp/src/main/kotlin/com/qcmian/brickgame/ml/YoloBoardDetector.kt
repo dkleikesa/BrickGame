@@ -60,6 +60,18 @@ class YoloBoardDetector(context: Context) : Closeable {
         val top get() = cy - h / 2f
         val right get() = cx + w / 2f
         val bottom get() = cy + h / 2f
+
+        /**
+         * 点是否落在这个框里（[margin] 是按框宽高的外扩比例）。
+         *
+         * 用来把"棋盘外"的 tile 误检挡掉：实测 0.52 分的框会出现在关卡标题上
+         * （棋盘上方 260px），它的中心会把网格的最小二乘和残差整个带偏。
+         */
+        fun contains(x: Float, y: Float, margin: Float = 0f): Boolean {
+            val mx = w * margin
+            val my = h * margin
+            return x >= left - mx && x <= right + mx && y >= top - my && y <= bottom + my
+        }
     }
 
     /** 有 GPU 就用 GPU：YOLO 全是标准卷积，delegate 支持度比识别模型高得多。 */
@@ -120,14 +132,22 @@ class YoloBoardDetector(context: Context) : Closeable {
             Log.w(TAG, "没有 board 框 → 这一帧放弃")
             return null
         }
-        val tiles = boxes.filter { it.cls == CLS_TILE }
+        // 只认棋盘框内的 tile：模型偶尔会在关卡标题/状态栏上误检一个低分框
+        // （实测 0.52 分、在棋盘上方 260px），它的中心会把最小二乘和残差整个带偏，
+        // 让本来正确的 14x10 也算出 300px 残差、整帧被判"网格不可信"。
+        // 外扩 10% 是为了容纳"board 框略小于实际棋盘"的情况；标题离得远，扩不到。
+        val allTiles = boxes.filter { it.cls == CLS_TILE }
+        val tiles = allTiles.filter { board.contains(it.cx, it.cy, margin = 0.10f) }
+        if (tiles.size != allTiles.size) {
+            Log.i(TAG, "丢弃 ${allTiles.size - tiles.size} 个棋盘外的 tile 框（共 ${allTiles.size} 个）")
+        }
 
         // 残局只剩一两块砖时，砖的尺寸仍然可测（一块就够），缺的是交叉验证的样本数。
         // 所以：砖够多 → 现算并缓存；砖很少 → 复用上一帧的网格，前提是棋盘框还在原位
         // （换关卡/换模式时框会明显跳变，缓存随之作废）。
         val cached = lastGrid?.takeIf { sameBoard(it, board) }
         val grid = when {
-            tiles.size >= 3 -> buildGrid(board, tiles)?.also { lastGrid = it }
+            tiles.size >= 3 -> buildGrid(board, tiles, cached)?.also { lastGrid = it }
             cached != null -> cached.also {
                 Log.i(TAG, "只检出 ${tiles.size} 块砖，复用上一帧网格（${it.rows}x${it.cols}）")
             }
@@ -209,7 +229,7 @@ class YoloBoardDetector(context: Context) : Closeable {
     private var lastGrid: Grid? = null
 
     /** 用 board 框定范围、砖块尺寸定格距，再用砖心最小二乘把网格对齐到砖上。 */
-    private fun buildGrid(board: Box, tiles: List<Box>): Grid? {
+    private fun buildGrid(board: Box, tiles: List<Box>, expected: Grid? = null): Grid? {
         val tileSide = tiles.map { (it.w + it.h) / 2f }.sorted()[tiles.size / 2]
         val pitch = tileSide / TILE_INSET
         if (pitch < 12f) {
@@ -228,30 +248,56 @@ class YoloBoardDetector(context: Context) : Closeable {
                 val rows = baseRows + dr
                 val cols = baseCols + dc
                 if (rows !in 6..20 || cols !in 6..16) continue
-                val fitX = fitAxis(tiles.map { it.cx }.toFloatArray(),
-                    board.left.toDouble(), board.w.toDouble() / cols, cols)
-                val fitY = fitAxis(tiles.map { it.cy }.toFloatArray(),
-                    board.top.toDouble(), board.h.toDouble() / rows, rows)
-                val g = Grid(
-                    left = fitX.first, top = fitY.first,
-                    stepX = fitX.second.toFloat(), stepY = fitY.second.toFloat(),
-                    cols = cols, rows = rows,
-                    boardCx = (board.left + board.right) / 2f,
-                    boardCy = (board.top + board.bottom) / 2f,
-                    boardW = board.w, boardH = board.h,
-                    residual = 0f,
-                )
-                val res = residualOf(g, tiles)
-                if (best == null || res < best.residual) best = g.copyWithResidual(res)
+                val g = fitGrid(board, tiles, rows, cols)
+                if (best == null || g.residual < best.residual) best = g
             }
         }
-        val pick = best ?: return null
+        var pick = best ?: return null
+
+        // 残局里整行/整列空掉时，±1 搜索会把空行裁掉（14 行 → 13 行），坐标系就变了，
+        // 正在执行的计划会"坐标越界"。上一帧网格还在、残差又差不多时，沿用它的行列数：
+        // 换关卡那种真的变了行列数的情况，旧行列数拟合残差会明显更大，不会误锁。
+        if (expected != null && (pick.rows != expected.rows || pick.cols != expected.cols)) {
+            val locked = fitGrid(board, tiles, expected.rows, expected.cols)
+            val tolerance = max(pick.residual * 1.5f, pick.residual + pitch * 0.08f)
+            if (locked.residual <= tolerance && locked.residual <= pitch * 0.35f) {
+                Log.i(
+                    TAG,
+                    "行列数 ${pick.rows}x${pick.cols} → 沿用上一帧 ${expected.rows}x${expected.cols}" +
+                        "（残差 ${pick.residual.roundToInt()} / ${locked.residual.roundToInt()}）",
+                )
+                pick = locked
+            }
+        }
+
         if (pick.residual > pitch * 0.35f) {
             Log.w(TAG, "网格残差 ${pick.residual.roundToInt()}px（上限 ${(pitch * 0.35f).roundToInt()}）" +
                 " → 这一帧不可信，放弃")
             return null
         }
         return pick
+    }
+
+    /** 按给定行列数拟合一套网格；行列数不在这个函数里改。 */
+    private fun fitGrid(board: Box, tiles: List<Box>, rows: Int, cols: Int): Grid {
+        val fitX = fitAxis(
+            tiles.map { it.cx }.toFloatArray(),
+            board.left.toDouble(), board.w.toDouble() / cols, cols,
+        )
+        val fitY = fitAxis(
+            tiles.map { it.cy }.toFloatArray(),
+            board.top.toDouble(), board.h.toDouble() / rows, rows,
+        )
+        val g = Grid(
+            left = fitX.first, top = fitY.first,
+            stepX = fitX.second.toFloat(), stepY = fitY.second.toFloat(),
+            cols = cols, rows = rows,
+            boardCx = (board.left + board.right) / 2f,
+            boardCy = (board.top + board.bottom) / 2f,
+            boardW = board.w, boardH = board.h,
+            residual = 0f,
+        )
+        return g.copyWithResidual(residualOf(g, tiles))
     }
 
     /** 砖块中心到"它所在格中心"的最大距离。网格错一格时等于一个 pitch。 */

@@ -74,6 +74,8 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
         }
         overlay = controller
         session = HintSession(this, this, this, controller) { variant -> buildClassifier(variant) }
+            // 服务一连接就预加载模型：用户切到游戏再点自动时，两个解释器已经就绪
+            .also { it.warmUpModels() }
         registerLockReceiver()
         active = this
         Log.i(TAG, "无障碍服务已连接")

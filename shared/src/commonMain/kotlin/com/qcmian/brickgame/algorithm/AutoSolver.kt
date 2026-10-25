@@ -222,7 +222,8 @@ object AutoSolver {
             for (action in moves) {
                 val child = pool[depth + 1]
                 copyInto(grid, child)
-                BrickGameTipHelper.actionStep(child, action)
+                // 只借 actionStep 落子；终局由下一层 moves() 判空，这里不查
+                BrickGameTipHelper.actionStep(child, action, checkTerminal = false)
                 fingerprint(child, fp)
                 if (dead.contains(fp[0], fp[1])) continue
                 chosen[depth] = action
@@ -251,13 +252,11 @@ object AutoSolver {
             val out = ArrayList<IntArray>(8)
             for (action in BrickGameTipHelper.findActions(grid)) {
                 copyInto(grid, probe)
-                when (BrickGameTipHelper.actionStep(probe, action)) {
-                    // GAME_FAIL 也算"这一步能走"：它说的是这步消完盘面没救了（全局策略问题），
-                    // 不是这一步不合法 —— 求解器要自己决定要不要走这一步。
-                    BrickGameTipHelper.ACTION_SUCCESS,
-                    BrickGameTipHelper.GAME_SUCCESS,
-                    BrickGameTipHelper.GAME_FAIL,
-                    -> out.add(action)
+                // checkTerminal=false：终局交给下一层 moves() 判空。GAME_FAIL 本来也被
+                // 当成"能走"，这里再全盘 findActions 一次纯属浪费 —— 原来每个候选动作
+                // 付一次全盘扫描，是求解器 1.27ms/节点的主要来源。
+                if (BrickGameTipHelper.actionStep(probe, action, checkTerminal = false) > 0) {
+                    out.add(action)
                 }
             }
             return out
