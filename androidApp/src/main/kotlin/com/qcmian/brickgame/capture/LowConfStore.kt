@@ -26,7 +26,9 @@ object LowConfStore {
 
     private const val TAG = "LowConfStore"
 
-    private const val DUMP_DIR = "debug-frames"
+    /** 留档根目录，`Diagnostics` 的 logs 子目录也挂在它下面。 */
+    internal const val DUMP_DIR = "debug-frames"
+
     private const val LOW_CONF_DIR = "low-conf"
 
     /** "没定位到棋盘"的帧留在这里：`debug-frames/scan-fail/`。 */
@@ -34,6 +36,24 @@ object LowConfStore {
 
     /** 最多留这么多帧，别把手机存储攒满（手动刷新一次最多一张）。 */
     private const val KEEP = 200
+
+    /** 分享 ZIP 里最多带几份落盘日志：一份几百 KB，带太多只是重复。 */
+    private const val MAX_SHARE_LOGS = 5
+
+    /** 分享 ZIP 里的说明，免得拿到包的人不知道各目录是什么。 */
+    private val ZIP_README = """
+        BrickGame 留档与诊断日志
+        - low-conf/：低置信度帧，png + 同名 txt（矩阵 / 可疑格 / 耗时）
+        - scan-fail/：定位失败帧，只有 png
+        - logs/logcat_*.txt：自动结束或手动定位失败时落盘的 logcat，文件头写了原因 / 版本 / 机型
+        - logs/logcat.txt：点分享时现抓的 logcat，包含落盘之后的最后几帧
+    """.trimIndent()
+
+    private val LOG_ONLY_README = """
+        BrickGame 诊断日志
+        - logcat_*.txt：自动结束或手动定位失败时落盘的 logcat，文件头写了原因 / 版本 / 机型
+        - logcat.txt：点分享时现抓的 logcat
+    """.trimIndent()
 
     /** 分享用的 ZIP 落在这个 cache 子目录（FileProvider 只暴露它）。 */
     private const val SHARE_DIR = "lowconf-share"
@@ -99,6 +119,7 @@ object LowConfStore {
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
             trim(dir)
+            publish(context)
             Log.i(TAG, "定位失败帧已留档：$stem.png（${dir.absolutePath}）")
         } catch (e: Throwable) {
             Log.w(TAG, "定位失败帧留档失败", e)
@@ -114,16 +135,29 @@ object LowConfStore {
     }
 
     /**
-     * 清空留档（分享完顺手删掉，别一直占存储）：整个目录里的 png + txt，连同上次打包的 ZIP。
-     * @return 删掉的帧数（界面只用来打日志）。
+     * 清空留档与日志（分享完顺手删掉，别一直占存储）：
+     * `low-conf/`、`scan-fail/`、`logs/`、`debug-frames` 根目录的历史产物，连同上次打包的 ZIP。
+     * @return 删掉的截图帧数（低置信 + 定位失败；界面只用来打日志）。
      */
     fun deleteAll(context: Context): Int {
-        val frames = pngs(readDir(context)).size
+        val low = pngs(readDir(context)).size
+        val fail = readFailDir(context)?.let { pngs(it).size } ?: 0
+        val logs = Diagnostics.files(context).size
         readDir(context)?.listFiles()?.forEach { runCatching { it.delete() } }
+        readFailDir(context)?.listFiles()?.forEach { runCatching { it.delete() } }
+        Diagnostics.files(context).forEach { runCatching { it.delete() } }
+        // debug-frames 根目录下还有历史调试产物（latest.png/txt、matrix/），一并清掉
+        context.getExternalFilesDir(DUMP_DIR)?.listFiles()?.forEach { f ->
+            if (f.isFile) {
+                runCatching { f.delete() }
+            } else if (f.name == "matrix") {
+                f.listFiles()?.forEach { runCatching { it.delete() } }
+            }
+        }
         runCatching { File(context.cacheDir, SHARE_DIR).listFiles()?.forEach { it.delete() } }
         publish(context)
-        Log.i(TAG, "已删除 $frames 帧留档")
-        return frames
+        Log.i(TAG, "已删除留档：截图 ${low + fail} 张（低置信 $low / 定位失败 $fail）+ 日志 $logs 份")
+        return low + fail
     }
 
     /**
@@ -137,7 +171,8 @@ object LowConfStore {
         // 而那正是补数据最缺的一类（定位错/没定位到）。
         val groups = listOf(LOW_CONF_DIR to readDir(context), SCAN_FAIL_DIR to readFailDir(context))
             .mapNotNull { (name, dir) -> dir?.takeIf { pngs(it).isNotEmpty() }?.let { name to it } }
-        if (groups.isEmpty()) return null
+        // 落盘的诊断日志也一起打（只带最近几份）；没有截图、只有日志时也要能分享出去
+        val logFiles = Diagnostics.files(context).takeLast(MAX_SHARE_LOGS)
         val outDir = File(context.cacheDir, SHARE_DIR)
         if (!outDir.exists() && !outDir.mkdirs()) return null
         outDir.listFiles()?.forEach { runCatching { it.delete() } }
@@ -154,22 +189,52 @@ object LowConfStore {
                         total++
                     }
                 }
-                // 附上本进程 logcat：出问题时用户只需分享这一个 ZIP，
-                // 定位失败的原因（无 board 框 / 格距太小 / 残差超限 / 第几帧）都在里面。
+                // 先附上落盘的日志（自动结束/定位失败时写的），再补一份"分享时现抓"的：
+                // 落盘之后又跑的那几帧也能带上。没 adb 权限的手机就靠这个 ZIP 拿日志。
+                for (log in logFiles) addEntry(out, log, "logs/${log.name}")
                 addText(out, "logs/logcat.txt", Diagnostics.logcat())
+                addText(out, "README.txt", ZIP_README)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "打包失败", e)
             zip.delete()
             return null
         }
-        Log.i(TAG, "已打包 $total 帧（${groups.joinToString("/") { it.first }}）：$zip")
+        Log.i(TAG, "已打包 $total 帧 + ${logFiles.size} 份日志（${zip.length() / 1024}KB）：$zip")
         return zip
     }
 
-    /** 把当前的留档列表推给界面（写盘/删除后各一次）。 */
+    /**
+     * 只打包日志（落盘 + 分享时现抓的 logcat），给"没 adb、只想发日志排查"的场景用。
+     *
+     * 和 [zipAll] 分开：留档里可能有一百多张 scan-fail 原图，全打包会到上百 MB，
+     * 只想排查一次报错时没必要发整包。
+     */
+    fun zipLogs(context: Context): File? {
+        val outDir = File(context.cacheDir, SHARE_DIR)
+        if (!outDir.exists() && !outDir.mkdirs()) return null
+        val zip = File(outDir, "brickgame-logs.zip")
+        val logs = Diagnostics.files(context).takeLast(MAX_SHARE_LOGS)
+        try {
+            ZipOutputStream(zip.outputStream().buffered()).use { out ->
+                for (log in logs) addEntry(out, log, "logs/${log.name}")
+                addText(out, "logs/logcat.txt", Diagnostics.logcat())
+                addText(out, "README.txt", LOG_ONLY_README)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "打包日志失败", e)
+            zip.delete()
+            return null
+        }
+        Log.i(TAG, "已打包 ${logs.size} 份日志 + 实时 logcat（${zip.length() / 1024}KB）：$zip")
+        return zip
+    }
+
+    /** 把当前的留档/日志列表推给界面（写盘/删除后各一次）。 */
     private fun publish(context: Context) {
         HintUiBus.lowConfShots = shots(context)
+        HintUiBus.scanFailCount = readFailDir(context)?.let { pngs(it).size } ?: 0
+        HintUiBus.logFiles = Diagnostics.files(context)
     }
 
     private fun addEntry(out: ZipOutputStream, file: File, entryName: String = file.name) {

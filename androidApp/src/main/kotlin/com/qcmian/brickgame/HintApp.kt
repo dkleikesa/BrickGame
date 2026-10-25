@@ -219,10 +219,13 @@ fun HintApp() {
                 }
             }
 
+            // 截图和日志一起分享：即使什么都没留，也能把"当前日志"发出来排查
+            val shareFrames = HintUiBus.captureCount
+            val shareLogs = HintUiBus.logCount
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = !sharing && !busy && HintUiBus.lowConfCount > 0,
+                    enabled = !sharing && !busy,
                     onClick = {
                         sharing = true
                         scope.launch {
@@ -231,7 +234,7 @@ fun HintApp() {
                             if (zip == null) {
                                 Log.w(TAG, "打包失败或没有可分享的留档")
                             } else {
-                                shareZip(context, zip, HintUiBus.lowConfCount)
+                                shareZip(context, zip, shareFrames, shareLogs)
                             }
                         }
                     },
@@ -239,27 +242,50 @@ fun HintApp() {
                     Text(
                         when {
                             sharing -> "打包中…"
-                            HintUiBus.lowConfCount == 0 -> "分享（暂无）"
-                            else -> "分享（${HintUiBus.lowConfCount} 张 ZIP）"
+                            shareFrames == 0 && shareLogs == 0 -> "分享当前日志"
+                            shareFrames == 0 -> "分享日志（$shareLogs 份）"
+                            shareLogs == 0 -> "分享（$shareFrames 张 ZIP）"
+                            else -> "分享（$shareFrames 张 + 日志）"
                         },
                     )
                 }
 
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    enabled = !deleting && HintUiBus.lowConfCount > 0,
+                    enabled = !deleting && (HintUiBus.captureCount > 0 || HintUiBus.logCount > 0),
                     onClick = { confirmDelete = true },
                 ) { Text(if (deleting) "删除中…" else "删除留档") }
+            }
+
+            // 只发日志：留档原图可能上百 MB，排查一次报错没必要整包发
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !sharing,
+                onClick = {
+                    sharing = true
+                    scope.launch {
+                        val zip = withContext(Dispatchers.IO) { LowConfStore.zipLogs(context) }
+                        sharing = false
+                        if (zip == null) {
+                            Log.w(TAG, "打包日志失败")
+                        } else {
+                            shareZip(context, zip, 0, HintUiBus.logCount, "分享日志")
+                        }
+                    }
+                },
+            ) {
+                Text(if (sharing) "打包日志中…" else "分享日志（仅 logcat，排查用）")
             }
 
             // 删了就找不回来（真机上的留档是补标注的唯一副本），先确认一次
             if (confirmDelete) {
                 AlertDialog(
                     onDismissRequest = { confirmDelete = false },
-                    title = { Text("删除全部留档？") },
+                    title = { Text("删除全部留档与日志？") },
                     text = {
                         Text(
-                            "${HintUiBus.lowConfCount} 张低置信度截图连同说明文件会被删掉，不能恢复。" +
+                            "${HintUiBus.captureCount} 张留档截图（低置信 + 定位失败）和 " +
+                                "${HintUiBus.logCount} 份诊断日志会被删掉，不能恢复。" +
                                 "已经分享出去的 ZIP 不受影响。",
                         )
                     },
@@ -439,16 +465,23 @@ private const val START_RETRY_MS = 300L
  * 必须经 FileProvider 换成 `content://`：Android 7+ 直接给 `file://` 会抛 FileUriExposedException。
  * 另外补一份 `clipData` —— 有些应用只从里面取 URI，光给 EXTRA_STREAM 会拿不到读权限。
  */
-private fun shareZip(context: Context, zip: File, frames: Int) {
+private fun shareZip(
+    context: Context,
+    zip: File,
+    frames: Int,
+    logs: Int,
+    title: String = "分享留档与日志",
+) {
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", zip)
     val send = Intent(Intent.ACTION_SEND).apply {
         type = "application/zip"
         putExtra(Intent.EXTRA_STREAM, uri)
-        putExtra(Intent.EXTRA_SUBJECT, "BrickGame 低置信度截图（$frames 张）")
+        putExtra(Intent.EXTRA_SUBJECT, "BrickGame 留档（${frames} 张截图 / ${logs} 份落盘日志 + 实时 logcat）")
         clipData = ClipData.newUri(context.contentResolver, "lowconf", uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    context.startActivity(Intent.createChooser(send, "分享低置信度截图"))
+    Log.i(TAG, "分享 ZIP：${zip.name}（${frames} 帧 / ${logs} 份落盘日志，${zip.length() / 1024}KB）")
+    context.startActivity(Intent.createChooser(send, title))
 }
 
 /**

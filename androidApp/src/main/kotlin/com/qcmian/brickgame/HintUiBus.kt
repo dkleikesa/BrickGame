@@ -59,6 +59,16 @@ object HintUiBus {
      */
     var scanFailCount by mutableStateOf(0)
 
+    /**
+     * 已落盘的诊断日志（`debug-frames/logs/`）。
+     *
+     * 没 adb 权限的手机靠分享 ZIP 把日志带出来；界面用它决定"只有日志、没有截图"时
+     * 分享按钮也可用。
+     */
+    var logFiles by mutableStateOf<List<File>>(emptyList())
+
+    val logCount: Int get() = logFiles.size
+
     /** 可分享/可删除的总帧数。 */
     val captureCount: Int get() = lowConfCount + scanFailCount
 }

@@ -269,12 +269,14 @@ class HintSession(
         overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         overlay.setBarContinue(AutoContinue.enabled(context))
         updateBar("点「刷新」分析", "")
+        Log.i(TAG, "会话开始：${Diagnostics.header(context)}")
         // 首次把两个模型加载掉（约 12 秒），别让它压在第一帧上
         warmUpModels()
     }
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
+        Log.i(TAG, "会话停止：帧数=$frames 已消=$autoSteps 对 未决帧=$planIndex/${plan.size}")
         auto.set(false)
         active.set(false)
         capturing.set(false)
@@ -311,6 +313,7 @@ class HintSession(
             deepSolveDone = false
             HintUiBus.state = HintUiBus.state.copy(auto = true, autoSteps = 0, autoMessage = null)
             overlay.setBarAuto(true)
+            Log.i(TAG, "自动开始")
         }
         if (!running.get()) {
             start()
@@ -327,6 +330,7 @@ class HintSession(
         overlay.setBarAuto(false)
         HintUiBus.state = HintUiBus.state.copy(auto = false)
         updateBar("已停止", "已消 $autoSteps 对")
+        Log.i(TAG, "自动停止（手动）：已消 $autoSteps 对，未决帧=$planIndex/${plan.size}")
     }
 
     /**
@@ -366,7 +370,11 @@ class HintSession(
         closeClassifier()
         val want = ModelVariant.DEFAULT
         Log.i(TAG, "加载识别模型：${want.label}（${want.graphAsset}）")
-        return classifierProvider(want).also { loaded = it }
+        val t0 = SystemClock.elapsedRealtime()
+        return classifierProvider(want).also {
+            loaded = it
+            Log.i(TAG, "识别模型加载完成：${want.label}，耗时 ${SystemClock.elapsedRealtime() - t0}ms")
+        }
     }
 
     /**
@@ -392,7 +400,13 @@ class HintSession(
 
     /** 只走 YOLO：模型加载失败或判不出可信网格就返回 null，这一帧直接跳过。 */
     private fun localize(frame: Bitmap): BoardScan? {
-        val detector = yolo ?: runCatching { YoloBoardDetector(context).also { yolo = it } }
+        val detector = yolo ?: runCatching {
+            val t0 = SystemClock.elapsedRealtime()
+            YoloBoardDetector(context).also {
+                yolo = it
+                Log.i(TAG, "YOLO 定位器加载完成，耗时 ${SystemClock.elapsedRealtime() - t0}ms")
+            }
+        }
             .onFailure { Log.w(TAG, "YOLO 模型加载失败", it) }
             .getOrNull()
             ?: return null
@@ -520,6 +534,9 @@ class HintSession(
         if (result == null) {
             val message = "定位失败：没找到成排的格子（确认目标游戏是全屏、截图没有黑边）"
             updateBar("未识别到棋盘", "", message)
+            Log.w(TAG, "未识别到棋盘：$message（auto=${auto.get()}，已消 $autoSteps 对）")
+            // 手动刷新失败也落一份日志：没 adb 权限时用户只能靠分享 ZIP 带出来
+            if (!auto.get()) saveLogAsync("定位失败")
             // 自动模式下这一帧不算数：连续几次都定位不到（多半是切走了应用/游戏不在前台）就停，
             // 否则会一直空转。定位到之后下面会把计数清零。
             if (auto.get()) {
@@ -584,6 +601,8 @@ class HintSession(
             TAG,
             "第 $frames 帧[${result.modelLabel}]：${scan.rows}x${scan.cols} 砖块 $bricks " +
                 "空位 ${scan.cellCount - bricks} 可消对=${hints.size}" +
+                (result.scanSuspect?.let { " ⚠$it" } ?: "") +
+                (if (result.lowConfidence.isNotEmpty()) " 可疑格=${result.lowConfidence.size}" else "") +
                 (if (result.stuck) "（识别疑似有误：有砖块但无解）" else "") +
                 " | 截屏 ${captureMs}ms " + result.timingText() + " | 端到端 ${totalMs}ms",
         )
@@ -629,6 +648,11 @@ class HintSession(
             } else {
                 // 这一步没落地：整条计划作废，重算（连续几次都不行就报错停）
                 badChecks++
+                Log.w(
+                    TAG,
+                    "复检不符：配对格 (${pair.row},${pair.col}) 仍未消，计划作废" +
+                        "（badChecks=$badChecks/${BAD_CHECK_LIMIT}）",
+                )
                 plan = emptyList()
                 planIndex = 0
                 if (badChecks >= BAD_CHECK_LIMIT) {
@@ -675,11 +699,13 @@ class HintSession(
 
         worker.post {
             // 节点预算拦不住"单次尝试就是慢"的病态盘，再压一道挂钟上限
-            val deadline = SystemClock.elapsedRealtime() + budgetMs
+            val solveStart = SystemClock.elapsedRealtime()
+            val deadline = solveStart + budgetMs
             val outcome = AutoSolver.solve(grid, config) {
                 // 停止自动时立刻收工：首帧最长可能跑 120s，不该让线程空烧完
                 SystemClock.elapsedRealtime() > deadline || !auto.get()
             }
+            val solveMs = SystemClock.elapsedRealtime() - solveStart
             main.post {
                 if (gen != generation.get() || !auto.get()) return@post
                 when (outcome) {
@@ -695,7 +721,7 @@ class HintSession(
                         // 这一帧判的是"有解"：之前攒的无解复核计数作废
                         unsolvableChecks = 0
                         unsolvableGrid = null
-                        Log.i(TAG, "自动计划就绪：${plan.size} 步（第 $planRounds 次求解）")
+                        Log.i(TAG, "自动计划就绪：${plan.size} 步（第 $planRounds 次求解，${solveMs}ms）")
                         // 先把"一共多少步"亮出来再动手：不给这一下停顿的话，
                         // 紧接着的 [playStep] 会把它覆盖成"第 1/N 步"，用户根本看不到总数。
                         updateBar(
@@ -710,6 +736,7 @@ class HintSession(
                     }
 
                     AutoSolver.Outcome.Unsolvable -> {
+                        Log.w(TAG, "求解结论：无解（${solveMs}ms，剩 ${countBricks(result.state)} 块）")
                         if (!AutoContinue.enabled(context)) {
                             // 复核：同一盘面读两遍都无解才认。盘面变了说明上一帧的判空有误，
                             // 接着换帧，最多换 UNSOLVABLE_CONFIRM_LIMIT 次（见 [unsolvableChecks]）。
@@ -767,8 +794,9 @@ class HintSession(
                         // 贪心走一步很可能把有解盘走成真无解 —— 这盘只是"还没算完"，
                         // 不是"不能解"。保留盘面原样，重开自动会重新给满 120 秒；
                         // 但搜索序是固定种子，同一盘面重试大概率还是同样的结果。
+                        Log.w(TAG, "求解超预算：${outcome.nodes} 节点，${solveMs}ms，剩 ${countBricks(result.state)} 块")
                         finishAuto(
-                            "求解超预算（${outcome.nodes} 节点），已暂停且未落子。" +
+                            "求解超预算（${outcome.nodes} 节点，${solveMs}ms），已暂停且未落子。" +
                                 "点「自动通关」重试",
                         )
                     }
@@ -839,6 +867,16 @@ class HintSession(
         // 滑完之后那块砖是否同时对齐两块同款砖：是的话游戏会让玩家二选一，
         // 只在落点松手什么都不会消（真机实测：反复"滑动没生效"）。
         val ambiguous = !inPlace && ambiguousAfterMove(result.state, action)
+        val stepTag = if (plan.isNotEmpty()) "第 ${planIndex + 1}/${plan.size} 步" else "贪心"
+        Log.i(
+            TAG,
+            "$stepTag：($fr,$fc)→($tr,$tc) 配($pr,$pc) " +
+                when {
+                    inPlace -> "原地消"
+                    ambiguous -> "滑动+补点"
+                    else -> "滑动"
+                },
+        )
         // 直消：第一下点起点、第二下点配对砖；滑动：起点滑到落点格中心（再多推一点，见 [overshoot]）。
         val target = if (inPlace) pairRect else toRect
         val x1 = from.centerX.toFloat()
@@ -1002,6 +1040,24 @@ class HintSession(
         // 以前两行都塞 message，屏幕上就是同一句话重复两遍
         updateBar("已停止 · 已消 $autoSteps 对", "", message)
         Log.i(TAG, "自动结束：$message（已消 $autoSteps 对）")
+        // 把这一轮的 logcat 落一份盘：没 adb 权限的手机靠分享 ZIP 把 logs/ 带出来
+        saveLogAsync(message)
+    }
+
+    /**
+     * 把当前进程的 logcat 另存一份（后台写盘），分享 ZIP 会带上 `logs/` 下的文件。
+     *
+     * 只在"自动结束 / 手动定位失败"这种值得查的时刻调用；写盘约几十到几百毫秒，
+     * 不能放主线程。会话已经 release 时队列已关，这里吞掉拒绝异常。
+     */
+    private fun saveLogAsync(reason: String) {
+        runCatching {
+            dumpExecutor.execute {
+                Diagnostics.save(context, reason)
+                // 日志份数变了，顺手刷新分享按钮
+                LowConfStore.refresh(context)
+            }
+        }.onFailure { Log.w(TAG, "日志留档排队失败", it) }
     }
 
     private fun countBricks(state: com.qcmian.brickgame.vision.BoardState): Int =

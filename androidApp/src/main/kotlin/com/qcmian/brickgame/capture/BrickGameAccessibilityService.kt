@@ -78,7 +78,7 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
             .also { it.warmUpModels() }
         registerLockReceiver()
         active = this
-        Log.i(TAG, "无障碍服务已连接")
+        Log.i(TAG, "无障碍服务已连接：${Diagnostics.header(this)}")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
