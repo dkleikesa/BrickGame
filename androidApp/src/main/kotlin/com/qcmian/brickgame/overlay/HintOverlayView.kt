@@ -5,7 +5,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
-import android.os.SystemClock
 import android.view.View
 import com.qcmian.brickgame.vision.BoardScan
 import com.qcmian.brickgame.vision.BoardState
@@ -20,7 +19,6 @@ import kotlin.math.min
  * 而且会盖住游戏本身的元素。所以默认只画提示那几格：
  *  - 全部统一**红色 50% 透明度**的框，尺寸内缩到跟砖块一样大；
  *  - 同一对的两块砖上写**同一个序号**（颜色都一样，靠序号认对）；
- *  - 一出现先闪 [FLASHES_PER_BURST] 下（每下 [FLASH_ON_MS]，间隔 [FLASH_GAP_MS]）再稳住常亮。
  *  - **不画箭头**：玩家只要知道哪两块可以消，滑哪边由游戏自己判定。
  *
  * 网格和类别号是**调试图层**，默认关（悬浮条上的「网格」「类别号」开关，点了立刻重画）；
@@ -41,21 +39,10 @@ class HintOverlayView(context: Context) : View(context) {
         val showLabels: Boolean,
     )
 
-    /** 当前这批提示开始闪烁的时刻（[SystemClock.uptimeMillis]），用来算"开场闪 2 下"的进度。 */
-    private var hintSince = 0L
-
     var frame: Frame? = null
         set(value) {
-            val hintChanged = value?.hints != field?.hints
             field = value
             invalidate()
-            // 有提示才需要跑开场闪烁；没提示就把回调摘掉，别空转
-            if (!value?.hints.isNullOrEmpty()) {
-                if (hintChanged) hintSince = SystemClock.uptimeMillis()
-                scheduleBlink()
-            } else {
-                stopBlink()
-            }
         }
 
     private val rect = RectF()
@@ -167,8 +154,6 @@ class HintOverlayView(context: Context) : View(context) {
     private fun drawHints(canvas: Canvas, f: Frame) {
         val hints = f.hints
         if (hints.isEmpty()) return
-        // 开场闪烁的"灭"段整批不画；闪完之后这里恒为 true，提示框稳住常亮
-        if (!blinkVisible(SystemClock.uptimeMillis())) return
         val first = hints.first().fromRect
         pairText.textSize = min(first.width, first.height) * 0.5f
         pairHalo.textSize = pairText.textSize
@@ -204,65 +189,6 @@ class HintOverlayView(context: Context) : View(context) {
         canvas.drawText(label, x, y, pairText)
     }
 
-    // ---- 闪烁调度：开场闪 2 下，之后稳住常亮 ----
-
-    /**
-     * 当前这一帧要不要画提示框。
-     *
-     * 节奏是"开场吸引注意"：提示一出现先闪 [FLASHES_PER_BURST] 下（亮 [FLASH_ON_MS]、
-     * 间隔 [FLASH_GAP_MS]），闪完就**稳住常亮**，不再闪。之前实现成一直循环闪，看着就是不停频闪。
-     */
-    private fun blinkVisible(now: Long): Boolean {
-        val elapsed = now - hintSince
-        if (elapsed >= BLINK_INTRO_MS) return true      // 闪完了：常亮
-        var t = elapsed
-        repeat(FLASHES_PER_BURST) {
-            if (t < FLASH_ON_MS) return true
-            t -= FLASH_ON_MS
-            if (t < FLASH_GAP_MS) return false
-            t -= FLASH_GAP_MS
-        }
-        return false        // 第二下闪完到开场结束之间的间隙：灭
-    }
-
-    private val blinkTick = Runnable {
-        if (frame?.hints.isNullOrEmpty()) return@Runnable
-        if (SystemClock.uptimeMillis() - hintSince < BLINK_INTRO_MS) {
-            invalidate()
-            scheduleBlink()
-        } else {
-            invalidate()    // 收尾：按"常亮"重画一次，之后不再调度
-        }
-    }
-
-    /** 在下一个"亮/灭"翻转点重画，避免按固定帧率空转。 */
-    private fun scheduleBlink() {
-        stopBlink()      // 防止 frame 被反复赋值时叠加多个循环
-        postDelayed(blinkTick, nextPhaseDelay(SystemClock.uptimeMillis() - hintSince))
-    }
-
-    /** 距离下一次亮/灭翻转还有多久（只在开场闪烁的那一段里调度）。 */
-    private fun nextPhaseDelay(elapsed: Long): Long {
-        val p = elapsed.coerceAtMost(BLINK_INTRO_MS - 1)
-        var t = 0L
-        repeat(FLASHES_PER_BURST) {
-            val onEnd = t + FLASH_ON_MS
-            if (p < onEnd) return onEnd - p
-            val offEnd = onEnd + FLASH_GAP_MS
-            if (p < offEnd) return offEnd - p
-            t = offEnd
-        }
-        return BLINK_INTRO_MS - p
-    }
-
-    private fun stopBlink() {
-        removeCallbacks(blinkTick)
-    }
-
-    override fun onDetachedFromWindow() {
-        stopBlink()
-        super.onDetachedFromWindow()
-    }
 
     /** 类别调色板：只为了肉眼区分，颜色本身没有语义。 */
     private fun classColor(label: Int): Int = PALETTE[(label - 1).mod(PALETTE.size)]
@@ -275,11 +201,6 @@ class HintOverlayView(context: Context) : View(context) {
         const val HINT_COLOR = 0xFFFF0000.toInt()
         const val HINT_FILL_ALPHA = 0x80000000.toInt()
 
-        /** 开场闪烁：亮 [FLASH_ON_MS]、灭 [FLASH_GAP_MS]，共 [FLASHES_PER_BURST] 下，闪完转常亮。 */
-        const val FLASH_ON_MS = 500L
-        const val FLASH_GAP_MS = 500L
-        const val FLASHES_PER_BURST = 2
-        const val BLINK_INTRO_MS = FLASHES_PER_BURST * (FLASH_ON_MS + FLASH_GAP_MS)
 
         val PALETTE = intArrayOf(
             0xFFE6194B.toInt(), 0xFF3CB44B.toInt(), 0xFFFFE119.toInt(), 0xFF4363D8.toInt(),

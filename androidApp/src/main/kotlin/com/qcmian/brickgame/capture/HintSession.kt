@@ -244,7 +244,13 @@ class HintSession(
         }
     }
 
-    /** 开始提示：挂悬浮窗 + 立刻跑一帧。手动模式下之后等用户点「刷新」。 */
+    /**
+     * 开始提示：**只挂悬浮窗，不跑帧**。
+     *
+     * 点「显示悬浮窗」时前台通常还是本 App，截到的不是游戏 —— 这一帧必然定位失败，
+     * 白付几秒截屏+分析的代价。手动模式由用户切到游戏后点「刷新」；
+     * 自动模式由 [startAuto] 自己起第一帧。
+     */
     fun start() {
         if (!running.compareAndSet(false, true)) return
         overlay.show()
@@ -255,7 +261,7 @@ class HintSession(
         overlay.setBarAuto(auto.get())
         overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
         overlay.setBarContinue(AutoContinue.enabled(context))
-        refreshNow()
+        updateBar("点「刷新」分析", "")
     }
 
     fun stop() {
@@ -275,7 +281,7 @@ class HintSession(
     /**
      * 开始自动通关：清空进度，跑第一帧，之后由 [handle] → [autoAdvance] → 手势 → 下一帧闭环推进。
      *
-     * 注意 [auto] **必须在 [start] 之前置位**：`start()` 会立刻跑一帧，那一帧的 [handle]
+     * 注意 [auto] **必须在起帧之前置位**：本方法在最后自己调 [refreshNow]，那一帧的 [handle]
      * 结尾要看到 auto=true 才会往下走，反过来的话第一帧就白跑了。
      */
     fun startAuto() {
@@ -296,9 +302,9 @@ class HintSession(
         }
         if (!running.get()) {
             start()
-        } else if (!capturing.get()) {
-            refreshNow()
         }
+        // start() 不再代为起帧；自动模式必须自己跑第一帧
+        if (!capturing.get()) refreshNow()
         updateBar("识别中…", "")
     }
 
