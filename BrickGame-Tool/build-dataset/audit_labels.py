@@ -15,11 +15,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 
 from ultralytics import YOLO
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))       # BrickGame-Tool/，为了 import yolo_config
+from yolo_config import CONF, predict_kwargs  # noqa: E402
+
 YOLO_DIR = os.path.join(HERE, "yolo")
 SAMPLES = os.path.join(HERE, "samples")
 DEFAULT_WEIGHTS = os.path.join(os.path.dirname(HERE), "runs", "brick", "weights", "best.pt")
@@ -29,7 +33,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", default=DEFAULT_WEIGHTS)
     ap.add_argument("--gap", type=int, default=10, help="模型比标签多这么多块砖才算漏标")
-    ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--conf", type=float, default=CONF)
     args = ap.parse_args()
 
     if not os.path.exists(args.weights):
@@ -49,7 +53,7 @@ def main() -> None:
         rows_raw = [line.split() for line in open(lab, encoding="utf-8") if line.split()]
         lab_t = [list(map(float, q[1:5])) for q in rows_raw if q[0] == "1"]
         lab_b = [list(map(float, q[1:5])) for q in rows_raw if q[0] == "0"]
-        res = model.predict(img, imgsz=640, conf=args.conf, iou=0.45, verbose=False)[0]
+        res = model.predict(img, **predict_kwargs(args.conf))[0]
         H, W = res.orig_shape
         mod_t = [[(x1 + x2) / 2 / W, (y1 + y2) / 2 / H, (x2 - x1) / W, (y2 - y1) / H]
                  for (x1, y1, x2, y2), c in zip(res.boxes.xyxy.cpu().numpy(),

@@ -19,12 +19,14 @@ from ultralytics import YOLO
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
+sys.path.insert(0, _ROOT)                       # 为了 import yolo_config
+from yolo_config import CONF, TILE_INSET, predict_kwargs  # noqa: E402
+
 DEFAULT_WEIGHTS = os.path.join(_ROOT, "runs", "brick", "weights", "best.pt")
 # 新机器/新克隆还没有 runs/ 时，用仓库里已经打进 APK 的那份模型兜底 ——
 # 不然"切新截图"这一步会因为找不到 .pt 直接卡死。
 ASSET_WEIGHTS = os.path.join(os.path.dirname(_ROOT), "androidApp", "src", "main", "assets",
                              "brick_yolo.tflite")
-TILE_INSET = 0.88   # 训练时 tile 框每边内缩 6%，框宽 = 0.88 格
 
 _model = None
 
@@ -69,12 +71,12 @@ def _fit_axis(centers, start, step0, count):
     return center0 - step / 2.0, step
 
 
-def grid_of(img: np.ndarray, weights: str = "", conf: float = 0.25):
+def grid_of(img: np.ndarray, weights: str = "", conf: float = CONF):
     """
     @return (xlines, ylines, rows, cols) 或 None（砖太少/残差过大，判不出可信网格）。
     """
     model = _load(resolve_weights(weights))
-    res = model.predict(img, imgsz=640, conf=conf, iou=0.45, verbose=False)[0]  # 与 YoloBoardDetector.NMS_IOU 一致
+    res = model.predict(img, **predict_kwargs(conf))[0]
     board = None
     tiles = []
     for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy()):

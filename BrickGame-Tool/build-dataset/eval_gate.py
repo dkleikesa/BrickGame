@@ -29,6 +29,9 @@ from ultralytics import YOLO
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)                        # 为了 import yolo_config
+from yolo_config import CONF, predict_kwargs  # noqa: E402
+
 YOLO_DIR = os.path.join(HERE, "yolo")
 METRICS = os.path.join(ROOT, "runs", "brick", "metrics.json")
 
@@ -74,7 +77,7 @@ def evaluate(weights: str, conf: float) -> dict:
         for line in open(os.path.join(YOLO_DIR, "labels", split, base + ".txt")):
             c, cx, cy, w, h = line.split()[:5]
             gt.append((int(c), xywh2xyxy([float(cx), float(cy), float(w), float(h)])))
-        res = model.predict(img, imgsz=640, conf=conf, iou=0.45, verbose=False)[0]  # 与端侧 NMS 一致
+        res = model.predict(img, **predict_kwargs(conf))[0]  # 方图 letterbox，与端侧一致
         h_, w_ = res.orig_shape
         preds = []
         for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy()):
@@ -123,7 +126,7 @@ def fmt(m: dict) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", default=os.path.join(ROOT, "runs", "brick", "weights", "best.pt"))
-    ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--conf", type=float, default=CONF)
     ap.add_argument("--update", action="store_true", help="通过后把这版写成新基线")
     ap.add_argument("--force", action="store_true", help="不达标也更新基线")
     ap.add_argument("--allow-unreviewed", action="store_true",

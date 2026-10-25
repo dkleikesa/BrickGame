@@ -16,10 +16,15 @@
 `prelabel_yolo.py` → `box_server.py`（人工删/补）→ 本脚本 → `train_yolo.py`。
 
 产物：
-  yolo/images/{train,val}/<base>.*   帧图（按 split 复制）
+  yolo/images/{train,val}/<base>.*   帧图（按 split 复制，长边缩到 MAX_SIDE=1024）
   yolo/labels/{train,val}/<base>.txt 框（被 box_server 就地修改，本脚本不覆盖已确认的）
   yolo/meta.json                     帧清单 + split + reviewed 标记
   yolo/data.yaml                     ultralytics 数据集描述
+
+存图尺寸与模型输入尺寸都在 yolo_config.py 里定：MAX_SIDE = IMG_H = 1024，
+模型输入 1024x480（高x宽）。存图高度与模型输入高度相等，内容 1:1 不放大；
+宽 480 覆盖 461 宽的内容，只补少量灰边。改尺寸后**必须**重跑本脚本，把旧尺寸的图
+从 samples/ 原图重做（框是归一化的，重做不会错位）。
 
 用法：
   .venv-train/bin/python build-dataset/make_yolo_data.py
@@ -33,36 +38,51 @@ import csv
 import hashlib
 import json
 import os
+import sys
 
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))       # BrickGame-Tool/，为了 import yolo_config
+from yolo_config import IMG_H, IMG_W, MAX_SIDE   # noqa: E402
+
 OUT = os.path.join(HERE, "yolo")
 REVIEWED = os.path.join(OUT, "reviewed.json")
 PRELABEL = os.path.join(OUT, "prelabel")
-MAX_SIDE = 640          # ultralytics imgsz；超过它的像素训练/推理都看不到
 
 
-def copy_image(src: str, dst: str) -> None:
-    """复制帧图，长边超过 MAX_SIDE 的按比例缩到 MAX_SIDE。
+def target_size(w: int, h: int) -> tuple[int, int]:
+    """按 MAX_SIDE 等比缩放后的目标尺寸；本来就不超的不放大。"""
+    longest = max(w, h)
+    if longest <= MAX_SIDE:
+        return w, h
+    return (round(w * MAX_SIDE / longest), round(h * MAX_SIDE / longest))
 
-    训练和推理都在 imgsz=640 下做，1080x2400 原图等于存了 3.75 倍线性冗余
-    （约 14 倍像素）；图库体积 99M -> 11M，模型输入不变。
+
+def copy_image(src: str, dst: str) -> tuple[bool, tuple[int, int]]:
+    """复制帧图并按 MAX_SIDE 等比缩放。
+
+    @return (是否重写了文件, 存图尺寸)。
+
+    判据是**目标尺寸**，不是"长边没超 MAX_SIDE"。640 → 1024 升级时旧图长边
+    640 也满足 ≤1024，旧逻辑会直接跳过，训练于是还在用 640 的图 ——
+    放大了但小砖的像素信息并没有回来，白跑一轮。目标尺寸一致才跳过，
+    顺带保证反复装配不会把 PNG/JPG 反复重编码。
     """
-    if os.path.exists(dst):
-        with Image.open(dst) as done:
-            if max(done.size) <= MAX_SIDE:
-                return      # 已装配过：重复 open+save 会让 JPG 每跑一次再压一代
     with Image.open(src) as im:
         w, h = im.size
-        longest = max(w, h)
-        if longest > MAX_SIDE:
-            im = im.resize((round(w * MAX_SIDE / longest), round(h * MAX_SIDE / longest)),
-                           Image.LANCZOS)
+        tw, th = target_size(w, h)
+        if os.path.exists(dst):
+            with Image.open(dst) as done:
+                if done.size == (tw, th):
+                    return False, (tw, th)      # 已按当前 MAX_SIDE 装配过
+        if (tw, th) != (w, h):
+            im = im.resize((tw, th), Image.LANCZOS)
         if dst.lower().endswith((".jpg", ".jpeg")):
             im.convert("RGB").save(dst, "JPEG", quality=90, subsampling=0)
         else:
             im.save(dst, "PNG", optimize=True)
+    return True, (tw, th)
 
 
 def base_of(stem: str) -> str:
@@ -115,12 +135,28 @@ def read_labels(path: str) -> list[tuple[int, float, float, float, float]]:
 
 
 def ledger_shapes() -> dict[str, tuple[int, int]]:
-    """台账里的行列数，只用来统计和分层抽 val —— 不参与框的计算。"""
+    """行列数（只用来统计、分层抽 val、按格比漏标）—— 不参与框的计算。
+
+    frames.csv 只覆盖早期那批（114 帧），后来收的 lowconf 帧没有台账。
+    所以先把**上一次装配**的 meta.json 里的 rows/cols 兜进来，否则每次重跑
+    都会把这 86 帧洗成 0，audit_labels 的"按格比漏标"直接退化回按框数比。
+    台账优先：人工修正过 frames.csv 的帧以台账为准。
+    """
+    shapes: dict[str, tuple[int, int]] = {}
+    meta_path = os.path.join(OUT, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            for m in json.load(open(meta_path, encoding="utf-8")):
+                if m.get("rows") and m.get("cols"):
+                    shapes[m["src"]] = (int(m["rows"]), int(m["cols"]))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass            # meta 坏了就当没有，下面从台账重建
     path = os.path.join(HERE, "dataset", "frames.csv")
-    if not os.path.exists(path):
-        return {}
-    with open(path, newline="", encoding="utf-8") as f:
-        return {r["frame"]: (int(r["rows"]), int(r["cols"])) for r in csv.DictReader(f)}
+    if os.path.exists(path):
+        with open(path, newline="", encoding="utf-8") as f:
+            shapes.update({r["frame"]: (int(r["rows"]), int(r["cols"]))
+                           for r in csv.DictReader(f)})
+    return shapes
 
 
 def audit(meta: list[dict]) -> None:
@@ -299,12 +335,16 @@ def main() -> None:
     keep_images: set[str] = set()
 
     meta = []
+    rebuilt, lowres = 0, []
     for f in frames:
         stem, split_of = f["stem"], split[f["stem"]]
         base = base_of(stem)
         img_name = base + os.path.splitext(f["file"])[1]
-        copy_image(os.path.join(args.samples, f["file"]),
-                   os.path.join(OUT, "images", split_of, img_name))
+        wrote, (sw, sh) = copy_image(os.path.join(args.samples, f["file"]),
+                                     os.path.join(OUT, "images", split_of, img_name))
+        rebuilt += int(wrote)
+        if max(sw, sh) < MAX_SIDE:
+            lowres.append(f"{img_name}({sw}x{sh})")
         keep_images.add(f"{split_of}/{img_name}")
 
         target = os.path.join(label_dir(split_of), base + ".txt")
@@ -345,6 +385,11 @@ def main() -> None:
     n_unreviewed = sum(1 for m in meta if not m["reviewed"])
     print(f"帧 {len(meta)}（train {n_train} / val {len(meta) - n_train}），"
           f"tile 框 {n_tile}，board 框 {len(meta)}")
+    print(f"存图长边 {MAX_SIDE}（模型输入 {IMG_H}x{IMG_W}，只补左右灰边），"
+          f"本次重做 {rebuilt} 张")
+    if lowres:
+        print(f"  ⚠ {len(lowres)} 张原图本身不到 {MAX_SIDE}px，只能原样存（细节回不来）："
+              f"{', '.join(lowres[:5])}{' …' if len(lowres) > 5 else ''}")
     by_layout: dict[str, list[int]] = {}
     for m in meta:
         if m["rows"]:

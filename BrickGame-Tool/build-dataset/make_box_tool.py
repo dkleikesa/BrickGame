@@ -513,8 +513,8 @@ def build_data(show_all: bool = False, offset: int = 0, limit: int | None = None
     data = []
     for m, boxes, cov, is_done in page:
         split, base = m["split"], m["file"]
-        # 优先取 samples 原图：yolo/images 已按 imgsz 缩到 640，拿它画 460 宽的预览
-        # 等于反向放大，tile 边缘会糊，人工补框看不准。
+        # 优先取 samples 原图：yolo/images 已按 MAX_SIDE（=IMG_H）缩过，拿它画
+        # 460 宽的预览等于再缩一次，tile 边缘会糊，人工补框看不准。
         img_path = None
         for ext in (".jpg", ".png", ".jpeg"):
             p = os.path.join(SAMPLES, m["src"] + ext)

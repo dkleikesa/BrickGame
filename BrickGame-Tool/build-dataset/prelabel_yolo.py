@@ -25,6 +25,8 @@ import sys
 from ultralytics import YOLO
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from yolo_config import CONF, predict_kwargs  # noqa: E402
 from yolo_grid import resolve_weights  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +44,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--samples", default=os.path.join(HERE, "samples"))
     ap.add_argument("--weights", default="", help="留空 = runs/brick/weights/best.pt，缺失时用 APK 资产")
-    ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--conf", type=float, default=CONF)
     ap.add_argument("--all", action="store_true")
     args = ap.parse_args()
     os.makedirs(PRE, exist_ok=True)
@@ -60,10 +62,9 @@ def main() -> None:
     total_tile = 0
     for name in todo:
         stem = os.path.splitext(name)[0]
-        # iou 必须与端侧 YoloBoardDetector 的 NMS_IOU=0.45 一致：
-        # 用 ultralytics 默认的 0.7 会给同一块砖留两个重叠框，预标注直接带上重复。
-        res = model.predict(os.path.join(args.samples, name), imgsz=640,
-                            conf=args.conf, iou=0.45, verbose=False)[0]
+        # imgsz/iou 与训练、端侧 YoloBoardDetector 同一个来源（yolo_config）：
+        # 用 ultralytics 默认的 iou=0.7 会给同一块砖留两个重叠框，预标注直接带上重复。
+        res = model.predict(os.path.join(args.samples, name), **predict_kwargs(args.conf))[0]
         h, w = res.orig_shape
         boxes = []
         for box, cls, cf in zip(res.boxes.xyxy.cpu().numpy(),

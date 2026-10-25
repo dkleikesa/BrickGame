@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""在 36 张图上逐帧评估 board/tile 检测（train 与 val 分开报，避免自证）。"""
+"""在全量帧上逐帧评估 board/tile 检测（train 与 val 分开报，避免自证）。"""
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 
 import numpy as np
 from ultralytics import YOLO
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))       # BrickGame-Tool/，为了 import yolo_config
+from yolo_config import predict_kwargs  # noqa: E402
+
 YOLO_DIR = os.path.join(HERE, "yolo")
 WEIGHTS = os.path.join(os.path.dirname(HERE), "runs", "brick", "weights", "best.pt")
 
@@ -30,7 +35,11 @@ def xywh2xyxy(b):
 
 
 def main() -> None:
-    model = YOLO(WEIGHTS)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--weights", default=WEIGHTS,
+                    help="留空 = runs/brick/weights/best.pt；评估候选模型时指到对应 best.pt")
+    args = ap.parse_args()
+    model = YOLO(args.weights)
     meta = json.load(open(os.path.join(YOLO_DIR, "meta.json"), encoding="utf-8"))
     stats, rows = {}, []
 
@@ -44,7 +53,7 @@ def main() -> None:
             c, cx, cy, w, h = line.split()
             gt.append((int(c), xywh2xyxy([float(cx), float(cy), float(w), float(h)])))
 
-        res = model.predict(img, imgsz=640, conf=0.25, iou=0.45, verbose=False)[0]  # 与端侧 NMS 一致
+        res = model.predict(img, **predict_kwargs())[0]  # 方图 letterbox，与端侧一致
         h, w = res.orig_shape
         preds = []
         for box, cls, cf in zip(res.boxes.xyxy.cpu().numpy(),
