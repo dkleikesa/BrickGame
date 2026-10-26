@@ -114,6 +114,7 @@ object AutoSolver {
         config: Config = Config.DEFAULT,
         shouldAbort: () -> Boolean = { false },
         onProgress: (Long) -> Unit = {},
+        sharedDead: SharedDeadTable? = null,
     ): Outcome {
         if (grid.isEmpty() || grid[0].isEmpty()) return Outcome.Solved(emptyList())
         val rows = grid.size
@@ -137,7 +138,7 @@ object AutoSolver {
             val baseNodes = totalNodes
             val search = Search(
                 rows, cols, Random(SEED + attempt), config.nodesPerAttempt, shouldAbort,
-                config.deadSlots, config.abortWhenFull,
+                config.deadSlots, config.abortWhenFull, sharedDead,
                 onNodes = { nodes -> onProgress(baseNodes + nodes) },
             )
             val solved = search.run(grid)
@@ -151,6 +152,58 @@ object AutoSolver {
             if (!search.aborted) return Outcome.Unsolvable
         }
         return Outcome.Unknown(totalNodes)
+    }
+
+    /**
+     * 多线程共享的死表。
+     *
+     * 为什么要共享：按第一手把盘面切成几个任务并行搜索时，不同任务的**后继盘面会重合**
+     * （消 A 再消 B 与消 B 再消 A 落到同一张盘）。各自持表等于把这份重合重复算一遍 ——
+     * 实测切成 4 个任务后总搜索量是单线程的 1.34 倍，共享一张表能把这份重复吃回去。
+     *
+     * 并发策略：定长、只增不清。装满了就不再记新状态（读仍然有效）——
+     * 别的线程正在用这张表，整表清空会让他们读到"全空"，等于集体失忆。
+     * 少了剪枝只是慢一点，结论不受影响。
+     */
+    class SharedDeadTable(val slots: Int) {
+
+        init {
+            require(slots in 16..MAX_DEAD_SLOTS) { "共享死表槽数必须在 16..$MAX_DEAD_SLOTS：$slots" }
+        }
+
+        private val table = AtomicLongTable(slots)
+
+        fun contains(h: Long): Boolean {
+            var i = index(h)
+            var probes = 0
+            while (probes < slots) {
+                val a = table.get(i)
+                if (a == 0L) return false
+                if (a == h) return true
+                i++
+                if (i == slots) i = 0
+                probes++
+            }
+            return false
+        }
+
+        fun add(h: Long) {
+            var i = index(h)
+            var probes = 0
+            while (probes < slots) {
+                val a = table.get(i)
+                if (a == h) return
+                if (a == 0L && table.compareAndSet(i, 0L, h)) return
+                i++
+                if (i == slots) i = 0
+                probes++
+            }
+        }
+
+        private fun index(h: Long): Int {
+            val mixed = (h xor (h ushr 32)).toInt() and Int.MAX_VALUE
+            return mixed % slots
+        }
     }
 
     /** 只要下一步：自动运行时每帧调一次就够，不用把整条解都算出来。 */
@@ -171,7 +224,7 @@ object AutoSolver {
      * 单槽 16 B（两个 Long 指纹），12 万节点预算约 4 MB，50 万约 16 MB。
      * 清空只损失剪枝（部分死区被重搜），不影响结论正确性 —— 这是内存的硬保险。
      */
-    private const val MAX_DEAD_SLOTS = 1 shl 24   // 16M 槽 × 16B = 256MB 上限
+    private const val MAX_DEAD_SLOTS = 1 shl 25   // 32M 槽 × 8B = 256MB 上限（64-bit 指纹）
 
     internal fun isCleared(grid: Array<IntArray>): Boolean {
         for (row in grid) for (v in row) if (v != BrickGameTipHelper.BACKGROUND) return false
@@ -192,6 +245,8 @@ object AutoSolver {
         private val shouldAbort: () -> Boolean,
         deadSlots: Int,
         private val abortWhenFull: Boolean,
+        /** 多线程共享的死表；给了就不再用自己的定长表，也不再整表清空。 */
+        private val sharedDead: SharedDeadTable?,
         /** 每 256 个节点报一次当前尝试已走过的节点数（比 UI 的 1 秒采样更密，慢盘也能看到数在变）。 */
         private val onNodes: (Long) -> Unit,
     ) {
@@ -220,13 +275,14 @@ object AutoSolver {
         }
 
         /**
-         * 已证"从这里走不出解"的盘面，存 128-bit 指纹。
+         * 已证"从这里走不出解"的盘面，存 64-bit 指纹。
          *
-         * 每状态 16 B（两个 Long），比 String key 的 ~340 B 省 20 倍。
-         * 代价是理论上存在哈希碰撞：碰撞会多剪枝 → 可能把有解判成无解。
-         * 128-bit 在百万级状态下的碰撞概率约 1e-28，工程上视为零（见 [FingerprintSet]）。
+         * 每状态 8 B，比 String key 的 ~340 B 省 40 倍；同样内存装的状态数是 128-bit 的 2 倍
+         * （这是"上千万状态"那类盘唯一装得下的办法）。
+         * 代价是哈希碰撞：碰撞只多剪枝 → 理论上可能把有解判成无解。碰撞概率 ≈ n²/2⁶⁵，
+         * 一千万状态约 3e-6、一亿状态约 3e-4 —— 对"宁可多算一会儿"的定位足够低。
          */
-        private val dead = FingerprintSet(deadCapacity)
+        private val dead: FingerprintSet? = if (sharedDead == null) FingerprintSet(deadCapacity) else null
 
         private val maxDepth = rows * cols / 2 + 1
         private val pool = Array(maxDepth + 1) { Array(rows) { IntArray(cols) } }
@@ -259,8 +315,7 @@ object AutoSolver {
         fun run(start: Array<IntArray>): Boolean {
             copyInto(start, pool[0])
             for (row in start) for (v in row) if (v in 1 until remaining.size) remaining[v]++
-            fingerprint(pool[0], fp)
-            return dfs(0, pool[0], fp[0], fp[1])
+            return dfs(0, pool[0], fingerprint(pool[0]))
         }
 
         fun solution(): List<Step> {
@@ -276,7 +331,7 @@ object AutoSolver {
             return out
         }
 
-        private fun dfs(depth: Int, grid: Array<IntArray>, h1: Long, h2: Long): Boolean {
+        private fun dfs(depth: Int, grid: Array<IntArray>, h: Long): Boolean {
             if (aborted) return false
             nodes++
             if (nodes > budget) {
@@ -311,15 +366,13 @@ object AutoSolver {
                 val cls = grid[actionScratch[0]][actionScratch[1]]
                 if (BrickGameTipHelper.actionStep(child, actionScratch, checkTerminal = false) <= 0) continue
                 if (cls in 1 until remaining.size) remaining[cls] -= 2
-                fingerprint(child, fp)
-                val childH1 = fp[0]
-                val childH2 = fp[1]
-                if (dead.contains(childH1, childH2)) {
+                val childH = fingerprint(child)
+                if (isDead(childH)) {
                     if (cls in 1 until remaining.size) remaining[cls] += 2
                     continue
                 }
                 chosen[depth] = action
-                val solved = dfs(depth + 1, child, childH1, childH2)
+                val solved = dfs(depth + 1, child, childH)
                 if (cls in 1 until remaining.size) remaining[cls] += 2
                 if (solved) return true
                 if (aborted) return false
@@ -328,17 +381,18 @@ object AutoSolver {
             // 死表满：
             //  - abortWhenFull=true：内存到顶，停止并让上层报 MemoryLimited，绝不 OOM；
             //  - false：清空重搜（省内存，但会重复探索，时间不可控）。
-            if (dead.size >= dead.limit) {
+            val own = dead
+            if (own != null && own.size >= own.limit) {
                 if (abortWhenFull) {
                     memoryFull = true
                     aborted = true
                     return false
                 }
-                dead.clear()
+                own.clear()
             }
             // 当前盘面的指纹在进 dfs 时就算好并传进来了（子节点算指纹时顺便得出），
             // 这里直接入死表，不再重扫 140 格。
-            dead.add(h1, h2)
+            if (own != null) own.add(h) else sharedDead?.add(h)
             return false
         }
 
@@ -361,6 +415,12 @@ object AutoSolver {
             val buffer = actionBuffers[depth]
             BrickGameTipHelper.findActionsInto(grid, near, buffer)
             return buffer.size
+        }
+
+        /** 查死表：有共享表就用共享的（跨分片去重），否则用自己那张。 */
+        private fun isDead(h: Long): Boolean {
+            val s = sharedDead
+            return if (s != null) s.contains(h) else dead!!.contains(h)
         }
 
         /**
@@ -387,42 +447,38 @@ object AutoSolver {
             actions.stableSortByKey(orderKeys, 3)
         }
 
-        /** 复用的指纹输出，避免每节点分配。 */
-        private val fp = LongArray(2)
-
         /**
-         * 盘面的 128-bit 指纹：两个独立混合的 64-bit 哈希。
+         * 盘面的 64-bit 指纹。
          *
          * 直接扫原盘面，不生成中间数组 —— 这是它比“打包 key”更省时间的地方。
          * 求解只关心“同款同号”，与类别 id 的具体值无关，所以直接拿原值参与混合即可。
+         *
+         * 每格混一次 FNV 乘法，末尾再做一次 64-bit 雪崩（xor-shift + 乘法），
+         * 让低位也参与索引计算 —— 索引只取低位，不雪崩的话相邻盘面会撞在同一段探测链上。
          */
-        private fun fingerprint(grid: Array<IntArray>, out: LongArray) {
-            var h1 = 0x811C9DC5L
-            var h2 = 0x27D4EB2FL
+        private fun fingerprint(grid: Array<IntArray>): Long {
+            var h = -0x340d631b7bdddcdbL
             for (r in 0 until rows) {
                 val row = grid[r]
                 for (c in 0 until cols) {
-                    val v = row[c].toLong()
-                    h1 = (h1 xor v) * 0x100000001B3L
-                    h2 = h2 + v + 0x9E3779B9L
-                    h2 = h2 xor (h2 ushr 29)
-                    h2 *= -0x40A7B892E31B1A47L
+                    h = (h xor row[c].toLong()) * 0x100000001B3L
                 }
             }
+            h = h xor (h ushr 33)
+            h *= -0x40A7B892E31B1A47L
+            h = h xor (h ushr 29)
             // 全零留作“空槽”标记；极小概率撞上时挪一下，不参与任何判断
-            if (h1 == 0L && h2 == 0L) h1 = 1L
-            out[0] = h1
-            out[1] = h2
+            return if (h == 0L) 1L else h
         }
 
         /**
          * 定长开放寻址的指纹表。
          *
          * 不用 `HashSet<Long>`：HashMap.Node 每条约 32 B，加上装箱对象就省不下来了。
-         * 这里两个 Long 连续存，单条 16 B；载入到 [limit]（容量一半）由调用方 clear()。
+         * 这里一条 Long 8 B；载入到 [limit]（容量一半）由调用方 clear()。
          */
         private class FingerprintSet(val capacity: Int) {
-            private val slots = LongArray(capacity * 2)
+            private val slots = LongArray(capacity)
 
             /** 存到这个条数就提示调用方清空（载入因子 0.5，保证探测链短）。 */
             val limit = capacity ushr 1
@@ -430,36 +486,33 @@ object AutoSolver {
             var size = 0
                 private set
 
-            fun contains(h1: Long, h2: Long): Boolean {
-                if (h1 == 0L && h2 == 0L) return false
-                var i = index(h1)
+            fun contains(h: Long): Boolean {
+                var i = index(h)
                 var probes = 0
                 while (probes < capacity) {
-                    val a = slots[i * 2]
-                    val b = slots[i * 2 + 1]
-                    if (a == 0L && b == 0L) return false
-                    if (a == h1 && b == h2) return true
-                    i = (i + 1) % capacity
+                    val a = slots[i]
+                    if (a == 0L) return false
+                    if (a == h) return true
+                    i++
+                    if (i == capacity) i = 0
                     probes++
                 }
                 return false
             }
 
-            fun add(h1: Long, h2: Long) {
-                if (h1 == 0L && h2 == 0L) return
-                var i = index(h1)
+            fun add(h: Long) {
+                var i = index(h)
                 var probes = 0
                 while (probes < capacity) {
-                    val a = slots[i * 2]
-                    val b = slots[i * 2 + 1]
-                    if (a == 0L && b == 0L) {
-                        slots[i * 2] = h1
-                        slots[i * 2 + 1] = h2
+                    val a = slots[i]
+                    if (a == 0L) {
+                        slots[i] = h
                         size++
                         return
                     }
-                    if (a == h1 && b == h2) return
-                    i = (i + 1) % capacity
+                    if (a == h) return
+                    i++
+                    if (i == capacity) i = 0
                     probes++
                 }
             }
@@ -469,8 +522,10 @@ object AutoSolver {
                 size = 0
             }
 
-            private fun index(h: Long): Int =
-                ((h xor (h ushr 32)).toInt() and Int.MAX_VALUE) % capacity
+            private fun index(h: Long): Int {
+                val mixed = (h xor (h ushr 32)).toInt() and Int.MAX_VALUE
+                return mixed % capacity
+            }
         }
 
         private fun copyInto(src: Array<IntArray>, dst: Array<IntArray>) {

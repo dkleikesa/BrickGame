@@ -24,6 +24,7 @@ import com.qcmian.brickgame.vision.BoardState
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -104,6 +105,16 @@ class HintSession(
      */
     private val dumpExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { r -> Thread(r, "brick-lowconf-dump") }
+
+    /**
+     * 并行求解的线程池。
+     *
+     * 只给"一次要算几十秒"的搜索用：根节点的候选动作分给几个线程各搜一棵子树，
+     * 谁先搜到就返回。线程常驻而不是每次新建 —— 一秒内可能连续求解多帧（自动通关），
+     * 现开 4 条线程的代价比求解本身还大。
+     */
+    private val solvePool: ExecutorService =
+        Executors.newFixedThreadPool(PARALLEL_SHARDS) { r -> Thread(r, "brick-solve") }
 
     /**
      * 最近一帧原图（单槽）。
@@ -241,25 +252,20 @@ class HintSession(
     private var planRounds = 0
 
     /**
-     * 本次自动运行是否已经做过第一次完整求解。
+     * 上一次求解（以"没得出结论"收场）时的盘面 key 和当时的结论文案。
      *
-     * 只用来区分控制条文案（首帧 / 重算）和首帧那份更大的搜索预算
-     * （见 [SOLVE_CONFIG_FIRST] / [SOLVE_TIME_BUDGET_FIRST_MS]）。
+     * 为什么记这个：搜索是确定性的 —— 同一张盘再算一遍必然还是同一个结论。
+     * 所以盘面没变就不要再求解，直接把上次的结论报出来；只有盘面真变了才算新问题，
+     * 才值得再花一次完整预算。
      */
-    private var deepSolveDone = false
+    private var lastSolveKey: String? = null
+    private var lastSolveMessage: String? = null
+
+    /** 当前计划是基于哪张盘面算出来的。复检不符时用它区分"手势没生效"和"盘面真的变了"。 */
+    private var planKey: String? = null
 
     /** 自动模式下连续几帧"根本没定位到棋盘"。 */
     private var missStreak = 0
-
-    /**
-     * 判无解之后又换了几帧复核，以及复核时看到的盘面。
-     *
-     * 一帧说无解不算数：判空靠 YOLO 的 tile 框，误检会把空格认成砖（tile 精确率只有
-     * 66~69%），盘面凭空多出几块就"无解"了 —— 用户看到的就是"先显示无解、点刷新又有解"。
-     * 所以换一帧再判：**同一个盘面读两遍都无解**才认，盘面变了就一直复核到上限。
-     */
-    private var unsolvableChecks = 0
-    private var unsolvableGrid: String? = null
 
     /**
      * "无解 + 一对都消不掉"连续重试了几次。
@@ -365,9 +371,9 @@ class HintSession(
             planRounds = 0
             missStreak = 0
             unsolvableRetries = 0
-            unsolvableChecks = 0
-            unsolvableGrid = null
-            deepSolveDone = false
+            lastSolveKey = null
+            lastSolveMessage = null
+            planKey = null
             HintUiBus.state = HintUiBus.state.copy(auto = true, autoSteps = 0, autoMessage = null)
             overlay.setBarAuto(true)
             Log.i(TAG, "自动开始")
@@ -422,6 +428,8 @@ class HintSession(
         runCatching { dumpExecutor.execute { releaseLastFrame() } }
         // shutdown（不是 shutdownNow）：让手上那张图写完，别留下半个文件
         dumpExecutor.shutdown()
+        // solvePool 不在这里关：release 之后可能马上又开会话，池子关了会抛 RejectedExecution；
+        // 4 条常驻空闲线程的代价可以忽略，随进程一起结束。
     }
 
     /** 取识别器（只有一个变体，加载过就直接复用）。 */
@@ -732,7 +740,15 @@ class HintSession(
             return
         }
 
-        // 3) 没计划（首次 / 走完 / 被作废）→ 求一次整盘
+        // 3) 没计划（首次 / 走完）→ 求一次整盘
+        //
+        // 但盘面没变就不再求解：搜索是确定性的，同一张盘再算一遍必然还是同一个结论，
+        // 只会多等一次完整预算。直接把上次的结论报出来；盘面真变了才算新问题。
+        val boardKey = state.labels.joinToString(",")
+        if (boardKey == lastSolveKey) {
+            finishAuto(lastSolveMessage ?: "这盘刚算过，结论不会变", state.asGrid())
+            return
+        }
         if (planRounds >= PLAN_ROUND_LIMIT) {
             finishAuto("重新求解 $PLAN_ROUND_LIMIT 次仍没走完：盘面或识别一直对不上")
             return
@@ -741,27 +757,131 @@ class HintSession(
         solveAndPlan(result)
     }
 
+    /**
+     * 分片并行求解：把根节点的候选动作摊给几个线程，各自从子盘往下搜。
+     *
+     * 为什么这样分不改结论：
+     *  - 每个分片的第一手互不相同，解集合不相交，合起来正好是整盘；
+     *  - 某个分片搜到的解，前面补上它自己的第一手就是整盘的解；
+     *  - 必须**所有**第一手都被穷举完，才敢说这盘无解。
+     *
+     * 代价：死表内存按分片摊（4 × 64MB ≈ 原来 1 × 256MB），单表更小、清空更频繁，
+     * 所以加速比拿不满线程数，估 2~3 倍。
+     */
+    private fun solveSharded(
+        grid: Array<IntArray>,
+        config: AutoSolver.Config,
+        abort: () -> Boolean,
+        reportNodes: (Long) -> Unit,
+    ): AutoSolver.Outcome {
+        val rootActions = BrickGameTipHelper.findActions(grid)
+        val shards = minOf(rootActions.size, PARALLEL_SHARDS, Runtime.getRuntime().availableProcessors())
+        // 只有一个第一手（或单核）就没有可并行的东西：走原路径，顺便保住 OOM 降级那些行为
+        if (shards <= 1) return AutoSolver.solve(grid, config, abort, reportNodes)
+
+        // 所有分片**共用一张死表**：不同第一手的后继盘面会重合（消 A 再消 B = 消 B 再消 A），
+        // 各自持表等于把这份重合重复搜一遍 —— 实测切成 4 个任务后总搜索量是单线程的 1.34 倍。
+        // 共享之后内存也不用乘份数：同样 256MB 装的是"全盘唯一状态"，不是 4 份各装 1/4。
+        val shared = if (config.deadSlots > 0) AutoSolver.SharedDeadTable(config.deadSlots) else null
+        Log.i(
+            TAG,
+            "并行求解：${shards} 个分片（第一手 ${rootActions.size} 个），" +
+                (if (shared != null) "共享死表 ${shared.slots * 8L / 1048576}MB" else "死表按节点预算自动"),
+        )
+
+        val next = AtomicInteger(0)
+        val solved = AtomicReference<AutoSolver.Outcome.Solved?>()
+        val inconsistent = AtomicReference<AutoSolver.Outcome.Inconsistent?>()
+        val totalNodes = AtomicLong(0)
+        /** 每个第一手的结局：0 没跑 / 1 已证无解 / 2 没算完 / 3 有解 / 4 计数不成对。 */
+        val status = IntArray(rootActions.size)
+        val latch = CountDownLatch(shards)
+
+        repeat(shards) {
+            solvePool.execute {
+                try {
+                    while (true) {
+                        val i = next.getAndIncrement()
+                        if (i >= rootActions.size) break
+                        if (solved.get() != null || inconsistent.get() != null || abort()) break
+                        val action = rootActions[i]
+                        val child = Array(grid.size) { grid[it].copyOf() }
+                        if (BrickGameTipHelper.actionStep(child, action, checkTerminal = false) <= 0) {
+                            // 枚举出来的动作却走不了：算"没算完"，绝不能据此判无解
+                            status[i] = 2
+                            continue
+                        }
+                        // 每个子搜索的节点数从 0 重新计，这里累加进总量，进度只增不减
+                        var last = 0L
+                        val outcome = AutoSolver.solve(
+                            child,
+                            config,
+                            { solved.get() != null || inconsistent.get() != null || abort() },
+                            onProgress = { nodes ->
+                                totalNodes.addAndGet(nodes - last)
+                                last = nodes
+                                reportNodes(totalNodes.get())
+                            },
+                            sharedDead = shared,
+                        )
+                        when (outcome) {
+                            is AutoSolver.Outcome.Solved -> {
+                                status[i] = 3
+                                solved.compareAndSet(
+                                    null,
+                                    AutoSolver.Outcome.Solved(
+                                        listOf(
+                                            AutoSolver.Step(
+                                                AutoSolver.Cell(action[0], action[1]),
+                                                AutoSolver.Cell(action[2], action[3]),
+                                                AutoSolver.Cell(action[4], action[5]),
+                                            ),
+                                        ) + outcome.steps,
+                                    ),
+                                )
+                            }
+                            AutoSolver.Outcome.Unsolvable -> status[i] = 1
+                            is AutoSolver.Outcome.Inconsistent -> {
+                                status[i] = 4
+                                inconsistent.compareAndSet(null, outcome)
+                            }
+                            else -> status[i] = 2
+                        }
+                    }
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+        latch.await()
+
+        solved.get()?.let { return it }
+        inconsistent.get()?.let { return it }
+        // 只有每个第一手都被穷举完，才能把"整盘无解"这个结论交出去
+        if (status.all { it == 1 }) return AutoSolver.Outcome.Unsolvable
+        return AutoSolver.Outcome.Unknown(totalNodes.get())
+    }
+
     /** 求一次整盘，成功就把它当成后续要执行的计划；无解/超预算各有明确出场。 */
     private fun solveAndPlan(result: HintPipeline.Result) {
         val grid = result.state.asGrid()
         val gen = generation.get()
-        // 首帧目标是一次算出**最终解**（或证明无解），所以单次搜索给到 1000 万节点、
-        // 挂钟 300 秒；重算只在计划失效时发生，仍用 12 万×16 / 120 秒。
-        val firstSolve = !deepSolveDone
-        deepSolveDone = true
-        val config = if (firstSolve) SOLVE_CONFIG_FIRST else SOLVE_CONFIG
-        val budgetMs = if (firstSolve) SOLVE_TIME_BUDGET_FIRST_MS else SOLVE_TIME_BUDGET_MS
+        // 首帧和重算用**同一套深配置**：两者都是"必须给出结论"的时刻。
+        // 历史教训：重算曾经是 12 万节点 ×16 次重启 / 120 秒，对需要连续几十万节点的盘
+        // 等于每次都在 12 万处被切碎，16 次重来也拼不出一次完整搜索 —— 最后把
+        // "已证无解"拖成"没算完"。慢一点可以接受，给错结论不行。
+        val config = SOLVE_CONFIG
+        val budgetMs = SOLVE_TIME_BUDGET_MS
         val nodesText = if (config.nodesPerAttempt == Int.MAX_VALUE) "无上限" else "${config.nodesPerAttempt}"
         Log.i(
             TAG,
-            "求解开始：${if (firstSolve) "首帧" else "重算"}（第 $planRounds 轮），" +
-                "节点 ${nodesText}×${config.maxAttempts}，" +
+            "求解开始（第 $planRounds 轮），节点 ${nodesText}×${config.maxAttempts}，" +
                 "挂钟 ${if (budgetMs > 0) "${budgetMs}ms" else "无（手动停止）"}",
         )
         // 一进搜索就把进度立起来：第一秒先显示 0 步，之后每秒由 [solveProgressTick] 刷新。
         // 以前只留一句"求解中…（最长 300 秒）"，几分钟不动，分不清是卡死还是还在算。
         startSolveProgress(
-            hint = if (firstSolve) "首帧求解中…" else "求解中…",
+            hint = "求解中…",
             remaining = countBricks(result.state),
             budgetMs = budgetMs,
         )
@@ -778,7 +898,7 @@ class HintSession(
             val reportNodes: (Long) -> Unit = { nodes -> solveNodes.set(nodes) }
             val outcome = try {
                 // 首帧 256MB 死表；LargeHeap 下仍分配失败就按 10MB 梯子逐级降，绝不让 OOM 崩掉进程。
-                AutoSolver.solve(grid, config, abort, reportNodes)
+                solveSharded(grid, config, abort, reportNodes)
             } catch (t: Throwable) {
                 if (t !is OutOfMemoryError) {
                     Log.e(TAG, "求解异常", t)
@@ -838,6 +958,10 @@ class HintSession(
                             TAG,
                             "盘面不一致：奇数类 ${outcome.oddClasses}（砖块不可能是单个，识别/重复框有误）",
                         )
+                        rememberSolve(
+                            result.state,
+                            "识别可能出错：${outcome.oddClasses.size} 类砖块数为奇数（常见于重复框/误检），请刷新",
+                        )
                         finishAuto(
                             "识别可能出错：${outcome.oddClasses.size} 类砖块数为奇数（常见于重复框/误检），请刷新",
                         )
@@ -850,11 +974,12 @@ class HintSession(
                         }
                         plan = outcome.steps
                         planIndex = 0
+                        planKey = result.state.labels.joinToString(",")
                         planRows = result.scan.rows
                         planCols = result.scan.cols
-                        // 这一帧判的是"有解"：之前攒的无解复核计数作废
-                        unsolvableChecks = 0
-                        unsolvableGrid = null
+                        // 这一帧有解：清掉"这盘算过"的记账（计划会推着盘面往前走）
+                        lastSolveKey = null
+                        lastSolveMessage = null
                         Log.i(TAG, "自动计划就绪：${plan.size} 步（第 $planRounds 次求解，${solveMs}ms）")
                         // 先把"一共多少步"亮出来再动手：不给这一下停顿的话，
                         // 紧接着的 [playStep] 会把它覆盖成"第 1/N 步"，用户根本看不到总数。
@@ -872,23 +997,12 @@ class HintSession(
                     AutoSolver.Outcome.Unsolvable -> {
                         Log.w(TAG, "求解结论：无解（${solveMs}ms，剩 ${countBricks(result.state)} 块）")
                         if (!AutoContinue.enabled(context)) {
-                            // 复核：同一盘面读两遍都无解才认。盘面变了说明上一帧的判空有误，
-                            // 接着换帧，最多换 UNSOLVABLE_CONFIRM_LIMIT 次（见 [unsolvableChecks]）。
-                            val key = result.state.labels.joinToString(",")
-                            val sameBoard = key == unsolvableGrid
-                            if (!sameBoard) {
-                                unsolvableGrid = key
-                                unsolvableChecks++
-                                if (unsolvableChecks <= UNSOLVABLE_CONFIRM_LIMIT) {
-                                    updateBar(
-                                        "疑似无解，复核中 $unsolvableChecks/$UNSOLVABLE_CONFIRM_LIMIT",
-                                        "剩 ${countBricks(result.state)} 块",
-                                    )
-                                    main.postDelayed(autoTick, UNSOLVABLE_CONFIRM_MS)
-                                    return@post
-                                }
-                            }
-                            finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」", grid)
+                            // 结论就是"无解"，直接报。以前这里还要"换一帧复核"，而那一步会
+                            // 走通用求解路径、用弱配置重算 120 秒，把确定结论拖成"没算完"。
+                            // 复核的意义本就是确认"盘面还是不是这一盘" —— 那件事现在由
+                            // [lastSolveKey] 在下一帧用字符串比较完成，不需要再搜一次。
+                            rememberSolve(result.state, UNSOLVABLE_MESSAGE)
+                            finishAuto(UNSOLVABLE_MESSAGE, grid)
                             return@post
                         }
                         // 补数据模式：无解说明盘面多半已经识别错了，继续走一步让游戏产生变化，
@@ -910,7 +1024,8 @@ class HintSession(
                             }
                             unsolvableRetries++
                             if (unsolvableRetries >= UNSOLVABLE_RETRY_LIMIT) {
-                                finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」")
+                                rememberSolve(result.state, UNSOLVABLE_MESSAGE)
+                                finishAuto(UNSOLVABLE_MESSAGE, grid)
                                 return@post
                             }
                             // 这里只描述"程序自己在做什么"；要用户动手的话放在结束文案里说清楚
@@ -927,10 +1042,9 @@ class HintSession(
                         // 首帧已改成"表满清空继续搜"，正常走不到这里；留着是为了配置改回
                         // abortWhenFull=true 时仍能明确报出来，而不是表现成"没算完"。
                         Log.w(TAG, "求解死表满：${outcome.nodes} 节点")
-                        finishAuto(
-                            "求解中止：死表已满（${outcome.nodes} 节点），未落子",
-                            grid,
-                        )
+                        val message = "求解中止：死表已满（${outcome.nodes} 节点），未落子"
+                        rememberSolve(result.state, message)
+                        finishAuto(message, grid)
                     }
 
                     is AutoSolver.Outcome.Unknown -> {
@@ -938,11 +1052,10 @@ class HintSession(
                         // 贪心走一步很可能把有解盘走成真无解 —— 这盘只是"还没算完"，
                         // 不是"不能解"。和"已证明无解"必须分开说，否则用户会白白去洗牌。
                         Log.w(TAG, "求解未完成：${outcome.nodes} 节点，${solveMs}ms，剩 ${countBricks(result.state)} 块")
-                        finishAuto(
-                            "求解未完成（已 ${outcome.nodes} 步 / ${solveMs / 1000}s），未落子。" +
-                                "这盘还没算出结论，可以先手动消几步破局",
-                            grid,
-                        )
+                        val message = "求解未完成（已 ${outcome.nodes} 步 / ${solveMs / 1000}s），未落子。" +
+                            "这盘还没算出结论，可以先手动消几步破局"
+                        rememberSolve(result.state, message)
+                        finishAuto(message, grid)
                     }
                 }
             }
@@ -1174,6 +1287,12 @@ class HintSession(
         refreshNow()
     }
 
+    /** 记下"这张盘算过、结论是这个"：同一盘面再来就不再求解（见 [lastSolveKey]）。 */
+    private fun rememberSolve(state: BoardState, message: String) {
+        lastSolveKey = state.labels.joinToString(",")
+        lastSolveMessage = message
+    }
+
     /**
      * 自动收尾：关开关 + 把原因写在控制条上（红字），并说明已消多少对。
      *
@@ -1302,28 +1421,43 @@ class HintSession(
         const val SOLVE_PROGRESS_MS = 1000L
 
         /**
-         * 首帧求解参数：**单次搜索 + 大死表，不再 16 次随机重启**。
+         * 死表总预算（槽数，64-bit 指纹下每槽 8B）。
+         *
+         * 按堆上限的 40% 取，封顶 256MB：
+         *  - 512MB 堆（largeHeap 常见）→ 200MB → 25M 槽 → 约 **1250 万状态**；
+         *  - 256MB 堆（没吃到 largeHeap）→ 100MB → 12.5M 槽 → 约 625 万状态。
+         * 早先固定 16M 槽 + 128-bit 指纹只有 839 万状态 —— "上千万"那类盘就是在这里被截断的。
+         */
+        private fun deadSlotBudget(): Int {
+            val bytes = minOf(Runtime.getRuntime().maxMemory() * 2 / 5, 256L * 1024 * 1024)
+            return (bytes / 8).toInt().coerceIn(1 shl 20, 1 shl 25)
+        }
+
+        /**
+         * 求解参数：首帧和重算通用（**单次搜索 + 大死表，不再 16 次随机重启**）。
          *
          * - 节点不设限：一次搜索给足深度；
-         * - 死表 16M 槽 × 16B = **256MB**；
-         * - 表满**清空继续搜**（abortWhenFull=false）：宁可重复探索，也不要在
-         *   8.39M 状态处就把搜索掐掉 —— 那会让"还没算完"变成一次彻头彻尾的失败；
-         * - `largeHeap` + 256MB 分配失败时自动退回（见 [SOLVE_DEAD_SLOTS_FALLBACK]）。
+         * - 死表按堆预算走（见 [deadSlotBudget]），表满**清空继续搜**（abortWhenFull=false），
+         *   宁可重复探索，也不要在表满处就把搜索掐掉；
+         * - 分配失败时按 [SOLVE_DEAD_SLOTS_FALLBACK] 逐级退。
          */
-        val SOLVE_CONFIG_FIRST = AutoSolver.Config(
+        val SOLVE_CONFIG = AutoSolver.Config(
             nodesPerAttempt = Int.MAX_VALUE,   // 不设节点上限，只靠挂钟/手动停止
             maxAttempts = 1,
-            deadSlots = 1 shl 24,              // 16M 槽 × 16B = 256MB
+            deadSlots = deadSlotBudget(),
             abortWhenFull = false,
         )
 
         /**
-         * 首帧挂钟：5 分钟。
+         * 求解挂钟：5 分钟（首帧与重算同一档）。
          *
          * 宁慢求对：这盘的解要么找到、要么等它把可达图穷举完（证明无解），
          * 中途放弃没有意义 —— 一次"算不动"之后，重试还是同一盘同一搜索序。
          */
-        const val SOLVE_TIME_BUDGET_FIRST_MS = 300_000L
+        const val SOLVE_TIME_BUDGET_MS = 300_000L
+
+        /** 判无解的结论文案：报错处和"同盘再来不再重算"处共用，避免两处写法不一致。 */
+        const val UNSOLVABLE_MESSAGE = "本关无解，请在游戏里洗牌，然后点「刷新」"
 
         /**
          * 首帧死表 OOM 的降级梯度：从 256MB 开始，每次减 10MB，最低 64MB。
@@ -1332,9 +1466,9 @@ class HintSession(
          * 246/236/…/68 都可能刚好塞进当前堆，尽量保住搜索效率。
          */
         val SOLVE_DEAD_SLOTS_FALLBACK: List<Int> = buildList {
-            val step = (10 * 1024 * 1024) / 16
-            val min = (64 * 1024 * 1024) / 16
-            var slots = 1 shl 24
+            val step = (10 * 1024 * 1024) / 8     // 64-bit 指纹：每槽 8B
+            val min = (64 * 1024 * 1024) / 8
+            var slots = SOLVE_CONFIG.deadSlots
             while (slots >= min) {
                 add(slots)
                 slots -= step
@@ -1342,14 +1476,12 @@ class HintSession(
         }
 
         /**
-         * 重算参数：计划失效后才跑，12 万/次、最多重启 16 次，挂钟 120 秒；死表按预算自动（约 4MB）。
+         * 并行求解的分片数上限（实际还会被"第一手的个数"和 CPU 核数压小）。
+         *
+         * 4 而不是按核数拉满：死表内存要按分片摊（4 × 64MB），核多但内存不够时
+         * 再多线程只会互相抢带宽、频繁 clear 死表。
          */
-        val SOLVE_CONFIG = AutoSolver.Config(nodesPerAttempt = 120_000, maxAttempts = 16)
-
-        /**
-         * 重算挂钟上限：120 秒。
-         */
-        const val SOLVE_TIME_BUDGET_MS = 120_000L
+        const val PARALLEL_SHARDS = 4
 
         /**
          * 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。
@@ -1391,17 +1523,6 @@ class HintSession(
 
         /** 无解且一对都消不掉时最多重试几次（10 次 ≈ 30 秒），超过就停下来让人洗牌。 */
         const val UNSOLVABLE_RETRY_LIMIT = 10
-
-        /**
-         * 判无解后最多换几帧复核。
-         *
-         * 只在"每帧读出来的盘面都不一样"时才会用满：盘面稳定下来（连着两帧同一张盘面
-         * 都无解）就立刻收工，不会让真无解的盘白等。
-         */
-        const val UNSOLVABLE_CONFIRM_LIMIT = 3
-
-        /** 复核间隔：比 UNSOLVABLE_RETRY_MS 短，只等一帧新截图。 */
-        const val UNSOLVABLE_CONFIRM_MS = 600L
 
         /**
          * 求解完成后，把"一共多少步"亮一会儿再开始动手的时长。
