@@ -90,30 +90,54 @@ def grid_of(img: np.ndarray, weights: str = "", conf: float = CONF):
 
     x1, y1, x2, y2 = board
     bw, bh = x2 - x1, y2 - y1
+    # 只认棋盘框内的砖：模型偶尔在标题/状态栏上误检一个框，一个离群点就能把最小二乘
+    # 整个带偏。端侧 YoloBoardDetector 一直有这道 10% 外扩过滤，这里补齐，两边对同一帧
+    # 的判断才一致（实测 3 帧定位失败就是因为棋盘上方 2 个误检框里漏掉了这一个）。
+    mx, my = bw * 0.10, bh * 0.10
+    tiles = [b for b in tiles
+             if x1 - mx <= (b[0] + b[2]) / 2 <= x2 + mx
+             and y1 - my <= (b[1] + b[3]) / 2 <= y2 + my]
+    if len(tiles) < 2:
+        return None
+
     side = float(np.median([((b[2] - b[0]) + (b[3] - b[1])) / 2 for b in tiles]))
     pitch = side / TILE_INSET
     if pitch < 12:
         return None
     base_cols, base_rows = int(round(bw / pitch)), int(round(bh / pitch))
 
-    cxs = [float((b[0] + b[2]) / 2) for b in tiles]
-    cys = [float((b[1] + b[3]) / 2) for b in tiles]
+    cxs = np.array([float((b[0] + b[2]) / 2) for b in tiles])
+    cys = np.array([float((b[1] + b[3]) / 2) for b in tiles])
+    need = max(3, int(round(0.6 * len(cxs))))     # 内点至少六成，否则这组行列不成立
     best = None
     for dr in (-1, 0, 1):
         for dc in (-1, 0, 1):
             rows, cols = base_rows + dr, base_cols + dc
             if not (6 <= rows <= 20 and 6 <= cols <= 16):
                 continue
-            lx, sx = _fit_axis(cxs, float(x1), bw / cols, cols)
-            ty, sy = _fit_axis(cys, float(y1), bh / rows, rows)
-            res_max = 0.0
-            for cx, cy in zip(cxs, cys):
-                c = min(max(int((cx - lx) / sx), 0), cols - 1)
-                rr = min(max(int((cy - ty) / sy), 0), rows - 1)
-                res_max = max(res_max, float(np.hypot(cx - (lx + (c + 0.5) * sx),
-                                                      cy - (ty + (rr + 0.5) * sy))))
-            if best is None or res_max < best[0]:
-                best = (res_max, lx, sx, ty, sy, rows, cols)
+            # 两轮：先按全量拟合，剔掉残差超过半个格距的离群框，再拟合一次。
+            # 不用 max 残差当判据：一张满盘里混进 1 个离群框，max 直接爆表，
+            # 会让正确网格输给贴合离群点的畸形网格（实测 14x10 的 p95 只有 2px，
+            # max 却是 220px，于是被迫选 13x11）。
+            mask = np.ones(len(cxs), bool)
+            res = None
+            for _ in range(2):
+                lx, sx = _fit_axis(list(cxs[mask]), float(x1), bw / cols, cols)
+                ty, sy = _fit_axis(list(cys[mask]), float(y1), bh / rows, rows)
+                res = np.array([float(np.hypot(
+                    cx - (lx + (min(max(int((cx - lx) / sx), 0), cols - 1) + 0.5) * sx),
+                    cy - (ty + (min(max(int((cy - ty) / sy), 0), rows - 1) + 0.5) * sy)))
+                    for cx, cy in zip(cxs, cys)])
+                keep = res <= pitch * 0.5
+                if keep.sum() < need or keep.sum() == mask.sum():
+                    mask = keep
+                    break
+                mask = keep
+            if mask.sum() < need:
+                continue
+            score = float(res[mask].max())
+            if best is None or score < best[0]:
+                best = (score, lx, sx, ty, sy, rows, cols)
     if best is None or best[0] > pitch * 0.35:
         return None
     res_max, lx, sx, ty, sy, rows, cols = best
