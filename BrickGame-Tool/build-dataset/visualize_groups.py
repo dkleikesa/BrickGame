@@ -185,7 +185,7 @@ tr.split td{background:#fffaf0}
   <b>截图格 class_id 标注</b>
   <span id="mdl" style="background:#eef4ff;border:1px solid #c7d9ff;color:#1f6feb;border-radius:5px;padding:2px 7px;font-weight:600"></span>
   <select id="fs"></select>
-  <button id="low">只看低置信</button>
+  <button id="low" class="on">只看低置信</button>
   <button id="man">只看已改</button>
   <button id="unkf">只看未识别</button>
   <input id="thr" type="number" step="0.05" value="__THR__" style="width:62px" title="低置信阈值(距离)">
