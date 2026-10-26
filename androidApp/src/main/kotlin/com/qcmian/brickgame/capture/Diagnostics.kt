@@ -47,12 +47,14 @@ object Diagnostics {
     }.getOrElse { "logcat 读取失败：${it.javaClass.simpleName} ${it.message}" }
 
     /**
-     * 把当前 logcat 另存一份，[reason] 写在文件头（例如"求解超预算…"）。
+     * 把当前 logcat 另存一份，[reason] 写在文件头（例如"求解未完成…"）。
      *
+     * @param detail 附带的现场快照（求解失败时的盘面矩阵）。不带上它，事后只能看到
+     *   "算不出来"，复现不了到底是哪一盘点不动。
      * 写盘是阻塞的（几十到几百毫秒），调用方要放到后台线程。
      * @return 写出的文件；目录建不出来 / 写盘失败返回 null。
      */
-    fun save(context: Context, reason: String): File? = runCatching {
+    fun save(context: Context, reason: String, detail: String? = null): File? = runCatching {
         val dir = logDir(context)
         if (!dir.exists() && !dir.mkdirs()) return null
         val now = Date()
@@ -63,6 +65,10 @@ object Diagnostics {
                 appendLine("# $reason")
                 appendLine("# ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(now)}")
                 appendLine("# ${header(context)}")
+                if (!detail.isNullOrBlank()) {
+                    appendLine()
+                    appendLine(detail)
+                }
                 appendLine()
                 append(logcat())
             },

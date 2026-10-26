@@ -64,6 +64,20 @@ class YoloBoardDetector(context: Context) : Closeable {
         private const val NUM_CLASSES = 2
         /** 长边下限：低于它的 .tflite 是 640 时代旧模型，直接拒绝，避免静默降级。 */
         private const val MIN_LONG_SIDE = 1024
+
+        /**
+         * 数据里出现过的棋盘布局（14x10 标准、13x10 残局裁掉空顶行、6x6 / 8x6 小盘、15x10 关卡）。
+         * 不在这里的尺寸一律记"可疑"：多留一张图，不阻断求解。
+         *
+         * 为什么需要这一条：现有判据只看残差和 board 分数，抓不到"框对了但行列算错"——
+         * 实测有一帧被算成 16x10（比真值多两行），残差、分数都正常，留档里没有任何标记，
+         * 事后只能靠人数格子才发现。
+         */
+        private val KNOWN_LAYOUTS = setOf(
+            14 to 10, 13 to 10, 15 to 10,          // 标准盘 / 残局裁掉空顶行 / 15 行关卡
+            14 to 9, 13 to 9,                       // 残局再裁掉一列
+            8 to 8, 8 to 6, 6 to 6,                 // 小盘
+        )
     }
 
     private class Box(
@@ -214,8 +228,19 @@ class YoloBoardDetector(context: Context) : Closeable {
     /** 模型版本与耗时，控制条上要能看出这一帧到底是谁算的。 */
     val label: String = "YOLO nano ${inW}x${inH} ${if (usingGpu) "GPU" else "CPU"}"
 
+    /**
+     * 上一次 [scan] 失败的具体原因（成功时为 null）。
+     *
+     * 为什么留这个：定位失败以前在磁盘上只有一张 png，"没找到 board"和"网格判不出"看起来
+     * 一模一样，事后只能靠猜。写进同名 txt 后才说得清是模型没检出，还是被残差判据拒了。
+     */
+    @Volatile
+    var lastFailure: String? = null
+        private set
+
     fun scan(frame: Bitmap): BoardScan? {
         val t0 = System.nanoTime()
+        lastFailure = null
         // letterbox：等比缩到模型输入框内，余量填灰（与训练一致）
         val scale = min(inW.toFloat() / frame.width, inH.toFloat() / frame.height)
         val dw = (frame.width * scale).roundToInt()
@@ -243,6 +268,8 @@ class YoloBoardDetector(context: Context) : Closeable {
             "网格=${(System.nanoTime() - tDec) / 1_000_000}")
 
         val board = boxes.filter { it.cls == CLS_BOARD }.maxByOrNull { it.conf } ?: run {
+            lastFailure = "没找到棋盘框（board 最高分 ${"%.2f".format(maxBoardScore)}，" +
+                "过阈值的 tile 框 ${boxes.count { it.cls == CLS_TILE }} 个）"
             Log.w(TAG, "没有 board 框 → 这一帧放弃")
             return null
         }
@@ -320,6 +347,8 @@ class YoloBoardDetector(context: Context) : Closeable {
             else -> null
         }
         if (grid == null) {
+            lastFailure = "网格判不出（tile ${tiles.size} 个、砖框中位 ${medianSide.roundToInt()}px，" +
+                "${boxText(board)}${if (cached != null) "，有缓存网格但已失效" else ""}）"
             Log.w(TAG, "tile ${tiles.size} 个且没有可复用的网格 → 放弃（${boxText(board)}）")
             return null
         }
@@ -358,6 +387,8 @@ class YoloBoardDetector(context: Context) : Closeable {
             if (grid.residual > stepX * 0.15f) add("网格残差 ${grid.residual.roundToInt()}px")
             if (board.conf < 0.6f) add("board 分数 ${"%.2f".format(board.conf)}")
             if (tiles.size < 3) add("只检出 ${tiles.size} 块砖")
+            // 行列数跑出已知布局：残差和 board 分数都可能正常，但格子整体错位（实测 16x10）
+            if ((rows to cols) !in KNOWN_LAYOUTS) add("布局 ${rows}x${cols} 不在已知集合")
         }.takeIf { it.isNotEmpty() }?.joinToString("、")
         val tileSide = if (tiles.isNotEmpty()) {
             tiles.map { (it.w + it.h) / 2f }.sorted()[tiles.size / 2]

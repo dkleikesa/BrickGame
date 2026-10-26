@@ -34,6 +34,9 @@ object LowConfStore {
     /** "没定位到棋盘"的帧留在这里：`debug-frames/scan-fail/`。 */
     private const val SCAN_FAIL_DIR = "scan-fail"
 
+    /** "求解没算完"的帧留在这里：`debug-frames/solve-fail/`（超预算 / 死表满 / 无解）。 */
+    private const val SOLVE_FAIL_DIR = "solve-fail"
+
     /** 最多留这么多帧，别把手机存储攒满（手动刷新一次最多一张）。 */
     private const val KEEP = 200
 
@@ -44,7 +47,8 @@ object LowConfStore {
     private val ZIP_README = """
         BrickGame 留档与诊断日志
         - low-conf/：低置信度帧，png + 同名 txt（矩阵 / 可疑格 / 耗时）
-        - scan-fail/：定位失败帧，只有 png
+        - scan-fail/：定位失败帧，png + 同名 txt（失败环节：没找到 board / 网格判不出）
+        - solve-fail/：求解没算完的帧，png + 同名 txt（原因 + 当时的盘面矩阵）
         - logs/logcat_*.txt：自动结束或手动定位失败时落盘的 logcat，文件头写了原因 / 版本 / 机型
         - logs/logcat.txt：点分享时现抓的 logcat，包含落盘之后的最后几帧
     """.trimIndent()
@@ -63,6 +67,14 @@ object LowConfStore {
         // 两个入档条件：分类器没把握，或定位"能用但可疑"（网格残差大/board 分数低/砖太少）。
         // 后者往往才是"看起来正常、实际错了"的帧，补数据时最值钱。
         if (result.lowConfidence.isEmpty() && scanSuspect == null) return
+        // 空盘/残局不出图：棋盘上只剩 0~2 块砖时，既没有可标注的砖，也没有可对齐的目标，
+        // 存下来只能占队列（实测 65 帧留档里 58 帧是这种，其中 39 帧是同一张静止画面）。
+        // 留一条日志，方便事后统计"空盘被当成可疑"的频率。
+        val bricks = result.state.labels.count { it != 0 }
+        if (result.lowConfidence.isEmpty() && bricks <= 2) {
+            Log.i(TAG, "空盘/残局帧不留档（砖 ${bricks} 块，无可疑格）")
+            return
+        }
         val dir = ensureDir(context) ?: return
         val stem = "lowconf_" + SimpleDateFormat("MMdd-HHmmss-SSS", Locale.US).format(Date())
         val scan = result.scan
@@ -111,18 +123,64 @@ object LowConfStore {
      * 都是"用户说 50% 失败、手上没有一张失败图"。文件名前缀同 lowconf_ + 时间戳，
      * 与同刻的 logcat（YoloBoardDetector 那条 定位/残差 诊断）按时间对上即可定位原因。
      */
-    fun saveScanFail(context: Context, bitmap: Bitmap) {
+    fun saveScanFail(context: Context, bitmap: Bitmap, reason: String? = null) {
         val dir = ensureDir(context, SCAN_FAIL_DIR) ?: return
-        val stem = "scanfail_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date())
+        val now = Date()
+        val stem = "scanfail_" + SimpleDateFormat("MMdd-HHmmss", Locale.US).format(now)
         try {
             File(dir, "$stem.png").outputStream().use {
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
+            // 失败原因写进同名 txt：只留 png 的话，"没找到棋盘框"和"网格判不出"在磁盘上
+            // 长得一模一样，而这两类要改的代码完全不同（检出头 vs 格子拟合）。
+            File(dir, "$stem.txt").writeText(
+                buildString {
+                    appendLine("# 定位失败${reason?.let { "：$it" } ?: ""}")
+                    appendLine("# ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(now)}")
+                },
+            )
             trim(dir)
             publish(context)
-            Log.i(TAG, "定位失败帧已留档：$stem.png（${dir.absolutePath}）")
+            Log.i(TAG, "定位失败帧已留档：$stem（${reason ?: "原因未知"}）")
         } catch (e: Throwable) {
             Log.w(TAG, "定位失败帧留档失败", e)
+        }
+    }
+
+    /**
+     * 存一帧"求解没算完"的原图 + 现场（${""}debug-frames/solve-fail/${""}）。
+     *
+     * 为什么单独留：超预算 / 死表满 / 无解以前只在 logcat 里留一行字，事后既看不到当时
+     * 屏幕上是什么样，也分不清"盘面太大算不动"和"识别错了才无解"。图 + 盘面矩阵一起存，
+     * 这两种原因才能分开看。
+     *
+     * @param bitmap 最近一帧原图，可为 null（位图已被回收时只写 txt）
+     */
+    fun saveSolveFail(context: Context, bitmap: Bitmap?, reason: String, grid: Array<IntArray>?) {
+        val dir = ensureDir(context, SOLVE_FAIL_DIR) ?: return
+        val now = Date()
+        val stem = "solvefail_" + SimpleDateFormat("MMdd-HHmmss-SSS", Locale.US).format(now)
+        try {
+            if (bitmap != null && !bitmap.isRecycled) {
+                File(dir, "${stem}.png").outputStream().use {
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+            }
+            File(dir, "${stem}.txt").writeText(
+                buildString {
+                    appendLine("# 求解未完成：${reason}")
+                    appendLine("# ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(now)}")
+                    appendLine("# ${Diagnostics.header(context)}")
+                    if (grid != null && grid.isNotEmpty()) {
+                        appendLine("# 当时的盘面（${grid.size}x${grid[0].size}，0 = 空位）：")
+                        grid.forEach { row -> appendLine(row.joinToString(" ")) }
+                    }
+                },
+            )
+            trim(dir)
+            Log.i(TAG, "求解失败帧已留档：${stem}（${if (bitmap == null || bitmap.isRecycled) "仅盘面" else "含原图"}）")
+        } catch (e: Throwable) {
+            Log.w(TAG, "求解失败帧留档失败", e)
         }
     }
 
@@ -142,9 +200,11 @@ object LowConfStore {
     fun deleteAll(context: Context): Int {
         val low = pngs(readDir(context)).size
         val fail = readFailDir(context)?.let { pngs(it).size } ?: 0
+        val solve = childDir(context, SOLVE_FAIL_DIR)?.let { pngs(it).size } ?: 0
         val logs = Diagnostics.files(context).size
         readDir(context)?.listFiles()?.forEach { runCatching { it.delete() } }
         readFailDir(context)?.listFiles()?.forEach { runCatching { it.delete() } }
+        childDir(context, SOLVE_FAIL_DIR)?.listFiles()?.forEach { runCatching { it.delete() } }
         Diagnostics.files(context).forEach { runCatching { it.delete() } }
         // debug-frames 根目录下还有历史调试产物（latest.png/txt、matrix/），一并清掉
         context.getExternalFilesDir(DUMP_DIR)?.listFiles()?.forEach { f ->
@@ -156,8 +216,8 @@ object LowConfStore {
         }
         runCatching { File(context.cacheDir, SHARE_DIR).listFiles()?.forEach { it.delete() } }
         publish(context)
-        Log.i(TAG, "已删除留档：截图 ${low + fail} 张（低置信 $low / 定位失败 $fail）+ 日志 $logs 份")
-        return low + fail
+        Log.i(TAG, "已删除留档：截图 ${low + fail + solve} 张（低置信 $low / 定位失败 $fail / 求解失败 $solve）+ 日志 $logs 份")
+        return low + fail + solve
     }
 
     /**
@@ -169,7 +229,11 @@ object LowConfStore {
     fun zipAll(context: Context): File? {
         // 两个目录都要打：只打 low-conf 的话，"定位失败"那批帧永远拿不到 ——
         // 而那正是补数据最缺的一类（定位错/没定位到）。
-        val groups = listOf(LOW_CONF_DIR to readDir(context), SCAN_FAIL_DIR to readFailDir(context))
+        val groups = listOf(
+            LOW_CONF_DIR to readDir(context),
+            SCAN_FAIL_DIR to readFailDir(context),
+            SOLVE_FAIL_DIR to childDir(context, SOLVE_FAIL_DIR),
+        )
             .mapNotNull { (name, dir) -> dir?.takeIf { pngs(it).isNotEmpty() }?.let { name to it } }
         // 落盘的诊断日志也一起打（只带最近几份）；没有截图、只有日志时也要能分享出去
         val logFiles = Diagnostics.files(context).takeLast(MAX_SHARE_LOGS)
@@ -182,7 +246,7 @@ object LowConfStore {
             ZipOutputStream(zip.outputStream().buffered()).use { out ->
                 for ((prefix, dir) in groups) {
                     for (png in pngs(dir)) {
-                        // 带子目录前缀：解压后 low-conf / scan-fail 各自成目录，入库脚本按目录分流
+                        // 带子目录前缀：解压后 low-conf / scan-fail / solve-fail 各自成目录，入库脚本按目录分流
                         addEntry(out, png, "$prefix/${png.name}")
                         val txt = File(dir, png.name.removeSuffix(".png") + ".txt")
                         if (txt.isFile) addEntry(out, txt, "$prefix/${txt.name}")
@@ -256,8 +320,11 @@ object LowConfStore {
     }
 
     /** 只读地找"定位失败"目录，与 [readDir] 同构。 */
-    private fun readFailDir(context: Context): File? {
-        val dir = File(context.getExternalFilesDir(DUMP_DIR) ?: return null, SCAN_FAIL_DIR)
+    private fun readFailDir(context: Context): File? = childDir(context, SCAN_FAIL_DIR)
+
+    /** 只读地找指定子目录（不建目录）。 */
+    private fun childDir(context: Context, sub: String): File? {
+        val dir = File(context.getExternalFilesDir(DUMP_DIR) ?: return null, sub)
         return if (dir.isDirectory) dir else null
     }
 

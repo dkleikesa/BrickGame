@@ -29,6 +29,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** 取一帧屏幕；无障碍服务（takeScreenshot）与调试用的"喂图片"都实现它。 */
 fun interface ScreenshotProvider {
@@ -103,6 +104,25 @@ class HintSession(
      */
     private val dumpExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { r -> Thread(r, "brick-lowconf-dump") }
+
+    /**
+     * 最近一帧原图（单槽）。
+     *
+     * 为什么不能分析完就回收：求解超时 / 无解时要拿"当时那一帧"落盘，而求解本身要跑
+     * 几秒到几十秒，那时位图早被回收了，再截一张屏幕已经是另一个画面。
+     *
+     * 读写全部发生在 [dumpExecutor] 这条单线程上（持有、替换回收、写盘），所以不会出现
+     * "一边压缩一边被回收"。代价是常驻多一张整屏位图（1080x2400 约 10MB）。
+     */
+    private val heldFrame = AtomicReference<Bitmap?>(null)
+
+    private fun holdLastFrame(bitmap: Bitmap) {
+        heldFrame.getAndSet(bitmap)?.let { if (!it.isRecycled) it.recycle() }
+    }
+
+    private fun releaseLastFrame() {
+        heldFrame.getAndSet(null)?.let { if (!it.isRecycled) it.recycle() }
+    }
 
     /**
      * 帧代号。会话被停掉时，"还在跑"的那条旧线程算完还是会往主线程丢结果 ——
@@ -398,6 +418,8 @@ class HintSession(
         // quitSafely 会把已入队的这条消息处理完再退出。
         worker.post { closeClassifier() }
         workerThread.quitSafely()
+        // 单槽里那张原图不再需要了，回收掉（也排在写盘队列后面，不会打断正在写的文件）
+        runCatching { dumpExecutor.execute { releaseLastFrame() } }
         // shutdown（不是 shutdownNow）：让手上那张图写完，别留下半个文件
         dumpExecutor.shutdown()
     }
@@ -505,6 +527,9 @@ class HintSession(
                     HintPipeline.analyze(bitmap, acquireClassifier()) { localize(it) }
                 }
                 val result = analysis.getOrNull()
+                // 定位失败时把检测器给的具体原因带进留档：产物只有 png 的话，
+                // "没找到 board"和"网格判不出"事后分不清，而这两处要改的代码完全不同。
+                val scanFailReason = if (result == null) yolo?.lastFailure else null
 
                 // 先把结果推给主线程，**留档写盘必须排在它后面**（见下面）。
                 main.post {
@@ -536,12 +561,13 @@ class HintSession(
                     dumpExecutor.execute {
                         runCatching { LowConfStore.save(context, bitmap, result, result.scanSuspect) }
                             .onFailure { Log.w(TAG, "留档失败", it) }
-                        if (!bitmap.isRecycled) bitmap.recycle()
+                        // 不立刻回收：求解失败时还要用这一帧落盘，交给单槽持有（见 lastFrame）
+                        holdLastFrame(bitmap)
                     }
                 } else {
                     // 定位失败也留档：失败帧以前磁盘上一张都没有，标定挂了只能盲调（见 saveScanFail）
                     dumpExecutor.execute {
-                        runCatching { LowConfStore.saveScanFail(context, bitmap) }
+                        runCatching { LowConfStore.saveScanFail(context, bitmap, scanFailReason) }
                             .onFailure { Log.w(TAG, "失败帧留档失败", it) }
                         if (!bitmap.isRecycled) bitmap.recycle()
                     }
@@ -862,7 +888,7 @@ class HintSession(
                                     return@post
                                 }
                             }
-                            finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」")
+                            finishAuto("本关无解，请在游戏里洗牌，然后点「刷新」", grid)
                             return@post
                         }
                         // 补数据模式：无解说明盘面多半已经识别错了，继续走一步让游戏产生变化，
@@ -898,21 +924,24 @@ class HintSession(
                     }
 
                     is AutoSolver.Outcome.MemoryLimited -> {
+                        // 首帧已改成"表满清空继续搜"，正常走不到这里；留着是为了配置改回
+                        // abortWhenFull=true 时仍能明确报出来，而不是表现成"没算完"。
                         Log.w(TAG, "求解死表满：${outcome.nodes} 节点")
                         finishAuto(
-                            "求解内存表已满（${outcome.nodes} 节点），已无法继续保证穷尽；建议洗牌或加大内存",
+                            "求解中止：死表已满（${outcome.nodes} 节点），未落子",
+                            grid,
                         )
                     }
 
                     is AutoSolver.Outcome.Unknown -> {
-                        // 预算烧完还没结论：**不落子**。
+                        // 挂钟烧完还没结论：**不落子**。
                         // 贪心走一步很可能把有解盘走成真无解 —— 这盘只是"还没算完"，
-                        // 不是"不能解"。保留盘面原样，重开自动会重新给满 120 秒；
-                        // 但搜索序是固定种子，同一盘面重试大概率还是同样的结果。
-                        Log.w(TAG, "求解超预算：${outcome.nodes} 节点，${solveMs}ms，剩 ${countBricks(result.state)} 块")
+                        // 不是"不能解"。和"已证明无解"必须分开说，否则用户会白白去洗牌。
+                        Log.w(TAG, "求解未完成：${outcome.nodes} 节点，${solveMs}ms，剩 ${countBricks(result.state)} 块")
                         finishAuto(
-                            "求解超预算（${outcome.nodes} 节点，${solveMs}ms），已暂停且未落子。" +
-                                "点「自动通关」重试",
+                            "求解未完成（已 ${outcome.nodes} 步 / ${solveMs / 1000}s），未落子。" +
+                                "这盘还没算出结论，可以先手动消几步破局",
+                            grid,
                         )
                     }
                 }
@@ -1145,8 +1174,13 @@ class HintSession(
         refreshNow()
     }
 
-    /** 自动收尾：关开关 + 把原因写在控制条上（红字），并说明已消多少对。 */
-    private fun finishAuto(message: String) {
+    /**
+     * 自动收尾：关开关 + 把原因写在控制条上（红字），并说明已消多少对。
+     *
+     * @param grid 求解失败时的盘面。会写进落盘日志的文件头 —— 没有它，事后
+     *   只能看到"算不出来"，复现不了到底是哪一盘点不动（留档只为补视觉标注，不存矩阵）。
+     */
+    private fun finishAuto(message: String, grid: Array<IntArray>? = null) {
         auto.set(false)
         main.removeCallbacks(autoTick)
         stopSolveProgress()
@@ -1156,8 +1190,11 @@ class HintSession(
         // 以前两行都塞 message，屏幕上就是同一句话重复两遍
         updateBar("已停止 · 已消 $autoSteps 对", "", message)
         Log.i(TAG, "自动结束：$message（已消 $autoSteps 对）")
+        // 求解没算完（超预算 / 死表满 / 无解）时，连原图带盘面一起落盘：
+        // 日志只回答"算了多久、多少节点"，看不出当时屏幕上是什么样
+        if (grid != null) saveSolveFailAsync(message, grid)
         // 把这一轮的 logcat 落一份盘：没 adb 权限的手机靠分享 ZIP 把 logs/ 带出来
-        saveLogAsync(message)
+        saveLogAsync(message, grid)
     }
 
     /**
@@ -1166,10 +1203,28 @@ class HintSession(
      * 只在"自动结束 / 手动定位失败"这种值得查的时刻调用；写盘约几十到几百毫秒，
      * 不能放主线程。会话已经 release 时队列已关，这里吞掉拒绝异常。
      */
-    private fun saveLogAsync(reason: String) {
+    /**
+     * 求解没算完时把"那一帧原图 + 当时的盘面"落一份（debug-frames/solve-fail/）。
+     *
+     * 和日志分开存：日志回答"算了多久、多少节点"，图回答"当时屏幕上到底是什么"。
+     * 两者对得上，才能分清是盘面太大算不动，还是识别错了才无解。
+     */
+    private fun saveSolveFailAsync(reason: String, grid: Array<IntArray>) {
         runCatching {
             dumpExecutor.execute {
-                Diagnostics.save(context, reason)
+                LowConfStore.saveSolveFail(context, heldFrame.get(), reason, grid)
+            }
+        }.onFailure { Log.w(TAG, "求解失败帧留档排队失败", it) }
+    }
+
+    private fun saveLogAsync(reason: String, grid: Array<IntArray>? = null) {
+        val detail = grid?.let { g ->
+            "# 求解失败时的盘面（${g.size}x${g[0].size}，0 = 空位）\n" +
+                g.joinToString("\n") { row -> row.joinToString(" ") }
+        }
+        runCatching {
+            dumpExecutor.execute {
+                Diagnostics.save(context, reason, detail)
                 // 日志份数变了，顺手刷新分享按钮
                 LowConfStore.refresh(context)
             }
@@ -1249,25 +1304,26 @@ class HintSession(
         /**
          * 首帧求解参数：**单次搜索 + 大死表，不再 16 次随机重启**。
          *
-         * - 10M 节点上限：一次搜索给足深度；
-         * - 死表 16M 槽 × 16B = **256MB**，单次搜索内持久，不再中途 clear 重搜；
-         * - 表满直接返回 [AutoSolver.Outcome.MemoryLimited]，绝不把手机撑 OOM；
-         * - `largeHeap` + 256MB 分配失败时自动退回 128MB（见 solveAndPlan）。
-         *
-         * 这盘实测 50 万节点就够证明无解；256MB 是为了困难盘少重搜、保证效率。
+         * - 节点不设限：一次搜索给足深度；
+         * - 死表 16M 槽 × 16B = **256MB**；
+         * - 表满**清空继续搜**（abortWhenFull=false）：宁可重复探索，也不要在
+         *   8.39M 状态处就把搜索掐掉 —— 那会让"还没算完"变成一次彻头彻尾的失败；
+         * - `largeHeap` + 256MB 分配失败时自动退回（见 [SOLVE_DEAD_SLOTS_FALLBACK]）。
          */
         val SOLVE_CONFIG_FIRST = AutoSolver.Config(
-            nodesPerAttempt = Int.MAX_VALUE,   // 不设节点上限，只靠死表/手动停止
+            nodesPerAttempt = Int.MAX_VALUE,   // 不设节点上限，只靠挂钟/手动停止
             maxAttempts = 1,
             deadSlots = 1 shl 24,              // 16M 槽 × 16B = 256MB
-            abortWhenFull = true,
+            abortWhenFull = false,
         )
 
         /**
-         * 首帧挂钟：**0 = 不设上限**，只由用户手动停止（关自动/关悬浮窗）。
-         * 死表满或证明解/无解时也会结束，但不是按时间。
+         * 首帧挂钟：5 分钟。
+         *
+         * 宁慢求对：这盘的解要么找到、要么等它把可达图穷举完（证明无解），
+         * 中途放弃没有意义 —— 一次"算不动"之后，重试还是同一盘同一搜索序。
          */
-        const val SOLVE_TIME_BUDGET_FIRST_MS = 0L
+        const val SOLVE_TIME_BUDGET_FIRST_MS = 300_000L
 
         /**
          * 首帧死表 OOM 的降级梯度：从 256MB 开始，每次减 10MB，最低 64MB。

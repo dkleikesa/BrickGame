@@ -245,8 +245,20 @@ object AutoSolver {
         private val actionBuffers = Array(maxDepth + 1) { ActionBuffer() }
         private val actionScratch = IntArray(6)
 
+        /**
+         * 每类还剩几块（当前路径上），走法排序用。
+         *
+         * 一步固定消两块（[BrickGameTipHelper.actionStep]），所以只在这一条路径上前进/回退 ±2，
+         * 不用每个节点重扫 140 格。下标越界的类别（识别层理论上给不出）不计数，退化成"不优先"。
+         */
+        private val remaining = IntArray(4096)
+
+        /** [orderActions] 复用的键缓冲，避免每个节点新建数组。 */
+        private var orderKeys = IntArray(64)
+
         fun run(start: Array<IntArray>): Boolean {
             copyInto(start, pool[0])
+            for (row in start) for (v in row) if (v in 1 until remaining.size) remaining[v]++
             fingerprint(pool[0], fp)
             return dfs(0, pool[0], fp[0], fp[1])
         }
@@ -283,7 +295,10 @@ object AutoSolver {
 
             val actions = actionBuffers[depth]
             if (moves(grid, depth) == 0) return false
+            // 先随机（保证不同随机序的尝试仍然有差异），再稳定地按"有用程度"排在前面：
+            // 只剩两块的那一类 → 原地消 → 其余。只改顺序、不改动作集合，正确性不受影响。
             actions.shuffle(random)
+            orderActions(grid, actions)
 
             for (i in 0 until actions.size) {
                 val action = actions[i]
@@ -293,13 +308,20 @@ object AutoSolver {
                 // 以前先在探针盘上试一遍、再把同一个动作在 child 上重放一次，纯属白算。
                 // 真遇到不合法的（理论上的枚举漏洞），这里跳过即可，child 下一轮会被覆盖。
                 unpackAction(action, actionScratch)
+                val cls = grid[actionScratch[0]][actionScratch[1]]
                 if (BrickGameTipHelper.actionStep(child, actionScratch, checkTerminal = false) <= 0) continue
+                if (cls in 1 until remaining.size) remaining[cls] -= 2
                 fingerprint(child, fp)
                 val childH1 = fp[0]
                 val childH2 = fp[1]
-                if (dead.contains(childH1, childH2)) continue
+                if (dead.contains(childH1, childH2)) {
+                    if (cls in 1 until remaining.size) remaining[cls] += 2
+                    continue
+                }
                 chosen[depth] = action
-                if (dfs(depth + 1, child, childH1, childH2)) return true
+                val solved = dfs(depth + 1, child, childH1, childH2)
+                if (cls in 1 until remaining.size) remaining[cls] += 2
+                if (solved) return true
                 if (aborted) return false
             }
 
@@ -339,6 +361,30 @@ object AutoSolver {
             val buffer = actionBuffers[depth]
             BrickGameTipHelper.findActionsInto(grid, near, buffer)
             return buffer.size
+        }
+
+        /**
+         * 按"有用程度"稳定排序（0 最优先）：
+         *  0. 这一步消掉的类**只剩这两块** —— 不消掉它，这两块就是全盘唯一的出口；
+         *  1. 原地消（不用先滑），少一次位移就少一处被卡住的风险；
+         *  2. 其余。
+         *
+         * 只影响搜索序，不影响可解性判断：全部动作仍然会被枚举到。
+         */
+        private fun orderActions(grid: Array<IntArray>, actions: ActionBuffer) {
+            val n = actions.size
+            if (n <= 1) return
+            if (orderKeys.size < n) orderKeys = IntArray(n)
+            for (i in 0 until n) {
+                unpackAction(actions[i], actionScratch)
+                val cls = grid[actionScratch[0]][actionScratch[1]]
+                orderKeys[i] = when {
+                    cls in 1 until remaining.size && remaining[cls] <= 2 -> 0
+                    actionScratch[0] == actionScratch[2] && actionScratch[1] == actionScratch[3] -> 1
+                    else -> 2
+                }
+            }
+            actions.stableSortByKey(orderKeys, 3)
         }
 
         /** 复用的指纹输出，避免每节点分配。 */

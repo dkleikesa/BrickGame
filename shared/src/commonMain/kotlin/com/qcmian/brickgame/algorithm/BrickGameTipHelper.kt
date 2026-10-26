@@ -63,6 +63,30 @@ internal class ActionBuffer(initialCapacity: Int = 32) {
         data[size++] = packAction(fr, fc, tr, tc, pr, pc)
     }
 
+    /**
+     * 按 [keys]（0..[buckets]-1）稳定重排，用于求解器的走法优先序。
+     *
+     * 稳定：同键的动作保持进入时的相对顺序，所以调用方可以"先 shuffle 再排序"来兼得
+     * 优先序和随机性。计数排序，O(size)。
+     */
+    fun stableSortByKey(keys: IntArray, buckets: Int) {
+        if (size <= 1) return
+        if (scratch.size < data.size) scratch = LongArray(data.size)
+        val starts = IntArray(buckets)
+        for (i in 0 until size) starts[keys[i]]++
+        var acc = 0
+        for (b in 0 until buckets) {
+            val count = starts[b]
+            starts[b] = acc
+            acc += count
+        }
+        for (i in 0 until size) scratch[starts[keys[i]]++] = data[i]
+        for (i in 0 until size) data[i] = scratch[i]
+    }
+
+    /** [stableSortByKey] 的临时缓冲（与 data 同长，按需扩容）。 */
+    private var scratch = LongArray(0)
+
     /** 原地 Fisher-Yates，随机数消耗顺序与 `Collections.shuffle` 一致，搜索序不变。 */
     fun shuffle(random: Random) {
         for (i in size downTo 2) {

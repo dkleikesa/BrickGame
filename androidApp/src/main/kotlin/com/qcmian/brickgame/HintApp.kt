@@ -60,8 +60,6 @@ import androidx.core.content.FileProvider
 import com.qcmian.brickgame.capture.BrickGameAccessibilityService
 import com.qcmian.brickgame.capture.AutoContinue
 import com.qcmian.brickgame.capture.LowConfStore
-import com.qcmian.brickgame.ml.ModelVariant
-import com.qcmian.brickgame.ml.TfliteTileClassifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -92,8 +90,6 @@ fun HintApp() {
         var showSettings by remember { mutableStateOf(false) }
         // 放大看的哪张留档（null = 没开大图）
         var zoom by remember { mutableStateOf<File?>(null) }
-        // 实际跑在哪条后端上由 TfliteTileClassifier 决定（GPU delegate 对这个模型不划算，已关）
-        val backend = remember { TfliteTileClassifier.backendDescription() }
 
         LaunchedEffect(Unit) {
             while (true) {
@@ -134,7 +130,6 @@ fun HintApp() {
                             else -> "未开启"
                         },
                     )
-                    StatusLine("识别实现", "TFLite · $backend")
                     StatusLine("运行状态", if (ui.running) "提示中（第 ${ui.frames} 帧）" else "已停止")
                     StatusLine(
                         "自动通关",
@@ -155,6 +150,10 @@ fun HintApp() {
                     StatusLine(
                         "低置信度留档",
                         if (HintUiBus.lowConfCount == 0) "暂无" else "${HintUiBus.lowConfCount} 张",
+                    )
+                    StatusLine(
+                        "定位失败留档",
+                        if (HintUiBus.scanFailCount == 0) "暂无" else "${HintUiBus.scanFailCount} 张",
                     )
                 }
             }
