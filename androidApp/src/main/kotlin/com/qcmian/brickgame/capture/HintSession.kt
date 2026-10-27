@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicIntegerArray
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -184,8 +185,8 @@ class HintSession(
      * 本次求解已探索的节点数（控制条上的"已尝试了多少步"）。
      *
      * solver 在 worker 线程每 256 个节点写一次，主线程每秒读一次：
-     * 首帧预算 10M 节点 / 300 秒，如果状态行只写"求解中…"，用户对着一条几分钟
-     * 不动的字分不清是卡死还是还在算。这个数每秒变一次，本身就是"还活着"的证据。
+     * 求解不设挂钟（见 [SOLVE_TIME_BUDGET_MS]），如果状态行只写"求解中…"，用户对着一条
+     * 几分钟不动的字分不清是卡死还是还在算。这个数每秒变一次，本身就是"还活着"的证据。
      */
     private val solveNodes = AtomicLong(0)
 
@@ -774,27 +775,87 @@ class HintSession(
         abort: () -> Boolean,
         reportNodes: (Long) -> Unit,
     ): AutoSolver.Outcome {
-        val rootActions = BrickGameTipHelper.findActions(grid)
-        val shards = minOf(rootActions.size, PARALLEL_SHARDS, Runtime.getRuntime().availableProcessors())
-        // 只有一个第一手（或单核）就没有可并行的东西：走原路径，顺便保住 OOM 降级那些行为
+        val roots = BrickGameTipHelper.findActions(grid)
+
+        class Node(val steps: List<IntArray>, val board: Array<IntArray>, val root: Int)
+
+        val rootTotal = IntArray(roots.size)              // 每个第一手最终切出几个任务
+        val rootDead = AtomicIntegerArray(roots.size)      // 其中已证无解的任务数
+        val rootBroken = BooleanArray(roots.size)          // 第一手本身就走不了（保守：不据此判无解）
+        var immediate: AutoSolver.Outcome.Solved? = null
+
+        // 第一层：落第一手
+        var frontier = ArrayList<Node>()
+        for ((ri, first) in roots.withIndex()) {
+            val child = Array(grid.size) { grid[it].copyOf() }
+            if (BrickGameTipHelper.actionStep(child, first, checkTerminal = false) <= 0) {
+                rootBroken[ri] = true
+                continue
+            }
+            if (child.all { row -> row.all { it == 0 } }) {
+                immediate = solvedOf(listOf(first))
+                break
+            }
+            frontier.add(Node(listOf(first), child, ri))
+        }
+        immediate?.let { return it }
+
+        // 继续往下切，直到任务够多（或到深度上限）。
+        // 为什么按需切而不是固定两级：第一手的子树大小能差几万倍（实测 156k / 14 / 422k / 10），
+        // 固定两级在这盘上只把最大任务从 422k 降到 ~200k；切到第三、四级才真正摊平。
+        var depth = 1
+        while (frontier.size < TARGET_TASKS && depth < MAX_SPLIT_DEPTH) {
+            val next = ArrayList<Node>(frontier.size * 2)
+            for (node in frontier) {
+                val moves = BrickGameTipHelper.findActions(node.board)
+                if (moves.isEmpty()) {
+                    // 走到死胡同：这条前缀本身就是死路，直接记成"已证无解"
+                    rootTotal[node.root]++
+                    rootDead.incrementAndGet(node.root)
+                    continue
+                }
+                for (move in moves) {
+                    val child = Array(grid.size) { grid[it].copyOf() }
+                    if (BrickGameTipHelper.actionStep(child, move, checkTerminal = false) <= 0) continue
+                    if (child.all { row -> row.all { it == 0 } }) {
+                        immediate = solvedOf(node.steps + move)
+                        break
+                    }
+                    next.add(Node(node.steps + move, child, node.root))
+                }
+                if (immediate != null) break
+            }
+            frontier = next
+            depth++
+            immediate?.let { return it }
+            if (frontier.isEmpty()) break
+        }
+        // 剩下的每个节点就是一个待搜索的任务
+        for (node in frontier) rootTotal[node.root]++
+
+        if (frontier.isEmpty()) {
+            // 切到最后一条活路都没有：要么全是死胡同，要么第一手就走不了
+            return if (rootBroken.any { it }) AutoSolver.Outcome.Unknown(0)
+            else AutoSolver.Outcome.Unsolvable
+        }
+
+        val shards = minOf(frontier.size, PARALLEL_SHARDS, Runtime.getRuntime().availableProcessors())
         if (shards <= 1) return AutoSolver.solve(grid, config, abort, reportNodes)
 
-        // 所有分片**共用一张死表**：不同第一手的后继盘面会重合（消 A 再消 B = 消 B 再消 A），
-        // 各自持表等于把这份重合重复搜一遍 —— 实测切成 4 个任务后总搜索量是单线程的 1.34 倍。
-        // 共享之后内存也不用乘份数：同样 256MB 装的是"全盘唯一状态"，不是 4 份各装 1/4。
+        // 所有分片**共用一张死表**：不同前缀的后继盘面会重合，各自持表等于重复搜；
+        // 内存也不乘份数 —— 同样 256MB 装的是"全盘唯一状态"。
         val shared = if (config.deadSlots > 0) AutoSolver.SharedDeadTable(config.deadSlots) else null
         Log.i(
             TAG,
-            "并行求解：${shards} 个分片（第一手 ${rootActions.size} 个），" +
+            "并行求解：${shards} 个分片，任务 ${frontier.size} 个（切到第 $depth 手），" +
                 (if (shared != null) "共享死表 ${shared.slots * 8L / 1048576}MB" else "死表按节点预算自动"),
         )
 
+        val tasks = frontier
         val next = AtomicInteger(0)
         val solved = AtomicReference<AutoSolver.Outcome.Solved?>()
         val inconsistent = AtomicReference<AutoSolver.Outcome.Inconsistent?>()
         val totalNodes = AtomicLong(0)
-        /** 每个第一手的结局：0 没跑 / 1 已证无解 / 2 没算完 / 3 有解 / 4 计数不成对。 */
-        val status = IntArray(rootActions.size)
         val latch = CountDownLatch(shards)
 
         repeat(shards) {
@@ -802,19 +863,13 @@ class HintSession(
                 try {
                     while (true) {
                         val i = next.getAndIncrement()
-                        if (i >= rootActions.size) break
+                        if (i >= tasks.size) break
                         if (solved.get() != null || inconsistent.get() != null || abort()) break
-                        val action = rootActions[i]
-                        val child = Array(grid.size) { grid[it].copyOf() }
-                        if (BrickGameTipHelper.actionStep(child, action, checkTerminal = false) <= 0) {
-                            // 枚举出来的动作却走不了：算"没算完"，绝不能据此判无解
-                            status[i] = 2
-                            continue
-                        }
+                        val task = tasks[i]
                         // 每个子搜索的节点数从 0 重新计，这里累加进总量，进度只增不减
                         var last = 0L
                         val outcome = AutoSolver.solve(
-                            child,
+                            task.board,
                             config,
                             { solved.get() != null || inconsistent.get() != null || abort() },
                             onProgress = { nodes ->
@@ -825,27 +880,14 @@ class HintSession(
                             sharedDead = shared,
                         )
                         when (outcome) {
-                            is AutoSolver.Outcome.Solved -> {
-                                status[i] = 3
-                                solved.compareAndSet(
-                                    null,
-                                    AutoSolver.Outcome.Solved(
-                                        listOf(
-                                            AutoSolver.Step(
-                                                AutoSolver.Cell(action[0], action[1]),
-                                                AutoSolver.Cell(action[2], action[3]),
-                                                AutoSolver.Cell(action[4], action[5]),
-                                            ),
-                                        ) + outcome.steps,
-                                    ),
-                                )
-                            }
-                            AutoSolver.Outcome.Unsolvable -> status[i] = 1
-                            is AutoSolver.Outcome.Inconsistent -> {
-                                status[i] = 4
+                            is AutoSolver.Outcome.Solved -> solved.compareAndSet(
+                                null,
+                                AutoSolver.Outcome.Solved(task.steps.map { it.toStep() } + outcome.steps),
+                            )
+                            AutoSolver.Outcome.Unsolvable -> rootDead.incrementAndGet(task.root)
+                            is AutoSolver.Outcome.Inconsistent ->
                                 inconsistent.compareAndSet(null, outcome)
-                            }
-                            else -> status[i] = 2
+                            else -> Unit   // 没算完：这个任务不算"已证无解"
                         }
                     }
                 } finally {
@@ -857,8 +899,11 @@ class HintSession(
 
         solved.get()?.let { return it }
         inconsistent.get()?.let { return it }
-        // 只有每个第一手都被穷举完，才能把"整盘无解"这个结论交出去
-        if (status.all { it == 1 }) return AutoSolver.Outcome.Unsolvable
+        // 每个第一手的**所有**分支都被穷举完，才敢说整盘无解
+        val allProven = roots.indices.all { ri ->
+            !rootBroken[ri] && rootDead.get(ri) == rootTotal[ri]
+        }
+        if (allProven) return AutoSolver.Outcome.Unsolvable
         return AutoSolver.Outcome.Unknown(totalNodes.get())
     }
 
@@ -1287,7 +1332,19 @@ class HintSession(
         refreshNow()
     }
 
-    /** 记下"这张盘算过、结论是这个"：同一盘面再来就不再求解（见 [lastSolveKey]）。 */
+    /** 把 6 元动作数组转成求解器的 [AutoSolver.Step]。 */
+private fun IntArray.toStep(): AutoSolver.Step =
+    AutoSolver.Step(
+        AutoSolver.Cell(this[0], this[1]),
+        AutoSolver.Cell(this[2], this[3]),
+        AutoSolver.Cell(this[4], this[5]),
+    )
+
+/** 由"已经走完的前缀"拼一个解出来（第一手/第二手就消完的盘用得上）。 */
+private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
+    AutoSolver.Outcome.Solved(steps.map { it.toStep() })
+
+/** 记下"这张盘算过、结论是这个"：同一盘面再来就不再求解（见 [lastSolveKey]）。 */
     private fun rememberSolve(state: BoardState, message: String) {
         lastSolveKey = state.labels.joinToString(",")
         lastSolveMessage = message
@@ -1374,7 +1431,7 @@ class HintSession(
         solveStartMs = SystemClock.elapsedRealtime()
         solveNodes.set(0)
         updateBar(hint, "已尝试 0 步 · 剩 $remaining 块")
-        overlay.setBarTiming("0s/${budgetMs / 1000}s")
+        overlay.setBarTiming(if (budgetMs > 0) "0s/${budgetMs / 1000}s" else "0s（手动停止）")
         main.postDelayed(solveProgressTick, SOLVE_PROGRESS_MS)
     }
 
@@ -1449,12 +1506,14 @@ class HintSession(
         )
 
         /**
-         * 求解挂钟：5 分钟（首帧与重算同一档）。
+         * 求解挂钟：**0 = 不设上限**，一直算到出结论（找到解 / 证明无解）或用户手动停。
          *
-         * 宁慢求对：这盘的解要么找到、要么等它把可达图穷举完（证明无解），
-         * 中途放弃没有意义 —— 一次"算不动"之后，重试还是同一盘同一搜索序。
+         * 为什么不要上限：算不动多半是"这盘本身极深"，掐掉只是把"还没算完"变成一次失败，
+         * 下次重试还是同一盘同一搜索序。宁可挂着慢慢算，也别在中途说谎。
+         * 代价是接口层没有自动退出，只有"关自动/关悬浮窗"能停 —— 控制条右上角会显示
+         * 「已用 Ns（手动停止）」。死表满了会自动清空继续（见 SOLVE_CONFIG）。
          */
-        const val SOLVE_TIME_BUDGET_MS = 300_000L
+        const val SOLVE_TIME_BUDGET_MS = 0L
 
         /** 判无解的结论文案：报错处和"同盘再来不再重算"处共用，避免两处写法不一致。 */
         const val UNSOLVABLE_MESSAGE = "本关无解，请在游戏里洗牌，然后点「刷新」"
@@ -1476,12 +1535,23 @@ class HintSession(
         }
 
         /**
-         * 并行求解的分片数上限（实际还会被"第一手的个数"和 CPU 核数压小）。
+         * 并行求解的线程数上限（实际还会被"任务个数"和 CPU 核数压小）。
          *
-         * 4 而不是按核数拉满：死表内存要按分片摊（4 × 64MB），核多但内存不够时
-         * 再多线程只会互相抢带宽、频繁 clear 死表。
+         * 6 是折中：本机实测 4→6 线程还有 15% 收益，6→8 只剩 4%；
+         * 手机上大核就 1+3 个，再多线程只会挤到小核上发热。
          */
-        const val PARALLEL_SHARDS = 4
+        const val PARALLEL_SHARDS = 6
+
+        /** 切分任务的目标个数：少于这个数就继续往下切一手（深度上限见 [MAX_SPLIT_DEPTH]）。 */
+        const val TARGET_TASKS = 32
+
+        /**
+         * 切分深度上限（手数）。
+         *
+         * 实测同一盘：按第一手切（4 个任务）加速 1.05x，第三手 30 个任务 3.2x，第四手 45 个任务 4.7x。
+         * 再深就只剩冗余（每个任务都要重建棋盘、共享表也压不住）。
+         */
+        const val MAX_SPLIT_DEPTH = 4
 
         /**
          * 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。
