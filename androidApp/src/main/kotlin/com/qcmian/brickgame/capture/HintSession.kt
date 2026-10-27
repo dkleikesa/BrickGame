@@ -1503,6 +1503,12 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
             maxAttempts = 1,
             deadSlots = deadSlotBudget(),
             abortWhenFull = false,
+            // 84% 的死状态 64 个节点内就能重算，存它们只会把表塞满（实测条目降到 15%、覆盖 93% 价值）
+            deadMinCost = 64,
+            // 剩 20 块起按"同线锁死形态"排序：这类盘面的胜负完全由最后几块的几何决定
+            endgameBricks = 20,
+            // 尾部盘面重合率极高，它们的"无解"结论值得越过 deadMinCost 一律记下
+            tailBricks = 8,
         )
 
         /**

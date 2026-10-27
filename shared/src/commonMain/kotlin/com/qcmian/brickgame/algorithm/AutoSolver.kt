@@ -90,6 +90,29 @@ object AutoSolver {
         val deadSlots: Int = 0,
         /** 死表满时：true 立刻返回 [Outcome.MemoryLimited]；false 清空重搜（省内存、费时间）。 */
         val abortWhenFull: Boolean = false,
+        /**
+         * 死表准入阈值：证明这个状态已死**至少花了多少节点**，小于它的不写表。
+         *
+         * 为什么：绝大多数（实测 84%）死状态 64 个节点以内就能重算一遍，存它们只是把
+         * 2621 万槽的表塞满、把每条有意义的记录稀释掉。按 64 过滤后条目只剩 15%，
+         * 但这些条目覆盖了 93% 的重算节省量。
+         */
+        val deadMinCost: Int = 0,
+        /**
+         * 剩余砖数 ≤ 这个值时开始用"终局感知"排序动作；0 = 不启用（只 shuffle）。
+         *
+         * 为什么需要：常规启发式（能消对数、空格数）看不出来"再走五步会锁死"。
+         * 终局视野里再加一项"同行/同列里同类被异类隔开且中间没有空位"的计数——
+         * 这种形态推不动也消不掉，实战里就是最后 4 块卡死的那个形状。
+         */
+        val endgameBricks: Int = 0,
+        /**
+         * 剩余砖数 ≤ 这个值时，死表结论不再受 [deadMinCost] 过滤，一律记下来。
+         *
+         * 越到尾部盘面越像，不同路径撞到同一个尾盘的概率极高，所以尾部的"无解"结论
+         * 是全表里复用率最高的那批 —— 它们的代价小（几十个节点），但被记住一次的收益远超成本。
+         */
+        val tailBricks: Int = 0,
     ) {
         companion object {
             val DEFAULT = Config()
@@ -138,7 +161,8 @@ object AutoSolver {
             val baseNodes = totalNodes
             val search = Search(
                 rows, cols, Random(SEED + attempt), config.nodesPerAttempt, shouldAbort,
-                config.deadSlots, config.abortWhenFull, sharedDead,
+                config.deadSlots, config.abortWhenFull, config.deadMinCost.toLong(),
+                config.endgameBricks, config.tailBricks, sharedDead,
                 onNodes = { nodes -> onProgress(baseNodes + nodes) },
             )
             val solved = search.run(grid)
@@ -218,6 +242,10 @@ object AutoSolver {
 
     private const val SEED = 0x51ED1L
 
+    /** [Search.dfs] 的哨兵返回值：找到解；被中止（预算/挂钟/内存）。都是负数，与代价区分开。 */
+    private const val SOLVED = -1L
+    private const val STOP = -2L
+
     /**
      * 置换表最多用多少槽。槽数按节点预算的 2 倍取 2 的幂，载入到一半就清空。
      *
@@ -245,6 +273,12 @@ object AutoSolver {
         private val shouldAbort: () -> Boolean,
         deadSlots: Int,
         private val abortWhenFull: Boolean,
+        /** 死表准入阈值，见 [Config.deadMinCost]。 */
+        private val deadMinCost: Long,
+        /** 剩余砖数 ≤ 此值启用终局感知排序，见 [Config.endgameBricks]。 */
+        private val endgameBricks: Int,
+        /** 剩余砖数 ≤ 此值时死表不受 [deadMinCost] 过滤，见 [Config.tailBricks]。 */
+        private val tailBricks: Int,
         /** 多线程共享的死表；给了就不再用自己的定长表，也不再整表清空。 */
         private val sharedDead: SharedDeadTable?,
         /** 每 256 个节点报一次当前尝试已走过的节点数（比 UI 的 1 秒采样更密，慢盘也能看到数在变）。 */
@@ -253,6 +287,9 @@ object AutoSolver {
 
         var nodes: Long = 0
             private set
+
+        /** 起始盘面的砖数；剩余砖数 = totalBricks - 已消对数 × 2。 */
+        private var totalBricks = 0
 
         /** 预算烧完（或被叫停）而提前收工；false 表示"整张可达图已穷举完"。 */
         var aborted: Boolean = false
@@ -301,21 +338,13 @@ object AutoSolver {
         private val actionBuffers = Array(maxDepth + 1) { ActionBuffer() }
         private val actionScratch = IntArray(6)
 
-        /**
-         * 每类还剩几块（当前路径上），走法排序用。
-         *
-         * 一步固定消两块（[BrickGameTipHelper.actionStep]），所以只在这一条路径上前进/回退 ±2，
-         * 不用每个节点重扫 140 格。下标越界的类别（识别层理论上给不出）不计数，退化成"不优先"。
-         */
-        private val remaining = IntArray(4096)
-
-        /** [orderActions] 复用的键缓冲，避免每个节点新建数组。 */
-        private var orderKeys = IntArray(64)
-
         fun run(start: Array<IntArray>): Boolean {
             copyInto(start, pool[0])
-            for (row in start) for (v in row) if (v in 1 until remaining.size) remaining[v]++
-            return dfs(0, pool[0], fingerprint(pool[0]))
+            var bricks = 0
+            for (row in start) for (v in row) if (v != BrickGameTipHelper.BACKGROUND) bricks++
+            totalBricks = bricks
+            dfs(0, pool[0], fingerprint(pool[0]))
+            return !aborted && solutionDepth >= 0
         }
 
         fun solution(): List<Step> {
@@ -331,30 +360,38 @@ object AutoSolver {
             return out
         }
 
-        private fun dfs(depth: Int, grid: Array<IntArray>, h: Long): Boolean {
-            if (aborted) return false
+        private fun dfs(depth: Int, grid: Array<IntArray>, h: Long): Long {
+            if (aborted) return STOP
             nodes++
             if (nodes > budget) {
                 aborted = true
-                return false
+                return STOP
             }
             if ((nodes and 0xFFL) == 0L) onNodes(nodes)
             if ((nodes and 0x3FFL) == 0L && shouldAbort()) {
                 aborted = true
-                return false
+                return STOP
             }
             if (isCleared(grid)) {
                 solutionDepth = depth
-                return true
+                return SOLVED
             }
 
             val actions = actionBuffers[depth]
-            if (moves(grid, depth) == 0) return false
-            // 先随机（保证不同随机序的尝试仍然有差异），再稳定地按"有用程度"排在前面：
-            // 只剩两块的那一类 → 原地消 → 其余。只改顺序、不改动作集合，正确性不受影响。
+            if (moves(grid, depth) == 0) return 1L
+            // 只打乱顺序，不排序。
+            //
+            // 这里原来会按"某类剩两块 > 原地消 > 其余"再稳定排一次，但满盘上所有候选都是
+            // 原地消，三档打分恒等于 1，排序是恒等变换。实测（第 18 关 140 块满盘、45 秒）
+            // 开关前后：1665 万节点 / 370k 每秒 vs 1636 万节点 / 364k 每秒，差 1.7%。
+            // 保留 shuffle 是为了不同重启之间有差异，而不是为了"排序"。
             actions.shuffle(random)
-            orderActions(grid, actions)
+            // 终局视野：剩下的砖不多时，"能不能收尾"由几何形态决定，不由"现在能消几对"决定。
+            // 这时换成按死锁形态打分排序（见 [orderEndgame]），把最后 4 块锁死的路提前排到后面。
+            val bricks = totalBricks - (depth shl 1)
+            if (endgameBricks > 0 && bricks <= endgameBricks) orderEndgame(grid, actions)
 
+            var cost = 1L
             for (i in 0 until actions.size) {
                 val action = actions[i]
                 val child = pool[depth + 1]
@@ -363,20 +400,24 @@ object AutoSolver {
                 // 以前先在探针盘上试一遍、再把同一个动作在 child 上重放一次，纯属白算。
                 // 真遇到不合法的（理论上的枚举漏洞），这里跳过即可，child 下一轮会被覆盖。
                 unpackAction(action, actionScratch)
-                val cls = grid[actionScratch[0]][actionScratch[1]]
                 if (BrickGameTipHelper.actionStep(child, actionScratch, checkTerminal = false) <= 0) continue
-                if (cls in 1 until remaining.size) remaining[cls] -= 2
                 val childH = fingerprint(child)
                 if (isDead(childH)) {
-                    if (cls in 1 until remaining.size) remaining[cls] += 2
+                    cost++
                     continue
                 }
                 chosen[depth] = action
-                val solved = dfs(depth + 1, child, childH)
-                if (cls in 1 until remaining.size) remaining[cls] += 2
-                if (solved) return true
-                if (aborted) return false
+                val sub = dfs(depth + 1, child, childH)
+                if (sub == SOLVED) return SOLVED
+                if (sub == STOP) return STOP
+                cost += sub
             }
+
+            // 准入阈值：太便宜的死（重算一次也花不了几个节点）不值得占一格 + 一次探测。
+            // 实测 84% 的死状态都在 64 个节点以内证完，它们正是把表塞满、把有意义的记录挤掉的那批。
+            val bricksLeft = totalBricks - (depth shl 1)
+            val tail = tailBricks > 0 && bricksLeft <= tailBricks
+            if (cost < deadMinCost && !tail) return cost
 
             // 死表满：
             //  - abortWhenFull=true：内存到顶，停止并让上层报 MemoryLimited，绝不 OOM；
@@ -386,14 +427,14 @@ object AutoSolver {
                 if (abortWhenFull) {
                     memoryFull = true
                     aborted = true
-                    return false
+                    return STOP
                 }
                 own.clear()
             }
             // 当前盘面的指纹在进 dfs 时就算好并传进来了（子节点算指纹时顺便得出），
             // 这里直接入死表，不再重扫 140 格。
             if (own != null) own.add(h) else sharedDead?.add(h)
-            return false
+            return cost
         }
 
         /**
@@ -423,28 +464,106 @@ object AutoSolver {
             return if (s != null) s.contains(h) else dead!!.contains(h)
         }
 
+        /** 终局打分的探针盘（单独一块，不能和 pool 撞）。 */
+        private val endgameProbe = Array(rows) { IntArray(cols) }
+        private val endgameKeys = IntArray(256)
+        private val endgameOrder = LongArray(256)
+        private val endgameAction = IntArray(6)
+
+        /** 扫描行/列时记录“每类上一次出现的位置”，初值 -1。 */
+        private val rowLast = IntArray(64) { -1 }
+        private val colLast = IntArray(64) { -1 }
+
         /**
-         * 按"有用程度"稳定排序（0 最优先）：
-         *  0. 这一步消掉的类**只剩这两块** —— 不消掉它，这两块就是全盘唯一的出口；
-         *  1. 原地消（不用先滑），少一次位移就少一处被卡住的风险；
-         *  2. 其余。
+         * 终局排序：按“走完这一步之后的死锁形态”给动作打分，降序（稳定）。
          *
-         * 只影响搜索序，不影响可解性判断：全部动作仍然会被枚举到。
+         * 只在剩余砖数不多时调用，所以每条动作多复制一次盘面的开销可以接受。
+         * 非法动作给最低分，dfs 里会再判一次并跳过。
          */
-        private fun orderActions(grid: Array<IntArray>, actions: ActionBuffer) {
+        private fun orderEndgame(grid: Array<IntArray>, actions: ActionBuffer) {
             val n = actions.size
-            if (n <= 1) return
-            if (orderKeys.size < n) orderKeys = IntArray(n)
+            if (n <= 1 || n > endgameKeys.size) return
             for (i in 0 until n) {
-                unpackAction(actions[i], actionScratch)
-                val cls = grid[actionScratch[0]][actionScratch[1]]
-                orderKeys[i] = when {
-                    cls in 1 until remaining.size && remaining[cls] <= 2 -> 0
-                    actionScratch[0] == actionScratch[2] && actionScratch[1] == actionScratch[3] -> 1
-                    else -> 2
+                unpackAction(actions[i], endgameAction)
+                copyInto(grid, endgameProbe)
+                endgameKeys[i] =
+                    if (BrickGameTipHelper.actionStep(endgameProbe, endgameAction, checkTerminal = false) <= 0) {
+                        Int.MIN_VALUE
+                    } else {
+                        endgameScore(endgameProbe)
+                    }
+                endgameOrder[i] = actions[i]
+            }
+            for (i in 1 until n) {
+                val k = endgameKeys[i]
+                val v = endgameOrder[i]
+                var j = i - 1
+                while (j >= 0 && endgameKeys[j] < k) {
+                    endgameKeys[j + 1] = endgameKeys[j]
+                    endgameOrder[j + 1] = endgameOrder[j]
+                    j--
+                }
+                endgameKeys[j + 1] = k
+                endgameOrder[j + 1] = v
+            }
+            actions.overwrite(endgameOrder, n)
+        }
+
+        /**
+         * 终局形态分：越大越好。
+         *
+         * - adj * 1000：紧邻同类对数 —— 现在就能消的机会；
+         * - -lock * 400：同一条线上同类被异类隔开、且中间没有空位的对数。
+         *   这种形态既消不掉、又推不动，实战里就是最后 4 块卡死的那个形状；
+         * - + empty * 10：空格越多，越有余地调整。
+         */
+        private fun endgameScore(g: Array<IntArray>): Int {
+            var adj = 0
+            var empty = 0
+            var lock = 0
+            for (r in 0 until rows) {
+                val row = g[r]
+                var lastEmpty = -1
+                for (c in 0 until cols) {
+                    val v = row[c]
+                    if (v == BrickGameTipHelper.BACKGROUND) {
+                        empty++
+                        lastEmpty = c
+                        continue
+                    }
+                    if (c + 1 < cols && row[c + 1] == v) adj++
+                    if (v in 1 until rowLast.size) {
+                        val lp = rowLast[v]
+                        if (lp >= 0 && lastEmpty <= lp) lock++
+                        rowLast[v] = c
+                    }
+                }
+                for (c in 0 until cols) {
+                    val v = row[c]
+                    if (v in 1 until rowLast.size) rowLast[v] = -1
                 }
             }
-            actions.stableSortByKey(orderKeys, 3)
+            for (c in 0 until cols) {
+                var lastEmpty = -1
+                for (r in 0 until rows) {
+                    val v = g[r][c]
+                    if (v == BrickGameTipHelper.BACKGROUND) {
+                        lastEmpty = r
+                        continue
+                    }
+                    if (r + 1 < rows && g[r + 1][c] == v) adj++
+                    if (v in 1 until colLast.size) {
+                        val lp = colLast[v]
+                        if (lp >= 0 && lastEmpty <= lp) lock++
+                        colLast[v] = r
+                    }
+                }
+                for (r in 0 until rows) {
+                    val v = g[r][c]
+                    if (v in 1 until colLast.size) colLast[v] = -1
+                }
+            }
+            return adj * 1000 - lock * 400 + empty * 10
         }
 
         /**
