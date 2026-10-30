@@ -20,7 +20,7 @@ import android.view.View
  *
  * 布局分两行：
  *  - 上行：提示文字 + 状态小字（占满整宽，不再被按钮挤）；
- *  - 下行：自动通关开关 → 两个调试开关（网格 / 类别号）→ 刷新 → 关闭。
+ *  - 下行：快速模式开关 → 自动通关开关 → 信息开关（网格 + 类别号一起）→ 刷新。
  *
  * 为什么拆成两行：加上「自动」以后这一排控件在窄屏（360dp 甚至 320dp）上会把提示文字
  * 挤到只剩几十 dp。控件单独一行之后，文字与按钮互不抢占。
@@ -44,9 +44,18 @@ class ControlBarView(context: Context) : View(context) {
 
     var onRefresh: (() -> Unit)? = null
 
-    /** 调试开关：网格 / 类别号。点一下立刻回调，由上层即时重画（不用等下一次刷新）。 */
-    var onToggleGrid: ((Boolean) -> Unit)? = null
-    var onToggleLabels: ((Boolean) -> Unit)? = null
+    /** 信息开关：网格与类别号一起显示/隐藏。点一下立刻回调，由上层即时重画（不用等下一次刷新）。 */
+    var onToggleInfo: ((Boolean) -> Unit)? = null
+
+    /** 快速模式开关：自动通关时连续出手，每若干块砖才识别一次校准（详见 HintSession）。 */
+    var onToggleFast: ((Boolean) -> Unit)? = null
+
+    /** 快速模式开关的显示状态。 */
+    var fastOn: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
 
     /** 无解继续：true = 自动模式遇无解不退出，继续贪心消。 */
     var onToggleContinue: ((Boolean) -> Unit)? = null
@@ -54,14 +63,8 @@ class ControlBarView(context: Context) : View(context) {
     /** 自动通关开关：点一下把期望的新状态回调出去（true = 开始自动）。 */
     var onToggleAuto: ((Boolean) -> Unit)? = null
 
-    /** 两个调试开关的显示状态（写进去就重绘）。 */
-    var showGrid: Boolean = false
-        set(value) {
-            field = value
-            invalidate()
-        }
-
-    var showLabels: Boolean = false
+    /** 信息开关的显示状态（写进去就重绘）。 */
+    var infoOn: Boolean = false
         set(value) {
             field = value
             invalidate()
@@ -164,18 +167,18 @@ class ControlBarView(context: Context) : View(context) {
 
     private val refreshRect = RectF()
     private val autoRect = RectF()
-    private val gridRect = RectF()
-    private val labelsRect = RectF()
+    private val infoRect = RectF()
+    private val fastRect = RectF()
     private val continueRect = RectF()
     private val rect = RectF()
 
-    /** 三个开关的宽度：轨道 + 标题文字按实际宽度算，窄屏上别把标签挤掉。 */
+    /** 开关的宽度：轨道 + 标题文字按实际宽度算，窄屏上别把标签挤掉。 */
     private var autoToggleWidth = 0f
-    private var gridToggleWidth = 0f
-    private var labelsToggleWidth = 0f
+    private var infoToggleWidth = 0f
+    private var fastToggleWidth = 0f
     private var continueToggleWidth = 0f
 
-    /** 当前按下的控件：[REFRESH]/[CLOSE]/[GRID]/[LABELS]/[AUTO]；-1 = 没有。 */
+    /** 当前按下的控件：[REFRESH]/[INFO]/[FAST]/[AUTO]/[CONTINUE]；-1 = 没有。 */
     private var pressed = -1
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -188,28 +191,28 @@ class ControlBarView(context: Context) : View(context) {
         val top = controlsTop
         val bottom = top + buttonHeight
         autoToggleWidth = trackWidth + trackGap + toggleText.measureText(AUTO_LABEL)
-        gridToggleWidth = trackWidth + trackGap + toggleText.measureText(GRID_LABEL)
-        labelsToggleWidth = trackWidth + trackGap + toggleText.measureText(LABELS_LABEL)
+        infoToggleWidth = trackWidth + trackGap + toggleText.measureText(INFO_LABEL)
+        fastToggleWidth = trackWidth + trackGap + toggleText.measureText(FAST_LABEL)
         continueToggleWidth = trackWidth + trackGap + toggleText.measureText(CONTINUE_LABEL)
 
-        // 从右往左排：刷新 ← 自动 ← 类别号 ← 网格 ← 续玩
+        // 从左往右：信息 → 续玩 → 快速 → 自动 → 刷新
         // 关闭与"定位算法"都移回 App 了，这里只留操作/调试开关
-        val fixed = buttonWidth + autoToggleWidth + labelsToggleWidth + gridToggleWidth +
-            continueToggleWidth
-        val available = w - padding * 2
-        // 空间富余时把余量**均分**到间隔里（以前固定 4dp，右边挤成一坨、左边一大片空白）；
-        // 窄屏才压到 2dp 兜底，保证不叠在一起
-        val gap = ((available - fixed) / 4f).coerceIn(dp(2f), dp(24f))
-        var right = w - padding
-        refreshRect.set(right - buttonWidth, top, right, bottom)
-        right -= buttonWidth + gap
-        autoRect.set(right - autoToggleWidth, top, right, bottom)
-        right -= autoToggleWidth + gap
-        labelsRect.set(right - labelsToggleWidth, top, right, bottom)
-        right -= labelsToggleWidth + gap
-        gridRect.set(right - gridToggleWidth, top, right, bottom)
-        right -= gridToggleWidth + gap
-        continueRect.set(right - continueToggleWidth, top, right, bottom)
+        //
+        // **按槽位均分**而不是"右对齐 + 均分间隔"：各个控件宽度不一样（按钮 48dp、开关是个
+        // 轨道+两字标签），只均分间隔的话视觉重心还是偏右。切成等宽槽位后每个控件在自己的槽里
+        // 居中，屏幕上看着就是均匀的一排；槽位比控件窄时（窄屏/大字号）就压到槽宽，宁可紧贴
+        // 也不叠到隔壁槽。
+        val slot = (w - padding * 2) / TOGGLE_COUNT.toFloat()
+        fun put(target: RectF, itemWidth: Float, index: Int) {
+            val width = itemWidth.coerceAtMost(slot)
+            val center = padding + slot * (index + 0.5f)
+            target.set(center - width / 2f, top, center + width / 2f, bottom)
+        }
+        put(infoRect, infoToggleWidth, 0)
+        put(continueRect, continueToggleWidth, 1)
+        put(fastRect, fastToggleWidth, 2)
+        put(autoRect, autoToggleWidth, 3)
+        put(refreshRect, buttonWidth, 4)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -244,8 +247,8 @@ class ControlBarView(context: Context) : View(context) {
         }
 
         drawToggle(canvas, autoRect, AUTO_LABEL, autoOn, pressed == AUTO)
-        drawToggle(canvas, gridRect, GRID_LABEL, showGrid, pressed == GRID)
-        drawToggle(canvas, labelsRect, LABELS_LABEL, showLabels, pressed == LABELS)
+        drawToggle(canvas, fastRect, FAST_LABEL, fastOn, pressed == FAST)
+        drawToggle(canvas, infoRect, INFO_LABEL, infoOn, pressed == INFO)
         drawToggle(canvas, continueRect, CONTINUE_LABEL, continueOn, pressed == CONTINUE)
         drawButton(canvas, refreshRect, "刷新", pressed == REFRESH, false)
     }
@@ -325,14 +328,14 @@ class ControlBarView(context: Context) : View(context) {
                         // 自动**不在这里翻本地状态**：它会自己停下（通关/无解/手势没生效），
                         // 本地翻完就没机会被纠正了。只报"期望的新状态"，由会话回写 autoOn。
                         AUTO -> onToggleAuto?.invoke(!autoOn)
-                        // 这两个是纯显示开关，立刻翻 + 回调，上层拿信号即时重画提示层
-                        GRID -> {
-                            showGrid = !showGrid
-                            onToggleGrid?.invoke(showGrid)
+                        FAST -> {
+                            fastOn = !fastOn
+                            onToggleFast?.invoke(fastOn)
                         }
-                        LABELS -> {
-                            showLabels = !showLabels
-                            onToggleLabels?.invoke(showLabels)
+                        // 纯显示开关，立刻翻 + 回调，上层拿信号即时重画提示层
+                        INFO -> {
+                            infoOn = !infoOn
+                            onToggleInfo?.invoke(infoOn)
                         }
                         CONTINUE -> {
                             continueOn = !continueOn
@@ -358,23 +361,26 @@ class ControlBarView(context: Context) : View(context) {
     private fun hitTest(x: Float, y: Float): Int = when {
         refreshRect.contains(x, y) -> REFRESH
         autoRect.contains(x, y) -> AUTO
-        gridRect.contains(x, y) -> GRID
-        labelsRect.contains(x, y) -> LABELS
+        fastRect.contains(x, y) -> FAST
+        infoRect.contains(x, y) -> INFO
         continueRect.contains(x, y) -> CONTINUE
         else -> NONE
     }
 
     private companion object {
+        /** 控件行的个数（续玩 / 信息 / 自动 / 快速 / 刷新），槽位按它均分。 */
+        const val TOGGLE_COUNT = 5
+
         const val NONE = -1
         const val REFRESH = 0
         const val AUTO = 4
-        const val GRID = 2
-        const val LABELS = 3
+        const val FAST = 5
+        const val INFO = 2
         const val CONTINUE = 6
 
         const val AUTO_LABEL = "自动"
-        const val GRID_LABEL = "网格"
-        const val LABELS_LABEL = "类别号"
+        const val FAST_LABEL = "快速"
+        const val INFO_LABEL = "信息"
         const val CONTINUE_LABEL = "续玩"
     }
 }

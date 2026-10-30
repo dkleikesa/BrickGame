@@ -48,6 +48,11 @@ fun interface ScreenshotProvider {
  *
  * 自动模式（[startAuto]）：**先整盘算一次，再一步一步点**，不是每帧重算。
  *
+ * 快速模式（[fast]，控制条上的"快速"开关）：自动执行时**不等识别**，一步接一步连着点，
+ * 每 [FAST_STEPS_PER_CALIBRATION] 步才截一帧校准（用空位矩阵跟推演结果比对，见
+ * [checkFastCalibration]）；手势本身也压短（见 FAST_* 常量）。默认关 —— 它拿"游戏照单全收"
+ * 作前提，手势被吞时代价是连着偏几步，所以由用户按机型自己选。
+ *
  * 每帧的 [handle] 结尾交给 [autoAdvance]：先用判空复检上一步该消的两格有没有真的消掉，
  * 没消掉就把计划作废重算；有计划就直接走下一步（不搜索）；计划走完才重新求一次整盘。
  * 逐格复检用的是"空没空"，比图标分类可靠得多，所以识别抖一帧不会把整局带崩。
@@ -178,6 +183,30 @@ class HintSession(
      */
     private val auto = AtomicBoolean(false)
 
+    /**
+     * 快速模式：自动通关时连续出手，中间不截屏识别，每 [FAST_STEPS_PER_CALIBRATION] 步才校准一次。
+     *
+     * 由控制条上的"快速"开关控制，状态落盘（见 [FastMode]）。
+     */
+    private val fast = AtomicBoolean(false)
+
+    /**
+     * 本轮连点已经执行了几步（一步消 2 块）。到 [FAST_STEPS_PER_CALIBRATION] 就停下来截一帧校准，
+     * 校准帧由 [autoAdvance] 复位。
+     */
+    private var fastSinceCalibration = 0
+
+    /**
+     * 快速连点期间**推演出来的盘面**。
+     *
+     * 连点时不截图，[playAction] 又要靠盘面判断"落点后是不是二选一"，所以只能自己按计划
+     * 往下推（借 [BrickGameTipHelper.actionStep]）。校准帧一到就丢掉，换成真实识别结果。
+     */
+    private var fastState: BoardState? = null
+
+    /** 快速连点用的棋盘几何（来自出计划的那一帧，网格不变就一直有效）。 */
+    private var planScan: BoardScan? = null
+
     /** 自动运行已确认消掉的**对数**（一步一对）。 */
     private var autoSteps = 0
 
@@ -288,7 +317,7 @@ class HintSession(
     /**
      * 上一帧已经画出去的调试图层。
      *
-     * 控制条上的两个调试开关（网格 / 类别号）是**即时生效**的：点一下直接拿这一帧重画，
+     * 控制条上的信息开关（网格 + 类别号）是**即时生效**的：点一下直接拿这一帧重画，
      * 不用再截屏分析一遍 —— 否则点了开关要等下一次刷新才变，看着就像没点。
      */
     private var lastFrame: HintOverlayView.Frame? = null
@@ -296,13 +325,19 @@ class HintSession(
     init {
         overlay.onRefresh = { refreshNow() }
         overlay.onToggleAuto = { on -> if (on) startAuto() else stopAuto() }
+        // 快速模式只改执行节奏，不动当前计划：开着自动时切换，下一步立刻按新模式走
+        overlay.onToggleFast = { on ->
+            fast.set(on)
+            FastMode.save(context, on)
+            overlay.setBarFast(on)
+            updateBar(if (on) "快速模式：开" else "快速模式：关", "")
+        }
+        fast.set(FastMode.enabled(context))
         // 切定位算法只改落盘的选择，下一帧自然生效；不自动重跑 —— 此刻前台可能是 App 自己，
         // 截图必然定位失败，看起来就像"一切就坏"。
-        overlay.onToggleGrid = { on ->
+        // 信息开关 = 网格 + 类别号一起开/关，两个显示项绑在一起点一次就够
+        overlay.onToggleInfo = { on ->
             HintUiBus.showGrid = on
-            redrawHints()
-        }
-        overlay.onToggleLabels = { on ->
             HintUiBus.showLabels = on
             redrawHints()
         }
@@ -329,7 +364,8 @@ class HintSession(
         HintUiBus.state = HintUiBus.state.copy(running = true, autoMessage = null)
         // 控制条上的开关跟着 App 界面里的开关走（两处共用 HintUiBus 这一个状态）
         overlay.setBarAuto(auto.get())
-        overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
+        overlay.setBarFast(fast.get())
+        overlay.setBarInfo(infoOn())
         overlay.setBarContinue(AutoContinue.enabled(context))
         updateBar("点「刷新」分析", "")
         Log.i(TAG, "会话开始：${Diagnostics.header(context)}")
@@ -375,8 +411,10 @@ class HintSession(
             lastSolveKey = null
             lastSolveMessage = null
             planKey = null
+            resetFastBurst()
             HintUiBus.state = HintUiBus.state.copy(auto = true, autoSteps = 0, autoMessage = null)
             overlay.setBarAuto(true)
+            overlay.setBarFast(fast.get())
             Log.i(TAG, "自动开始")
         }
         if (!running.get()) {
@@ -586,10 +624,17 @@ class HintSession(
     }
 
     /**
-     * 按当前两个调试开关重画上一帧（控制条上点了开关就走这里）。
+     * 按当前信息开关的状态重画上一帧（控制条上点了开关就走这里）。
      *
      * 没有上一帧（刚开会话、还没算出结果）就什么也不做 —— 下一帧自然会带上新开关。
      */
+    /**
+     * 控制条上"信息"开关的显示状态：网格与类别号**都开**才算开。
+     *
+     * App 界面里两个开关是分开的，只开一个时控制条显示为关 —— 此时点一下会把两个都打开。
+     */
+    private fun infoOn(): Boolean = HintUiBus.showGrid && HintUiBus.showLabels
+
     private fun redrawHints() {
         val frame = lastFrame ?: return
         overlay.updateHint(
@@ -652,7 +697,7 @@ class HintSession(
         // 先换好新提示再放出来，避免"旧提示一闪 → 新提示"的中间态（见 captureFrame 的隐藏说明）
         overlay.setHintLayerVisible(true)
         // App 界面里也能改这两个开关，每帧顺手让控制条跟上，别让两边显示不一致
-        overlay.setBarToggles(HintUiBus.showGrid, HintUiBus.showLabels)
+        overlay.setBarInfo(infoOn())
         // 状态栏报**端到端**（点刷新 → 看到提示，含截屏），那才是用户感知的那个数；
         // 括号里补上识别段，换模型时看它。
         val totalMs = SystemClock.elapsedRealtime() - frameStartMs
@@ -706,6 +751,9 @@ class HintSession(
             return
         }
 
+        // 0) 快速模式刚连点完一轮：这一帧就是校准帧，先核对整盘空位有没有对上推演
+        if (fastSinceCalibration > 0 && !checkFastCalibration(state)) return
+
         // 1) 复检上一步：配对砖那一格空了吗
         pendingPair?.let { pair ->
             pendingPair = null
@@ -737,7 +785,14 @@ class HintSession(
 
         // 2) 有计划就照着走，不搜索
         if (planIndex < plan.size) {
-            playStep(result, plan[planIndex])
+            if (fast.get()) {
+                // 连点期间不截图：盘面靠自己推演，几何沿用这一帧（网格变了由 playAction 兜住）
+                if (fastState == null) fastState = state
+                planScan = result.scan
+                playFastStep()
+            } else {
+                playStep(result, plan[planIndex])
+            }
             return
         }
 
@@ -1026,6 +1081,10 @@ class HintSession(
                         planKey = result.state.labels.joinToString(",")
                         planRows = result.scan.rows
                         planCols = result.scan.cols
+                        // 快速模式从这张盘开始推演；校准帧会重置
+                        planScan = result.scan
+                        fastState = result.state
+                        fastSinceCalibration = 0
                         // 这一帧有解：清掉"这盘算过"的记账（计划会推着盘面往前走）
                         lastSolveKey = null
                         lastSolveMessage = null
@@ -1038,7 +1097,7 @@ class HintSession(
                         )
                         main.postDelayed({
                             if (gen == generation.get() && auto.get() && planIndex < plan.size) {
-                                playStep(result, plan[planIndex])
+                                if (fast.get()) playFastStep() else playStep(result, plan[planIndex])
                             }
                         }, PLAN_ANNOUNCE_MS)
                     }
@@ -1059,7 +1118,7 @@ class HintSession(
                         val action = BrickGameTipHelper.autoHint(grid)
                         if (action != null) {
                             unsolvableRetries = 0
-                            playAction(result, action, "无解，继续消")
+                            playAction(result.scan, result.state, action, "无解，继续消")
                         } else {
                             // 诊断：无解时把"配对存在但落点不通"这件事说清楚，别让人以为程序坏了
                             val moves = BrickGameTipHelper.findMoves(grid)
@@ -1121,7 +1180,130 @@ class HintSession(
         val remaining = (plan.size - planIndex).coerceAtLeast(1)
         val total = autoSteps + remaining
         val current = autoSteps + 1
-        playAction(result, step.toAction(), note ?: "第 $current/$total 步")
+        playAction(result.scan, result.state, step.toAction(), note ?: "第 $current/$total 步")
+    }
+
+    /**
+     * 快速模式的一步：**不截屏不识别**，直接按计划出手，手势一完成就接下一步。
+     *
+     * 步数在这里就记（普通模式要等下一帧复检才算），所以它是"乐观计数"：没落地的手势也会被
+     * 先算成战果，靠每 [FAST_STEPS_PER_CALIBRATION] 步的校准帧把账纠正过来 —— 校准发现该空的格子
+     * 还占着，就作废计划重新识别。
+     */
+    private fun playFastStep() {
+        val scan = planScan
+        val state = fastState
+        val step = plan.getOrNull(planIndex)
+        if (scan == null || state == null || step == null) {
+            // 没有可推演的盘面（例如刚开快、或计划已经走完）：交给校准帧重新识别
+            main.postDelayed(autoTick, STEP_SETTLE_MS)
+            return
+        }
+        val action = step.toAction()
+        // 推演这一步之后的盘面：只用于下一步的"二选一"判断，推不动就作废计划重算
+        val after = state.asGrid()
+        if (BrickGameTipHelper.actionStep(after, action) < 0) {
+            Log.w(TAG, "快速模式推演失败（第 ${planIndex + 1}/${plan.size} 步）→ 作废计划，改走校准帧")
+            discardPlan()
+            main.postDelayed(autoTick, STEP_SETTLE_MS)
+            return
+        }
+        val remaining = (plan.size - planIndex).coerceAtLeast(1)
+        val total = autoSteps + remaining
+        val current = autoSteps + 1
+
+        planIndex++
+        autoSteps++
+        fastSinceCalibration++
+        fastState = BoardState(
+            state.rows,
+            state.cols,
+            IntArray(state.labels.size) { after[it / state.cols][it % state.cols] },
+        )
+        HintUiBus.state = HintUiBus.state.copy(autoSteps = autoSteps)
+        playAction(scan, state, action, "快速 $current/$total 步") { fastNext() }
+    }
+
+    /** 快速模式下一条手势完成后：还有额度就接着点，否则排一次校准帧。 */
+    private fun fastNext() {
+        if (!auto.get()) return
+        if (!fast.get() ||
+            fastSinceCalibration >= FAST_STEPS_PER_CALIBRATION ||
+            planIndex >= plan.size
+        ) {
+            // 校准帧：等消除动画播完再截，否则会截到"半消"的中间态
+            main.postDelayed(autoTick, STEP_SETTLE_MS)
+            return
+        }
+        playFastStep()
+    }
+
+    /**
+     * 校准帧：拿**空位矩阵**跟快速连点的推演结果比对。
+     *
+     * 为什么比空位、不比类别：判空（格子平坦度）远比图标分类可靠，类别抖一帧整盘对比就会爆；
+     * 为什么比整盘、不只比消掉的那几格：后面的滑动会把砖推进前面刚空出来的格子，只盯"该空的格"
+     * 会把正常盘面误判成连点失败。
+     *
+     * @return false = 已经收工（报错停机），调用方直接返回。
+     */
+    private fun checkFastCalibration(state: BoardState): Boolean {
+        val expected = fastState
+        fastSinceCalibration = 0
+        fastState = null
+        planScan = null
+        if (expected == null) return true
+        if (expected.rows != state.rows || expected.cols != state.cols) {
+            Log.w(
+                TAG,
+                "快速校准：网格 ${state.rows}x${state.cols} 与计划 ${planRows}x${planCols} 不一致，作废计划重算",
+            )
+            discardPlan()
+            gridMismatch++
+            if (gridMismatch >= GRID_MISMATCH_LIMIT) {
+                finishAuto("识别网格反复变化（当前 ${state.rows}x${state.cols}），没法稳定执行")
+                return false
+            }
+            return true
+        }
+        val diff = (0 until state.labels.size).firstOrNull {
+            (expected.labels[it] != 0) != (state.labels[it] != 0)
+        }
+        if (diff == null) {
+            badChecks = 0
+            return true
+        }
+        badChecks++
+        val row = diff / state.cols
+        val col = diff % state.cols
+        Log.w(
+            TAG,
+            "快速校准不符：($row,$col) 推演为" +
+                (if (expected.labels[diff] == 0) "空" else "有砖") +
+                "、实际为" + (if (state.labels[diff] == 0) "空" else "有砖") +
+                " → 连点有一步没落地，计划作废（badChecks=$badChecks/$BAD_CHECK_LIMIT）",
+        )
+        discardPlan()
+        if (badChecks >= BAD_CHECK_LIMIT) {
+            finishAuto("连续 $BAD_CHECK_LIMIT 次校准不符：连点没生效（手势被吞，或消除动画期间不响应点击）")
+            return false
+        }
+        return true
+    }
+
+    /** 作废整盘计划，回到"下一帧重新识别再求一次解"。 */
+    private fun discardPlan() {
+        plan = emptyList()
+        planIndex = 0
+        planScan = null
+        fastState = null
+        pendingPair = null
+    }
+
+    /** 清掉快速连点的临时状态（开始/停止自动时）。 */
+    private fun resetFastBurst() {
+        fastSinceCalibration = 0
+        fastState = null
     }
 
     /**
@@ -1133,8 +1315,17 @@ class HintSession(
      *   不知道要消哪一对，得再点一下指定配对砖（见 [GestureExecutor.tapPair]）；
      * - 其余情况：把 `from` 那块滑到落点格（落点是空的），靠"两块对齐"来消。
      */
-    private fun playAction(result: HintPipeline.Result, action: IntArray, note: String? = null) {
-        val scan = result.scan
+    private fun playAction(
+        scan: BoardScan,
+        state: BoardState,
+        action: IntArray,
+        note: String? = null,
+        /**
+         * 非空 = 快速模式：手势一完成就立刻执行它（接着点下一步），不等下一帧识别；
+         * 这一步的"有没有落地"改由校准帧统一复检（见 [checkFastCalibration]）。
+         */
+        onDone: (() -> Unit)? = null,
+    ) {
         val fr = action[0]
         val fc = action[1]
         val tr = action[2]
@@ -1153,9 +1344,9 @@ class HintSession(
                 "计划坐标越界（计划 ${planRows}x${planCols} / 当前 ${scan.rows}x${scan.cols}）" +
                     "→ 作废计划，按当前网格重算",
             )
-            plan = emptyList()
-            planIndex = 0
-            pendingPair = null
+            discardPlan()
+            // 网格变了，快速连点的账也对不上了：整轮作废，让校准帧按新网格重新算
+            resetFastBurst()
             gridMismatch++
             if (gridMismatch >= GRID_MISMATCH_LIMIT) {
                 finishAuto("识别网格反复变化（当前 ${scan.rows}x${scan.cols}），没法稳定执行")
@@ -1172,7 +1363,7 @@ class HintSession(
         val toRect = scan.rectOf(CellPoint(tr, tc))
         // 滑完之后那块砖是否同时对齐两块同款砖：是的话游戏会让玩家二选一，
         // 只在落点松手什么都不会消（真机实测：反复"滑动没生效"）。
-        val ambiguous = !inPlace && ambiguousAfterMove(result.state, action)
+        val ambiguous = !inPlace && ambiguousAfterMove(state, action)
         val stepTag = if (plan.isNotEmpty()) "第 ${planIndex + 1}/${plan.size} 步" else "贪心"
         Log.i(
             TAG,
@@ -1188,27 +1379,34 @@ class HintSession(
         val x1 = from.centerX.toFloat()
         val y1 = from.centerY.toFloat()
         val swept = if (inPlace) target.centerX.toFloat() to target.centerY.toFloat()
-        else overshoot(result.scan, target, tr - fr, tc - fc)
+        else overshoot(scan, target, tr - fr, tc - fc)
         val x2 = swept.first
         val y2 = swept.second
+        // 快速模式把每个手势也压短：点得更急、滑动更快（见 FAST_* 常量）
+        val tapMs = if (onDone != null) FAST_TAP_MS else TAP_MS
+        val tapGapMs = if (onDone != null) FAST_TAP_GAP_MS else TAP_GAP_MS
+        val swipeMs = if (onDone != null) FAST_SWIPE_MS else SWIPE_MS
         val gestureMs = when {
-            inPlace -> TAP_MS * 2 + TAP_GAP_MS
-            ambiguous -> SWIPE_MS + TAP_GAP_MS + TAP_MS
-            else -> SWIPE_MS
+            inPlace -> tapMs * 2 + tapGapMs
+            ambiguous -> swipeMs + tapGapMs + tapMs
+            else -> swipeMs
         }
 
         val gen = generation.get()
-        // 记下配对砖那一格：下一帧 [autoAdvance] 拿它复检这一步有没有真的落地
-        pendingPair = CellPoint(pr, pc)
+        // 普通模式记下配对砖那一格，下一帧 [autoAdvance] 拿它复检有没有真的落地；
+        // 快速模式不逐帧复检，改由校准帧统一查（见 [checkFastCalibration]）
+        if (onDone == null) pendingPair = CellPoint(pr, pc)
         // 坐标/滑动方向屏幕上看得到，不再写进状态行；只报"还剩多少块"
-        updateBar(note ?: "执行中", "剩 ${countBricks(result.state)} 块")
+        updateBar(note ?: "执行中", "剩 ${countBricks(state)} 块")
 
         // 手势发出去之后要排下一帧。步数不在这里记 —— 要等下一帧复检确认真的消掉了才算
         // （见 [autoAdvance]），否则"没生效的手势"也会被算成战果。
         val advance = {
             if (gen == generation.get() && auto.get()) {
-                // 等游戏把消除动画播完再截下一帧，否则会截到"半消"的中间态
-                main.postDelayed(autoTick, STEP_SETTLE_MS)
+                // 快速模式：留一点点缝就接下一步，不等消除动画（校准帧会兜住没落地的步）
+                if (onDone != null) main.postDelayed({ onDone() }, FAST_STEP_GAP_MS)
+                // 普通模式：等游戏把消除动画播完再截下一帧，否则会截到"半消"的中间态
+                else main.postDelayed(autoTick, STEP_SETTLE_MS)
             }
         }
         val settle: (Boolean, String) -> Unit = { done, why ->
@@ -1220,7 +1418,7 @@ class HintSession(
 
         gesturePending.set(true)
         if (inPlace) {
-            gestures.tapPair(x1, y1, x2, y2, TAP_MS, TAP_GAP_MS) { ok ->
+            gestures.tapPair(x1, y1, x2, y2, tapMs, tapGapMs) { ok ->
                 settle(ok, if (ok) "已点击" else "点击被取消/派发失败")
             }
         } else if (ambiguous) {
@@ -1228,10 +1426,10 @@ class HintSession(
             gestures.swipeThenTap(
                 x1, y1, x2, y2,
                 pairRect.centerX.toFloat(), pairRect.centerY.toFloat(),
-                SWIPE_MS, TAP_MS, TAP_GAP_MS,
+                swipeMs, tapMs, tapGapMs,
             ) { ok -> settle(ok, if (ok) "已滑动+补点" else "滑动/补点被取消") }
         } else {
-            gestures.swipe(x1, y1, x2, y2, SWIPE_MS) { ok ->
+            gestures.swipe(x1, y1, x2, y2, swipeMs) { ok ->
                 settle(ok, if (ok) "已滑动" else "滑动被取消/派发失败")
             }
         }
@@ -1364,6 +1562,7 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
         auto.set(false)
         main.removeCallbacks(autoTick)
         stopSolveProgress()
+        resetFastBurst()
         overlay.setBarAuto(false)
         HintUiBus.state = HintUiBus.state.copy(auto = false, autoMessage = message, autoSteps = autoSteps)
         // 第一行给标题+统计，第二行才是原因（message 非空时控制条用红色显示它）——
@@ -1597,6 +1796,30 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
          * 那一帧的格子既不像原物也不像空位，分类相似度整体被拉低。
          */
         const val STEP_SETTLE_MS = 1000L
+
+        /**
+         * 快速模式：连续走这么多步就停下来识别一帧做校准（一步消 2 块，即 20 块砖一次）。
+         *
+         * 为什么是 10：连点期间看不到盘面，错一步后面几步的坐标就全偏了。10 步 ≈ 4 秒重估一次，
+         * 手感仍然是"连续点"，而一旦某步没落地，最多偏 9 步就能被校准抓回来 —— 校准比的是整盘
+         * 空位矩阵，偏得越多越容易对上，不存在"偏太多就查不出来"。
+         */
+        const val FAST_STEPS_PER_CALIBRATION = 10
+
+        /**
+         * 快速模式的手势时长。
+         *
+         * 滑动**保持和普通模式一样的 320ms**：更短的滑动（试过 200）会让手指数到的格子数
+         * 对不上 —— 手势按路径匀速插值，时间压短后游戏还没跟上就已经抬手，整条砖挪不到位。
+         * 提速全靠省掉"截屏识别 + 等动画"，不靠压手势。点击间隔 140→90 是安全的（再短会被
+         * 当成双击/连点）。
+         */
+        const val FAST_SWIPE_MS = 320L
+        const val FAST_TAP_MS = 45L
+        const val FAST_TAP_GAP_MS = 90L
+
+        /** 快速模式两条手势之间的间隔：给游戏时间把上一步的消除动画起手演出来，别整串点全被吞。 */
+        const val FAST_STEP_GAP_MS = 180L
 
         /** 无解继续模式下，一步都走不动时的重试间隔。 */
         const val UNSOLVABLE_RETRY_MS = 3000L

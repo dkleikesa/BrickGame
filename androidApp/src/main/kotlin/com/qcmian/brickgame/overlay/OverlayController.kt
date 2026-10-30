@@ -58,16 +58,17 @@ class OverlayController(context: Context) {
             barView.onRefresh = value
         }
 
-    var onToggleGrid: ((Boolean) -> Unit)?
-        get() = barView.onToggleGrid
+    var onToggleInfo: ((Boolean) -> Unit)?
+        get() = barView.onToggleInfo
         set(value) {
-            barView.onToggleGrid = value
+            barView.onToggleInfo = value
         }
 
-    var onToggleLabels: ((Boolean) -> Unit)?
-        get() = barView.onToggleLabels
+    /** 快速模式开关：自动通关时连续出手，连续 10 步才识别一次校准。 */
+    var onToggleFast: ((Boolean) -> Unit)?
+        get() = barView.onToggleFast
         set(value) {
-            barView.onToggleLabels = value
+            barView.onToggleFast = value
         }
 
     /** 无解继续开关。 */
@@ -94,10 +95,14 @@ class OverlayController(context: Context) {
         barView.autoOn = on
     }
 
-    /** 把两个调试开关的当前状态同步到控制条（会话开始与每帧各一次，避免两边显示不一致）。 */
-    fun setBarToggles(grid: Boolean, labels: Boolean) {
-        barView.showGrid = grid
-        barView.showLabels = labels
+    /** 把信息开关的当前状态同步到控制条（会话开始与每帧各一次，避免两边显示不一致）。 */
+    fun setBarInfo(on: Boolean) {
+        barView.infoOn = on
+    }
+
+    /** 把快速模式同步到控制条（会话开始 / 开关变化时）。 */
+    fun setBarFast(on: Boolean) {
+        barView.fastOn = on
     }
 
     /** 把本帧分段耗时写到控制条右上角。 */
