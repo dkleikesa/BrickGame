@@ -54,3 +54,9 @@ kotlin {
 dependencies {
     androidRuntimeClasspath(libs.compose.uiTooling)
 }
+
+// 求解器压力测试要装几千万条死状态（8 B/条），默认 512 MB 堆不够。
+tasks.withType<Test>().configureEach {
+    maxHeapSize = "24g"
+    jvmArgs("-XX:+UseParallelGC")
+}

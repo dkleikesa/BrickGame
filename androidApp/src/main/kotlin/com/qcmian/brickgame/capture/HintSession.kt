@@ -815,7 +815,11 @@ class HintSession(
                     continue
                 }
                 for (move in moves) {
-                    val child = Array(grid.size) { grid[it].copyOf() }
+                    // 必须从**父节点的盘**往下落这一手：`node.steps` 是完整前缀，盘也要是完整前缀的盘。
+                    // 曾经错写成 copy 根盘，于是 steps 长 d、盘只少 1 对砖 —— 子搜索按更满的盘再解一遍，
+                    // 计划长度 = d + (bricks-2)/2（140 块满盘就是 71/72 步），其中 d-1 步是把前缀已消掉
+                    // 的那几对又消一次，落到真机就是 1~2 步空转。
+                    val child = Array(grid.size) { node.board[it].copyOf() }
                     if (BrickGameTipHelper.actionStep(child, move, checkTerminal = false) <= 0) continue
                     if (child.all { row -> row.all { it == 0 } }) {
                         immediate = solvedOf(node.steps + move)
@@ -917,7 +921,7 @@ class HintSession(
         // "已证无解"拖成"没算完"。慢一点可以接受，给错结论不行。
         val config = SOLVE_CONFIG
         val budgetMs = SOLVE_TIME_BUDGET_MS
-        val nodesText = if (config.nodesPerAttempt == Int.MAX_VALUE) "无上限" else "${config.nodesPerAttempt}"
+        val nodesText = if (config.nodesPerAttempt == Long.MAX_VALUE) "无上限" else "${config.nodesPerAttempt}"
         Log.i(
             TAG,
             "求解开始（第 $planRounds 轮），节点 ${nodesText}×${config.maxAttempts}，" +
@@ -1499,15 +1503,15 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
          * - 分配失败时按 [SOLVE_DEAD_SLOTS_FALLBACK] 逐级退。
          */
         val SOLVE_CONFIG = AutoSolver.Config(
-            nodesPerAttempt = Int.MAX_VALUE,   // 不设节点上限，只靠挂钟/手动停止
+            nodesPerAttempt = Long.MAX_VALUE,  // 不设节点上限（注意 Int.MAX_VALUE 只是 21.4 亿，会被静默截断）
             maxAttempts = 1,
             deadSlots = deadSlotBudget(),
             abortWhenFull = false,
-            // 84% 的死状态 64 个节点内就能重算，存它们只会把表塞满（实测条目降到 15%、覆盖 93% 价值）
+            // 84% 的死状态 64 个节点内就能重算，存它们只是白占内存（实测条目降到 15%、覆盖 93% 价值）
             deadMinCost = 64,
             // 剩 20 块起按"同线锁死形态"排序：这类盘面的胜负完全由最后几块的几何决定
             endgameBricks = 20,
-            // 尾部盘面重合率极高，它们的"无解"结论值得越过 deadMinCost 一律记下
+            // 尾部盘面重合率极高，一律记下（不设阈值，宁多记不漏记）
             tailBricks = 8,
         )
 

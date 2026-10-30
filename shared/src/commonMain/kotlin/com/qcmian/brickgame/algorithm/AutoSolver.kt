@@ -78,13 +78,13 @@ object AutoSolver {
     }
 
     /**
-     * @param nodesPerAttempt 单次尝试的节点预算。烧完就换一个随机序重来。
+     * @param nodesPerAttempt 单次尝试的节点预算（Long，因为大盘单任务会超过 Int 上限 21.4 亿）。烧完就换一个随机序重来。
      *   实战参数：3 万节点 ≈ 桌面 2s / 真机更久，够覆盖绝大多数盘（多数盘 <1000 节点就出解）。
      * @param maxAttempts 重启次数上限。**每次尝试都用全新的置换表**，内存峰值被
      *   `nodesPerAttempt` 卡住（3 万状态的 key 约 10MB），不会随重启次数线性涨。
      */
     data class Config(
-        val nodesPerAttempt: Int = 30_000,
+        val nodesPerAttempt: Long = 30_000,
         val maxAttempts: Int = 8,
         /** 死表槽数；0 = 按节点预算自动。槽数 × 16B = 表内存；允许非 2 的幂（取模哈希）。 */
         val deadSlots: Int = 0,
@@ -118,7 +118,7 @@ object AutoSolver {
             val DEFAULT = Config()
 
             /** 离线校验/单测用：给足预算，让病态盘也能跑出结论（宁可慢，也要确定）。 */
-            val THOROUGH = Config(nodesPerAttempt = 80_000, maxAttempts = 12)
+            val THOROUGH = Config(nodesPerAttempt = 80_000L, maxAttempts = 12)
         }
     }
 
@@ -197,6 +197,18 @@ object AutoSolver {
 
         private val table = AtomicLongTable(slots)
 
+        /**
+         * 已写入的槽数。用来判断"满了没有"。
+         *
+         * 为什么必须显式记：开放寻址判定"不在表里"只能靠撞到空槽。表满之后一个空槽都没有，
+         * 每次未命中都要把整张表扫一遍（实测 2621 万槽时 21 ms/次，吞吐从 5 万/秒掉到 20/秒）。
+         * 有了计数就能在满的瞬间停手，不会退化。
+         */
+        private val count = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /** 当前已占用槽数，给进度/诊断用。 */
+        val size: Int get() = count.get()
+
         fun contains(h: Long): Boolean {
             var i = index(h)
             var probes = 0
@@ -217,7 +229,10 @@ object AutoSolver {
             while (probes < slots) {
                 val a = table.get(i)
                 if (a == h) return
-                if (a == 0L && table.compareAndSet(i, 0L, h)) return
+                if (a == 0L && table.compareAndSet(i, 0L, h)) {
+                    count.incrementAndGet()
+                    return
+                }
                 i++
                 if (i == slots) i = 0
                 probes++
@@ -252,7 +267,11 @@ object AutoSolver {
      * 单槽 16 B（两个 Long 指纹），12 万节点预算约 4 MB，50 万约 16 MB。
      * 清空只损失剪枝（部分死区被重搜），不影响结论正确性 —— 这是内存的硬保险。
      */
+    private const val SEGMENTS = 64
+
     private const val MAX_DEAD_SLOTS = 1 shl 25   // 32M 槽 × 8B = 256MB 上限（64-bit 指纹）
+
+
 
     internal fun isCleared(grid: Array<IntArray>): Boolean {
         for (row in grid) for (v in row) if (v != BrickGameTipHelper.BACKGROUND) return false
@@ -269,7 +288,7 @@ object AutoSolver {
         private val rows: Int,
         private val cols: Int,
         private val random: Random,
-        private val budget: Int,
+        private val budget: Long,
         private val shouldAbort: () -> Boolean,
         deadSlots: Int,
         private val abortWhenFull: Boolean,
@@ -319,7 +338,12 @@ object AutoSolver {
          * 代价是哈希碰撞：碰撞只多剪枝 → 理论上可能把有解判成无解。碰撞概率 ≈ n²/2⁶⁵，
          * 一千万状态约 3e-6、一亿状态约 3e-4 —— 对"宁可多算一会儿"的定位足够低。
          */
-        private val dead: FingerprintSet? = if (sharedDead == null) FingerprintSet(deadCapacity) else null
+        /**
+         * 自己的死表（非共享时用）。初始按 4M 槽起，之后按装载率自动翻倍，
+         * 不再有"满了清空"这条路径 —— 清表等于把已经花掉的搜索量扔掉重算。
+         */
+        private val dead: FingerprintSet? =
+            if (sharedDead == null) FingerprintSet(minOf(deadCapacity, 1 shl 22)) else null
 
         private val maxDepth = rows * cols / 2 + 1
         private val pool = Array(maxDepth + 1) { Array(rows) { IntArray(cols) } }
@@ -419,20 +443,9 @@ object AutoSolver {
             val tail = tailBricks > 0 && bricksLeft <= tailBricks
             if (cost < deadMinCost && !tail) return cost
 
-            // 死表满：
-            //  - abortWhenFull=true：内存到顶，停止并让上层报 MemoryLimited，绝不 OOM；
-            //  - false：清空重搜（省内存，但会重复探索，时间不可控）。
-            val own = dead
-            if (own != null && own.size >= own.limit) {
-                if (abortWhenFull) {
-                    memoryFull = true
-                    aborted = true
-                    return STOP
-                }
-                own.clear()
-            }
             // 当前盘面的指纹在进 dfs 时就算好并传进来了（子节点算指纹时顺便得出），
-            // 这里直接入死表，不再重扫 140 格。
+            // 这里直接入死表，不再重扫 140 格。表会自己扩容，不截断、不清空。
+            val own = dead
             if (own != null) own.add(h) else sharedDead?.add(h)
             return cost
         }
@@ -591,59 +604,80 @@ object AutoSolver {
         }
 
         /**
-         * 定长开放寻址的指纹表。
+         * 分段可扩容的指纹表 —— 不截断、不清空、不丢条目。
          *
-         * 不用 `HashSet<Long>`：HashMap.Node 每条约 32 B，加上装箱对象就省不下来了。
-         * 这里一条 Long 8 B；载入到 [limit]（容量一半）由调用方 clear()。
+         * 为什么分段：单张表扩容要整表翻倍，大表那一刻新旧同时存在（25 GB → 75 GB 峰值），
+         * 而且 LongArray 长度上限 2^31-1，超过直接分配不出来。切成 64 段后每段独立扩容，
+         * 峰值只有"一段"的 1.5 倍。
+         *
+         * 段内线性探测，装载 0.9 翻倍（留 10% 空槽，否则查不到时要扫完整个段）；8 B/条。
          */
-        private class FingerprintSet(val capacity: Int) {
-            private val slots = LongArray(capacity)
+        private class FingerprintSet(initialCapacity: Int) {
 
-            /** 存到这个条数就提示调用方清空（载入因子 0.5，保证探测链短）。 */
-            val limit = capacity ushr 1
+            private val segments = Array(SEGMENTS) { Segment() }
 
             var size = 0
                 private set
 
-            fun contains(h: Long): Boolean {
-                var i = index(h)
-                var probes = 0
-                while (probes < capacity) {
-                    val a = slots[i]
-                    if (a == 0L) return false
-                    if (a == h) return true
-                    i++
-                    if (i == capacity) i = 0
-                    probes++
-                }
-                return false
-            }
+            fun contains(h: Long): Boolean = segOf(h).contains(h)
 
             fun add(h: Long) {
-                var i = index(h)
-                var probes = 0
-                while (probes < capacity) {
-                    val a = slots[i]
-                    if (a == 0L) {
-                        slots[i] = h
-                        size++
-                        return
+                if (segOf(h).add(h)) size++
+            }
+
+            private fun segOf(h: Long): Segment =
+                segments[((h ushr 58) and (SEGMENTS - 1).toLong()).toInt()]
+
+            private class Segment {
+                private var slots = LongArray(1 shl 14)
+                private var mask = slots.size - 1
+                private var limit = slots.size * 9 / 10
+                private var count = 0
+
+                fun contains(h: Long): Boolean {
+                    var i = index(h)
+                    while (true) {
+                        val a = slots[i]
+                        if (a == 0L) return false
+                        if (a == h) return true
+                        i = (i + 1) and mask
                     }
-                    if (a == h) return
-                    i++
-                    if (i == capacity) i = 0
-                    probes++
                 }
-            }
 
-            fun clear() {
-                slots.fill(0L)
-                size = 0
-            }
+                /** 返回 true 表示确实是新条目。 */
+                fun add(h: Long): Boolean {
+                    if (count >= limit) grow()
+                    var i = index(h)
+                    while (true) {
+                        val a = slots[i]
+                        if (a == h) return false
+                        if (a == 0L) {
+                            slots[i] = h
+                            count++
+                            return true
+                        }
+                        i = (i + 1) and mask
+                    }
+                }
 
-            private fun index(h: Long): Int {
-                val mixed = (h xor (h ushr 32)).toInt() and Int.MAX_VALUE
-                return mixed % capacity
+                private fun grow() {
+                    val old = slots
+                    val next = LongArray(old.size shl 1)
+                    slots = next
+                    mask = next.size - 1
+                    limit = next.size * 9 / 10
+                    for (v in old) {
+                        if (v == 0L) continue
+                        var i = index(v)
+                        while (next[i] != 0L) i = (i + 1) and mask
+                        next[i] = v
+                    }
+                }
+
+                private fun index(h: Long): Int {
+                    val mixed = (h xor (h ushr 32)).toInt()
+                    return mixed and mask
+                }
             }
         }
 
