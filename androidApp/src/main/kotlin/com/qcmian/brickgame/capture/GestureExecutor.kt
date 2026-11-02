@@ -35,14 +35,19 @@ interface GestureExecutor {
     )
 
     /**
-     * 从 (x1,y1) 滑到 (x2,y2)。
+     * 从 (x1,y1) 滑到 (x2,y2)，**到落点后原地按住 [holdMs] 再抬手**。
      *
-     * @param durationMs 按住时长。太短会被当成 fling/滚动丢掉，太长则拖慢每一步。
+     * @param durationMs 移动时长（按路径长度匀速走完这一段）。太短会被当成 fling/滚动丢掉。
+     * @param holdMs 到落点后手指不抬、停在原地的时间：游戏的跟手插值要追上才认"到位"，
+     *   抬手太早会表现成"砖动了但没消"。
      */
-    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long, onDone: (Boolean) -> Unit)
+    fun swipe(
+        x1: Float, y1: Float, x2: Float, y2: Float,
+        durationMs: Long, holdMs: Long, onDone: (Boolean) -> Unit,
+    )
 
     /**
-     * 先滑到落点，再点一下指定的配对砖 —— "一次移动有两处可消"时必须补这一下。
+     * 先滑到落点（同样按住 [holdMs]），再点一下指定的配对砖 —— "一次移动有两处可消"时必须补这一下。
      *
      * @param tapX/tapY 要选的那块配对砖的中心（游戏靠这次点击消歧义）。
      * @param gapMs 滑动结束到点击之间的间隔：太短会被当成滑动的一部分（手指没抬起）。
@@ -50,6 +55,6 @@ interface GestureExecutor {
     fun swipeThenTap(
         x1: Float, y1: Float, x2: Float, y2: Float,
         tapX: Float, tapY: Float,
-        durationMs: Long, tapMs: Long, gapMs: Long, onDone: (Boolean) -> Unit,
+        durationMs: Long, holdMs: Long, tapMs: Long, gapMs: Long, onDone: (Boolean) -> Unit,
     )
 }

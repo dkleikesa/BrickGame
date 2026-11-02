@@ -24,6 +24,8 @@ import com.qcmian.brickgame.vision.BoardState
 import com.qcmian.brickgame.vision.HintPipeline
 import com.qcmian.brickgame.vision.TileClassifier
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToLong
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -50,7 +52,7 @@ fun interface ScreenshotProvider {
  *
  * 快速模式（[fast]，控制条上的"快速"开关）：自动执行时**不等识别**，一步接一步连着点，
  * 每 [FAST_STEPS_PER_CALIBRATION] 步才截一帧校准（用空位矩阵跟推演结果比对，见
- * [checkFastCalibration]）；手势本身也压短（见 FAST_* 常量）。默认关 —— 它拿"游戏照单全收"
+ * [checkFastCalibration]）；点击手势压短（见 FAST_* 常量）。默认关 —— 它拿"游戏照单全收"
  * 作前提，手势被吞时代价是连着偏几步，所以由用户按机型自己选。
  *
  * 每帧的 [handle] 结尾交给 [autoAdvance]：先用判空复检上一步该消的两格有没有真的消掉，
@@ -1382,14 +1384,15 @@ class HintSession(
         else overshoot(scan, target, tr - fr, tc - fc)
         val x2 = swept.first
         val y2 = swept.second
-        // 快速模式把每个手势也压短：点得更急、滑动更快（见 FAST_* 常量）
+        // 快速模式只把"点击"压短（滑动时长按距离算，两种模式相同）
         val tapMs = if (onDone != null) FAST_TAP_MS else TAP_MS
         val tapGapMs = if (onDone != null) FAST_TAP_GAP_MS else TAP_GAP_MS
-        val swipeMs = if (onDone != null) FAST_SWIPE_MS else SWIPE_MS
+        // 滑动时长按"走几格"算：格数 × [SWIPE_MS_PER_CELL]，包含落点那 0.3 格的过冲
+        val swipeMs = swipeMsFor(tr - fr, tc - fc)
         val gestureMs = when {
             inPlace -> tapMs * 2 + tapGapMs
-            ambiguous -> swipeMs + tapGapMs + tapMs
-            else -> swipeMs
+            ambiguous -> swipeMs + SWIPE_HOLD_MS + tapGapMs + tapMs
+            else -> swipeMs + SWIPE_HOLD_MS
         }
 
         val gen = generation.get()
@@ -1426,10 +1429,10 @@ class HintSession(
             gestures.swipeThenTap(
                 x1, y1, x2, y2,
                 pairRect.centerX.toFloat(), pairRect.centerY.toFloat(),
-                swipeMs, tapMs, tapGapMs,
+                swipeMs, SWIPE_HOLD_MS, tapMs, tapGapMs,
             ) { ok -> settle(ok, if (ok) "已滑动+补点" else "滑动/补点被取消") }
         } else {
-            gestures.swipe(x1, y1, x2, y2, swipeMs) { ok ->
+            gestures.swipe(x1, y1, x2, y2, swipeMs, SWIPE_HOLD_MS) { ok ->
                 settle(ok, if (ok) "已滑动" else "滑动被取消/派发失败")
             }
         }
@@ -1446,6 +1449,17 @@ class HintSession(
      * （真机表现："还没拖到位就松手，移动了但没消失"）。多推 0.3 格，两种算法都还落在目标格上
      * （取整 1.3→1，过界也没多跨一个格子），同时给游戏的跟手插值留出追上来的时间。
      */
+    /**
+     * 这一步滑动的时长（ms）：按走了几格算，每格 [SWIPE_MS_PER_CELL]。
+     *
+     * 距离用格数而不是像素：同一块屏上横竖 pitch 略有差异，格数是游戏真正的换算单位。
+     * 加上落点过冲的 0.3 格 —— 那段也要走，时间得给够，否则最后一点距离会被压缩成瞬移。
+     */
+    private fun swipeMsFor(dRow: Int, dCol: Int): Long {
+        val cells = (abs(dRow) + abs(dCol)).toFloat() + SWIPE_OVERSHOOT
+        return (cells * SWIPE_MS_PER_CELL).roundToLong().coerceAtLeast(1L)
+    }
+
     private fun overshoot(scan: BoardScan, rect: CellRect, dRow: Int, dCol: Int): Pair<Float, Float> {
         val stepX = scan.pitchX * SWIPE_OVERSHOOT
         val stepY = scan.pitchY * SWIPE_OVERSHOOT
@@ -1763,12 +1777,23 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
         const val MAX_SPLIT_DEPTH = 4
 
         /**
-         * 一步滑动的按住时长：太短会被系统当成 fling/滚动丢掉。
+         * 滑动时长的计算口径：**每走一格 35ms**，不再用固定时长。
          *
-         * 从 220ms 提到 320ms：手势是按路径长度均速插值的，220ms 走三四格时每一步只摊到
-         * 两三个 MOVE 事件，游戏的跟手插值还没追上就已经抬手了。慢一点只是每步多 0.1 秒。
+         * 为什么按距离算：固定时长下，滑 1 格和滑 6 格用的是同一个速度 —— 短距离慢得发飘、
+         * 长距离快得跟不上。按格数摊时间后，手指在任何距离上的移动速度都一致，游戏那边
+         * 换算成格数才不会时快时慢。
+         *
+         * 距离取 |格数| + [SWIPE_OVERSHOOT]（落点还要多推 0.3 格，见 [overshoot]）。
          */
-        const val SWIPE_MS = 320L
+        const val SWIPE_MS_PER_CELL = 35L
+
+        /**
+         * 滑到落点后手指不抬、原地停住的时间。
+         *
+         * 移动时长压短之后，抬手太早会让游戏那边还没"跟到位"（真机表现：砖动了但没消）。
+         * 按住 100ms 只是让手势晚 0.1 秒结束，比把移动时长加回去更省时间。
+         */
+        const val SWIPE_HOLD_MS = 100L
 
         /**
          * 滑动落点往前的过冲比例（格）。0.3 是"取整/数过界"两种换算都不会多算一格的上限。
@@ -1809,17 +1834,14 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
         /**
          * 快速模式的手势时长。
          *
-         * 滑动**保持和普通模式一样的 320ms**：更短的滑动（试过 200）会让手指数到的格子数
-         * 对不上 —— 手势按路径匀速插值，时间压短后游戏还没跟上就已经抬手，整条砖挪不到位。
-         * 提速全靠省掉"截屏识别 + 等动画"，不靠压手势。点击间隔 140→90 是安全的（再短会被
-         * 当成双击/连点）。
+         * 滑动时长与普通模式共用 [SWIPE_MS_PER_CELL]（按格数算，两种模式一样）；
+         * 这里只压"点击"：45ms 一下、间隔 90ms（再短会被当成双击/连点）。
          */
-        const val FAST_SWIPE_MS = 320L
         const val FAST_TAP_MS = 45L
         const val FAST_TAP_GAP_MS = 90L
 
-        /** 快速模式两条手势之间的间隔：给游戏时间把上一步的消除动画起手演出来，别整串点全被吞。 */
-        const val FAST_STEP_GAP_MS = 180L
+        /** 快速模式两条手势之间的间隔：给游戏时间处理上一步的消除，别整串点全被吞。 */
+        const val FAST_STEP_GAP_MS = 200L
 
         /** 无解继续模式下，一步都走不动时的重试间隔。 */
         const val UNSOLVABLE_RETRY_MS = 3000L

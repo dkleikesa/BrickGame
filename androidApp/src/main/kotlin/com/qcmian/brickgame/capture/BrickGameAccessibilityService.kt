@@ -197,43 +197,115 @@ class BrickGameAccessibilityService : AccessibilityService(), ScreenshotProvider
 
     /**
      * 滑到落点后再点一下配对砖：滑完那块砖同时对齐两块同款砖时，游戏会让玩家二选一。
+     *
+     * 滑动那一段同样要"到落点按住再抬手"（见 [swipe]），所以整条链是：
+     * 滑到位（续接手势，见 [dispatchSwipeWithHold]）→ 抬手 → 等 [gapMs] → 点配对砖。
+     * 不支持续接手势的系统退回旧行为：一次滑动 + 同一条手势里定时补点。
      */
     override fun swipeThenTap(
         x1: Float, y1: Float, x2: Float, y2: Float,
         tapX: Float, tapY: Float,
-        durationMs: Long, tapMs: Long, gapMs: Long, onDone: (Boolean) -> Unit,
+        durationMs: Long, holdMs: Long, tapMs: Long, gapMs: Long, onDone: (Boolean) -> Unit,
     ) {
-        val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
         val tap = Path().apply { moveTo(tapX, tapY) }
-        val swipeMs = durationMs.coerceAtLeast(1L)
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, swipeMs))
-            .addStroke(
-                GestureDescription.StrokeDescription(
-                    tap, swipeMs + gapMs.coerceAtLeast(1L), tapMs.coerceAtLeast(1L),
-                ),
-            )
-            .build()
-        dispatch(gesture, "滑动($x1,$y1 → $x2,$y2)+点($tapX,$tapY)", onDone)
+        val tapHold = tapMs.coerceAtLeast(1L)
+        if (!supportsHold(holdMs)) {
+            val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+            val swipeMs = durationMs.coerceAtLeast(1L)
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0L, swipeMs))
+                .addStroke(
+                    GestureDescription.StrokeDescription(
+                        tap, swipeMs + gapMs.coerceAtLeast(1L), tapHold,
+                    ),
+                )
+                .build()
+            dispatch(gesture, "滑动($x1,$y1 → $x2,$y2)+点($tapX,$tapY)", onDone)
+            return
+        }
+        dispatchSwipeWithHold(x1, y1, x2, y2, durationMs, holdMs, "滑动($x1,$y1 → $x2,$y2)") { swiped ->
+            if (!swiped) {
+                onDone(false)
+                return@dispatchSwipeWithHold
+            }
+            mainHandler.postDelayed({
+                dispatch(
+                    GestureDescription.Builder()
+                        .addStroke(GestureDescription.StrokeDescription(tap, 0L, tapHold))
+                        .build(),
+                    "点配对砖($tapX,$tapY)",
+                    onDone,
+                )
+            }, gapMs.coerceAtLeast(1L))
+        }
     }
 
     /**
-     * 自动运行的手势出口：`dispatchGesture` 合成一次滑动。
+     * 自动运行的手势出口：`dispatchGesture` 合成一次滑动，**到落点按住 [holdMs] 再抬手**。
      *
      * 用于"两块没有对齐"的情况：把一块砖滑到落点，靠游戏自己判定对齐后消除。
      */
     override fun swipe(
-        x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long, onDone: (Boolean) -> Unit,
+        x1: Float, y1: Float, x2: Float, y2: Float,
+        durationMs: Long, holdMs: Long, onDone: (Boolean) -> Unit,
     ) {
-        val path = Path().apply {
-            moveTo(x1, y1)
-            lineTo(x2, y2)
+        if (!supportsHold(holdMs)) {
+            val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(
+                    GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(1L)),
+                )
+                .build()
+            dispatch(gesture, "滑动($x1,$y1 → $x2,$y2)", onDone)
+            return
         }
-        val gesture = GestureDescription.Builder()
-            // willContinue=false：一次独立的手势，后面还要接着发下一次，别被合成一条长滑
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(1L)))
-            .build()
-        dispatch(gesture, "滑动($x1,$y1 → $x2,$y2)", onDone)
+        dispatchSwipeWithHold(x1, y1, x2, y2, durationMs, holdMs, "滑动($x1,$y1 → $x2,$y2)", onDone)
+    }
+
+    /** 续接手势要 API 26（[GestureDescription.StrokeDescription.continueStroke]）；holdMs=0 就当不需要。 */
+    private fun supportsHold(holdMs: Long): Boolean =
+        holdMs > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+
+    /**
+     * 滑到位之后**手指不抬、原地停 holdMs**，再抬手。
+     *
+     * 为什么必须拆两段：无障碍手势的 MOVE 是按**路径长度**匀速插值的，时长与路径长度成正比 ——
+     * 终点之后没有长度，也就没有时间，一条 stroke 里根本表达不出"停住"。所以第一段用
+     * willContinue=true 走到落点（不抬手），紧接着派一条 continueStroke 在原地按住 holdMs。
+     *
+     * 时序：续接段是**排队**的，会在第一段结束时接上；startTime 用 0 表示"紧接着上一段"。
+     * 回调只挂在续接段上（带 willContinue 的第一段不会走 onCompleted）。
+     *
+     * 失败兜底：第一段派发被拒就直接 onDone(false)；续接段被拒时只能记日志 ——
+     * 指针还按着，系统会在这个手势超时后自行取消，我们没有"强行抬手"的接口。
+     */
+    private fun dispatchSwipeWithHold(
+        x1: Float, y1: Float, x2: Float, y2: Float,
+        durationMs: Long, holdMs: Long, what: String,
+        onDone: (Boolean) -> Unit,
+    ) {
+        val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        val first = GestureDescription.StrokeDescription(
+            path, 0L, durationMs.coerceAtLeast(1L), true,
+        )
+        val queued = try {
+            dispatchGesture(GestureDescription.Builder().addStroke(first).build(), null, null)
+        } catch (t: Throwable) {
+            Log.w(TAG, "手势派发异常：$what", t)
+            false
+        }
+        if (!queued) {
+            Log.w(TAG, "手势派发被拒：$what")
+            onDone(false)
+            return
+        }
+        val holdPath = Path().apply { moveTo(x2, y2) }
+        val hold = first.continueStroke(holdPath, 0L, holdMs.coerceAtLeast(1L), false)
+        dispatch(
+            GestureDescription.Builder().addStroke(hold).build(),
+            "$what + 落点按住 ${holdMs}ms",
+            onDone,
+        )
     }
 
     /**
