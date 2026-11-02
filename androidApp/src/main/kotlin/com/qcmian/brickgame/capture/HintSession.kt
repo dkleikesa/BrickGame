@@ -317,6 +317,18 @@ class HintSession(
     private val gesturePending = AtomicBoolean(false)
 
     /**
+     * 手势序号：每发一次手势 +1。
+     *
+     * 为什么需要：快速模式一步接一步，**上一步的看门狗还挂在主线程队列里**。它到点后会抢走
+     * 当前那次手势的 [gesturePending]，把人家当成"回调超时"，于是又补派一步 —— 手势叠手势，
+     * 越到后面越乱（滑得越远 gestureMs 越大，看门狗到得越晚，越容易跨过好几步才响）。
+     */
+    private var gestureSeq = 0
+
+    /** 当前这次手势的看门狗；手势回调先到就把它摘掉，别让它到点后再动一次。 */
+    private var gestureWatchdog: Runnable? = null
+
+    /**
      * 上一帧已经画出去的调试图层。
      *
      * 控制条上的信息开关（网格 + 类别号）是**即时生效**的：点一下直接拿这一帧重画，
@@ -1217,13 +1229,15 @@ class HintSession(
         planIndex++
         autoSteps++
         fastSinceCalibration++
-        fastState = BoardState(
+        val next = BoardState(
             state.rows,
             state.cols,
             IntArray(state.labels.size) { after[it / state.cols][it % state.cols] },
         )
+        fastState = next
         HintUiBus.state = HintUiBus.state.copy(autoSteps = autoSteps)
-        playAction(scan, state, action, "快速 $current/$total 步") { fastNext() }
+        // 剩余块数按**这一步之后**的推演盘面算：连点时不会再识别，用出手前的盘面会一直多 2 块
+        playAction(scan, state, action, "快速 $current/$total 步", countBricks(next)) { fastNext() }
     }
 
     /** 快速模式下一条手势完成后：还有额度就接着点，否则排一次校准帧。 */
@@ -1323,6 +1337,11 @@ class HintSession(
         action: IntArray,
         note: String? = null,
         /**
+         * 状态行"剩 N 块"用的数字。默认按出手前的盘面算（普通模式）；
+         * 快速模式传**推演后**的盘面 —— 那一步已经算进 [autoSteps] 了，再用出手前的数会多 2 块。
+         */
+        remainingBricks: Int = countBricks(state),
+        /**
          * 非空 = 快速模式：手势一完成就立刻执行它（接着点下一步），不等下一帧识别；
          * 这一步的"有没有落地"改由校准帧统一复检（见 [checkFastCalibration]）。
          */
@@ -1396,11 +1415,13 @@ class HintSession(
         }
 
         val gen = generation.get()
+        // 这一次手势的序号：看门狗到点时只有在"还是当前这一次"才作数（见 [gestureSeq]）
+        val seq = ++gestureSeq
         // 普通模式记下配对砖那一格，下一帧 [autoAdvance] 拿它复检有没有真的落地；
         // 快速模式不逐帧复检，改由校准帧统一查（见 [checkFastCalibration]）
         if (onDone == null) pendingPair = CellPoint(pr, pc)
         // 坐标/滑动方向屏幕上看得到，不再写进状态行；只报"还剩多少块"
-        updateBar(note ?: "执行中", "剩 ${countBricks(state)} 块")
+        updateBar(note ?: "执行中", "剩 $remainingBricks 块")
 
         // 手势发出去之后要排下一帧。步数不在这里记 —— 要等下一帧复检确认真的消掉了才算
         // （见 [autoAdvance]），否则"没生效的手势"也会被算成战果。
@@ -1413,7 +1434,10 @@ class HintSession(
             }
         }
         val settle: (Boolean, String) -> Unit = { done, why ->
-            if (gesturePending.compareAndSet(true, false)) {
+            if (seq == gestureSeq && gesturePending.compareAndSet(true, false)) {
+                // 回调先到：把看门狗摘掉，免得它到点后误判成"超时"再推一步
+                gestureWatchdog?.let { main.removeCallbacks(it) }
+                gestureWatchdog = null
                 if (!done) Log.w(TAG, "手势未正常完成（$why）：($x1,$y1)→($x2,$y2)")
                 advance()
             }
@@ -1437,7 +1461,9 @@ class HintSession(
             }
         }
         // 看门狗：回调迟迟不来也别把闭环停死（复检不符的兜底会拦住"反复空推"）
-        main.postDelayed({ settle(false, "回调超时") }, gestureMs + GESTURE_TIMEOUT_MS)
+        val watchdog = Runnable { settle(false, "回调超时") }
+        gestureWatchdog = watchdog
+        main.postDelayed(watchdog, gestureMs + GESTURE_TIMEOUT_MS)
     }
 
     /**
@@ -1450,14 +1476,18 @@ class HintSession(
      * （取整 1.3→1，过界也没多跨一个格子），同时给游戏的跟手插值留出追上来的时间。
      */
     /**
-     * 这一步滑动的时长（ms）：按走了几格算，每格 [SWIPE_MS_PER_CELL]。
+     * 这一步滑动的时长（ms）：按走了几格算，每格 [SWIPE_MS_PER_CELL]，**最低 [SWIPE_MS_MIN]**。
      *
      * 距离用格数而不是像素：同一块屏上横竖 pitch 略有差异，格数是游戏真正的换算单位。
      * 加上落点过冲的 0.3 格 —— 那段也要走，时间得给够，否则最后一点距离会被压缩成瞬移。
+     *
+     * 为什么要保底 200ms：短距离（1~4 格）按 45ms/格 只有 59~194ms，MOVE 事件只摊到一两个，
+     * 系统会当成 fling、游戏也没跟上（真机表现就是"滑了没消"）。按格算只用来让**长距离**
+     * 不变态地快，短距离统一按 200ms 走。
      */
     private fun swipeMsFor(dRow: Int, dCol: Int): Long {
         val cells = (abs(dRow) + abs(dCol)).toFloat() + SWIPE_OVERSHOOT
-        return (cells * SWIPE_MS_PER_CELL).roundToLong().coerceAtLeast(1L)
+        return (cells * SWIPE_MS_PER_CELL).roundToLong().coerceAtLeast(SWIPE_MS_MIN)
     }
 
     private fun overshoot(scan: BoardScan, rect: CellRect, dRow: Int, dCol: Int): Pair<Float, Float> {
@@ -1777,7 +1807,7 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
         const val MAX_SPLIT_DEPTH = 4
 
         /**
-         * 滑动时长的计算口径：**每走一格 35ms**，不再用固定时长。
+         * 滑动时长的计算口径：**每走一格 45ms，最低 200ms**，不再用固定时长。
          *
          * 为什么按距离算：固定时长下，滑 1 格和滑 6 格用的是同一个速度 —— 短距离慢得发飘、
          * 长距离快得跟不上。按格数摊时间后，手指在任何距离上的移动速度都一致，游戏那边
@@ -1785,7 +1815,10 @@ private fun solvedOf(steps: List<IntArray>): AutoSolver.Outcome.Solved =
          *
          * 距离取 |格数| + [SWIPE_OVERSHOOT]（落点还要多推 0.3 格，见 [overshoot]）。
          */
-        const val SWIPE_MS_PER_CELL = 35L
+        const val SWIPE_MS_PER_CELL = 45L
+
+        /** 滑动时长的下限：短距离别被压成"瞬移"，MOVE 事件太少会被系统当 fling 丢掉。 */
+        const val SWIPE_MS_MIN = 200L
 
         /**
          * 滑到落点后手指不抬、原地停住的时间。
